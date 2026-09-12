@@ -22,12 +22,12 @@ camera scan to begin.
 ## HUD states
 
 - **Approve face verification** — camera remains off until approval.
-- **Looking for you** — animated face scanner while Howdy runs.
-- **Verified** — brief green confirmation before sudo continues.
-- **Not recognized** — brief red state, then use the normal password prompt.
+- **Looking for you** — a scanning arc sweeps the mark while Howdy runs.
+- **Verified** — the arc closes into a green ring before sudo continues.
+- **Not recognized** — a brief red shake, then the normal password prompt.
 
 The spacing and hierarchy are governed by the measured [layout contract](DESIGN.md),
-including the 8-point grid and real-desktop visual QA checklist.
+including the grid, concentric radii, and spring-based motion choreography.
 
 ## Install
 
