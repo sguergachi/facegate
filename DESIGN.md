@@ -49,8 +49,7 @@ secondary label, `#1c1c1e` secondary fill; cyan `#64d2ff` for scanning, green
   the scanning comet, evens its tail, and closes it into a green ring with no
   redraw or swap; the small pulse lands as it closes. State blends always start
   from the values on screen, so a result arriving mid-transition cannot jump.
-  Failure
-  pulse; failure turns red with a short, decaying shake.
+  Failure turns red with a short, decaying shake.
 - **Exit:** content fades in 160 ms, then the island retracts into the bezel
   on a critically damped spring.
 
