@@ -29,10 +29,11 @@ from gi.repository import Gdk, GLib, Gtk, Gtk4LayerShell  # noqa: E402
 from .protocol import MAX_MESSAGE_BYTES, decode, encode
 
 
-ISLAND_WIDTH = 416
-ISLAND_HEIGHT = 376
-COLLAPSED_WIDTH = 172
-COLLAPSED_HEIGHT = 48
+# Keep the expanded experience compact: an island, never a modal card.
+ISLAND_WIDTH = 352
+ISLAND_HEIGHT = 300
+COLLAPSED_WIDTH = 150
+COLLAPSED_HEIGHT = 44
 SOCKET_NAME = "facegate.sock"
 
 
@@ -62,8 +63,8 @@ class LivingFace(Gtk.DrawingArea):
 
     def __init__(self) -> None:
         super().__init__()
-        self.set_content_width(128)
-        self.set_content_height(128)
+        self.set_content_width(104)
+        self.set_content_height(104)
         self.phase = 0.0
         self.state = "approval"
         self.previous_state = "approval"
@@ -94,7 +95,8 @@ class LivingFace(Gtk.DrawingArea):
         bob = math.sin(orbit * 0.62) * (1.0 + scan * 0.8)
         tilt = math.sin(orbit * (0.75 + scan * 1.6)) * (0.7 + scan * 1.5)
         look = math.sin(orbit * (0.7 + scan * 1.8)) * look_range
-        context.translate(width / 2, height / 2 + bob)
+        context.scale(width / 128, height / 128)
+        context.translate(64, 64 + bob)
         context.rotate(math.radians(tilt))
         context.translate(-64, -64)
 
@@ -188,10 +190,15 @@ class EdgeHud:
 
         self._install_css()
         root = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
-        root.set_halign(Gtk.Align.CENTER)
+        root.add_css_class("facegate-root")
+        root.set_hexpand(True)
+        root.set_halign(Gtk.Align.FILL)
         root.set_valign(Gtk.Align.START)
         self.canvas = Gtk.Overlay()
+        self.canvas.add_css_class("facegate-canvas")
         self.canvas.set_size_request(ISLAND_WIDTH, ISLAND_HEIGHT)
+        self.canvas.set_halign(Gtk.Align.CENTER)
+        self.canvas.set_valign(Gtk.Align.START)
         self.backdrop = Gtk.DrawingArea()
         self.backdrop.set_draw_func(self._draw_island)
         self.canvas.set_child(self.backdrop)
@@ -202,27 +209,27 @@ class EdgeHud:
         self.content.set_size_request(ISLAND_WIDTH, ISLAND_HEIGHT)
         self.content.set_halign(Gtk.Align.CENTER)
         self.content.set_valign(Gtk.Align.START)
-        self.content.set_margin_top(20)
-        self.content.set_margin_start(32)
-        self.content.set_margin_end(32)
+        self.content.set_margin_top(14)
+        self.content.set_margin_start(24)
+        self.content.set_margin_end(24)
         self.canvas.add_overlay(self.content)
-        self.eyebrow = Gtk.Label(label="FACE VERIFICATION")
+        self.eyebrow = Gtk.Label(label="FACE VERIFY")
         self.eyebrow.add_css_class("eyebrow")
         self.content.append(self.eyebrow)
         self.face = LivingFace()
         self.face.set_halign(Gtk.Align.CENTER)
         self.content.append(self.face)
-        self.title = Gtk.Label(label="Approve face verification")
+        self.title = Gtk.Label(label="Verify with Face")
         self.title.add_css_class("title")
         self.content.append(self.title)
-        self.detail = Gtk.Label(label="Your camera stays off until you approve.")
+        self.detail = Gtk.Label(label="Camera starts only after approval.")
         self.detail.set_wrap(True)
         self.detail.set_justify(Gtk.Justification.CENTER)
         self.detail.add_css_class("detail")
         self.content.append(self.detail)
         self.content.append(Gtk.Box())
         actions = Gtk.Box(spacing=10)
-        self.password = Gtk.Button(label="Use password")
+        self.password = Gtk.Button(label="Password")
         self.password.add_css_class("password")
         self.approve = Gtk.Button(label="Approve")
         self.approve.add_css_class("approve")
@@ -238,12 +245,16 @@ class EdgeHud:
     def _install_css() -> None:
         css = Gtk.CssProvider()
         css.load_from_string("""
-            window { background: transparent; }
+            window, .facegate-root, .facegate-canvas, overlay {
+                background: transparent;
+                background-image: none;
+                box-shadow: none;
+            }
             label { color: #f5f5f7; }
             .eyebrow { color: #8e8e93; font-size: 10px; font-weight: 700; letter-spacing: 1.6px; }
-            .title { font-size: 20px; font-weight: 700; }
-            .detail { color: #a1a1a6; font-size: 13px; }
-            button { min-height: 44px; border-radius: 15px; font-size: 14px; font-weight: 600; }
+            .title { font-size: 18px; font-weight: 700; }
+            .detail { color: #a1a1a6; font-size: 12px; }
+            button { min-height: 40px; border-radius: 14px; font-size: 13px; font-weight: 600; }
             button.approve { background: #f5f5f7; color: #000000; border: none; }
             button.approve:hover { background: #ffffff; }
             button.password { background: #1c1c1e; color: #f5f5f7; border: none; }
@@ -257,7 +268,7 @@ class EdgeHud:
         island_height = COLLAPSED_HEIGHT + (ISLAND_HEIGHT - COLLAPSED_HEIGHT) * eased
         x = (width - island_width) / 2
         y = -34 * (1 - eased)
-        rounded_path(context, x, y, island_width, island_height, 26)
+        rounded_path(context, x, y, island_width, island_height, 24)
         context.set_source_rgb(0.0, 0.0, 0.0)
         context.fill()
 
@@ -290,8 +301,8 @@ class EdgeHud:
 
     def present_approval(self) -> None:
         self.face.set_state("approval")
-        self.title.set_text("Approve face verification")
-        self.detail.set_text("Your camera stays off until you approve.")
+        self.title.set_text("Verify with Face")
+        self.detail.set_text("Camera starts only after approval.")
         self.password.set_visible(True)
         self.approve.set_visible(True)
         self._show()
