@@ -22,13 +22,25 @@ from PyQt6.QtCore import (
     QEasingCurve,
     QObject,
     QPointF,
+    QRect,
     QRectF,
     Qt,
     QTimer,
+    QPropertyAnimation,
     pyqtSignal,
 )
 from PyQt6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPainterPath, QPen
-from PyQt6.QtWidgets import QApplication, QDialog, QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import (
+    QApplication,
+    QDialog,
+    QFrame,
+    QGraphicsOpacityEffect,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 from .protocol import MAX_MESSAGE_BYTES, decode, encode
 
@@ -53,7 +65,7 @@ class FaceGlyph(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setFixedSize(152, 152)
+        self.setFixedSize(128, 128)
         self._state = "approval"
         self._phase = 0.0
         self._timer = QTimer(self)
@@ -72,12 +84,12 @@ class FaceGlyph(QWidget):
         del event
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        rect = QRectF(15, 15, 122, 122)
+        rect = QRectF(13, 13, 102, 102)
         colors = {
-            "approval": QColor("#8bb8ff"),
-            "scanning": QColor("#5eead4"),
-            "success": QColor("#72e0a1"),
-            "failure": QColor("#ff8a9a"),
+            "approval": QColor("#f5f5f7"),
+            "scanning": QColor("#b7f7ff"),
+            "success": QColor("#e9fff0"),
+            "failure": QColor("#ffb4bd"),
         }
         accent = colors.get(self._state, colors["approval"])
 
@@ -91,37 +103,37 @@ class FaceGlyph(QWidget):
         pen = QPen(accent, 3.2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
         painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        corner = 23.0
+        corner = 21.0
         # The four open scanner corners.
-        for x, y, dx, dy in ((15, 15, 1, 1), (137, 15, -1, 1), (15, 137, 1, -1), (137, 137, -1, -1)):
+        for x, y, dx, dy in ((13, 13, 1, 1), (115, 13, -1, 1), (13, 115, 1, -1), (115, 115, -1, -1)):
             painter.drawLine(QPointF(x, y), QPointF(x + dx * corner, y))
             painter.drawLine(QPointF(x, y), QPointF(x, y + dy * corner))
 
         if self._state == "success":
-            painter.drawLine(QPointF(47, 79), QPointF(68, 100))
-            painter.drawLine(QPointF(68, 100), QPointF(108, 55))
+            painter.drawLine(QPointF(39, 66), QPointF(58, 85))
+            painter.drawLine(QPointF(58, 85), QPointF(94, 44))
             return
         if self._state == "failure":
-            painter.drawLine(QPointF(55, 55), QPointF(97, 97))
-            painter.drawLine(QPointF(97, 55), QPointF(55, 97))
+            painter.drawLine(QPointF(45, 45), QPointF(83, 83))
+            painter.drawLine(QPointF(83, 45), QPointF(45, 83))
             return
 
         # A friendly, abstract face instead of a camera preview.
         face = QPainterPath()
-        face.addRoundedRect(QRectF(51, 44, 50, 63), 22, 22)
+        face.addRoundedRect(QRectF(43, 36, 42, 54), 19, 19)
         painter.setPen(QPen(QColor(232, 245, 255, 210), 2.2))
         painter.drawPath(face)
-        painter.drawPoint(QPointF(67, 70))
-        painter.drawPoint(QPointF(85, 70))
-        painter.drawArc(QRectF(66, 75, 20, 15), 10 * 16, 160 * 16)
+        painter.drawPoint(QPointF(56, 58))
+        painter.drawPoint(QPointF(72, 58))
+        painter.drawArc(QRectF(55, 63, 18, 13), 10 * 16, 160 * 16)
         if self._state == "scanning":
-            scan_y = 32 + self._phase * 89
-            scan = QLinearGradient(28, scan_y, 124, scan_y)
+            scan_y = 27 + self._phase * 74
+            scan = QLinearGradient(25, scan_y, 103, scan_y)
             scan.setColorAt(0, QColor(accent.red(), accent.green(), accent.blue(), 0))
             scan.setColorAt(0.5, accent)
             scan.setColorAt(1, QColor(accent.red(), accent.green(), accent.blue(), 0))
             painter.setPen(QPen(scan, 2.4))
-            painter.drawLine(QPointF(28, scan_y), QPointF(124, scan_y))
+            painter.drawLine(QPointF(25, scan_y), QPointF(103, scan_y))
 
 
 @dataclass
@@ -144,33 +156,54 @@ class FaceGateDialog(QDialog):
             | Qt.WindowType.Tool
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setFixedSize(390, 454)
+        self.setFixedWidth(416)
+        self.setMinimumHeight(52)
+        self.setMaximumHeight(390)
+        self._expanded_height = 376
+        self._collapsed_height = 52
+        self._geometry_animation = QPropertyAnimation(self, b"geometry", self)
+        self._geometry_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._content_animation: QPropertyAnimation | None = None
+        self._exit_animation: QPropertyAnimation | None = None
 
         shell = QFrame(self)
         shell.setObjectName("shell")
         shell.setStyleSheet(
-            "QFrame#shell { background: rgba(13, 20, 34, 246); border: 1px solid rgba(166, 205, 255, 100);"
-            " border-radius: 28px; } QLabel { color: #f4f8ff; }"
-            "QPushButton { border-radius: 14px; padding: 12px 22px; font-weight: 650; font-size: 15px; }"
-            "QPushButton#approve { background: #dff2ff; color: #102033; }"
+            "QFrame#shell { background: #000000; border: 1px solid rgba(255, 255, 255, 38); border-radius: 26px; }"
+            "QLabel { color: #f5f5f7; }"
+            "QPushButton { border-radius: 15px; padding: 12px 20px; font-weight: 600; font-size: 14px; }"
+            "QPushButton#approve { background: #f5f5f7; color: #000000; }"
             "QPushButton#approve:hover { background: #ffffff; }"
-            "QPushButton#cancel { background: transparent; color: #b6c5d9; }"
+            "QPushButton#approve:pressed { background: #d5d5d7; }"
+            "QPushButton#cancel { background: #1c1c1e; color: #f5f5f7; }"
+            "QPushButton#cancel:hover { background: #2c2c2e; }"
         )
         layout = QVBoxLayout(shell)
-        layout.setContentsMargins(34, 28, 34, 28)
-        layout.setSpacing(12)
+        layout.setContentsMargins(32, 18, 32, 24)
+        layout.setSpacing(10)
+        self.content = QWidget()
+        self.content_effect = QGraphicsOpacityEffect(self.content)
+        self.content_effect.setOpacity(1.0)
+        self.content.setGraphicsEffect(self.content_effect)
+        content_layout = QVBoxLayout(self.content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(10)
+        self.eyebrow = QLabel("FACE VERIFICATION")
+        self.eyebrow.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.eyebrow.setStyleSheet("color: #8e8e93; font-size: 10px; font-weight: 700; letter-spacing: 1.6px;")
+        content_layout.addWidget(self.eyebrow)
         self.glyph = FaceGlyph()
-        layout.addWidget(self.glyph, 0, Qt.AlignmentFlag.AlignHCenter)
+        content_layout.addWidget(self.glyph, 0, Qt.AlignmentFlag.AlignHCenter)
         self.title = QLabel("Approve face verification")
         self.title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.title.setFont(QFont("Sans Serif", 19, QFont.Weight.DemiBold))
-        layout.addWidget(self.title)
+        self.title.setFont(QFont("Sans Serif", 20, QFont.Weight.DemiBold))
+        content_layout.addWidget(self.title)
         self.detail = QLabel("FaceGate will use your camera only after you approve.")
         self.detail.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.detail.setWordWrap(True)
-        self.detail.setStyleSheet("color: #b9c7d9; font-size: 13px;")
-        layout.addWidget(self.detail)
-        layout.addStretch(1)
+        self.detail.setStyleSheet("color: #a1a1a6; font-size: 13px;")
+        content_layout.addWidget(self.detail)
+        content_layout.addSpacing(4)
         self.buttons = QWidget()
         row = QHBoxLayout(self.buttons)
         row.setContentsMargins(0, 0, 0, 0)
@@ -180,35 +213,104 @@ class FaceGateDialog(QDialog):
         self.approve.setObjectName("approve")
         row.addWidget(self.cancel)
         row.addWidget(self.approve)
-        layout.addWidget(self.buttons)
+        content_layout.addWidget(self.buttons)
+        layout.addWidget(self.content)
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(shell)
         self.approve.clicked.connect(self.approved)
         self.cancel.clicked.connect(self.rejected)
 
-    def show_approval(self) -> None:
-        self.glyph.set_state("approval")
-        self.title.setText("Approve face verification")
-        self.detail.setText("FaceGate will use your camera only after you approve.")
-        self.buttons.show()
+    def _geometry(self, height: int, y_offset: int = 0) -> QRect:
+        screen = self.screen() or QApplication.primaryScreen()
+        area = screen.availableGeometry()
+        return QRect(area.x() + (area.width() - self.width()) // 2, area.y() + 8 + y_offset, self.width(), height)
+
+    def _set_copy(self, state: str, title: str, detail: str, buttons: bool, animate: bool = True) -> None:
+        def apply() -> None:
+            self.glyph.set_state(state)
+            self.title.setText(title)
+            self.detail.setText(detail)
+            self.buttons.setVisible(buttons)
+
+        if not animate or not self.isVisible():
+            apply()
+            return
+        if self._content_animation:
+            self._content_animation.stop()
+        fade_out = QPropertyAnimation(self.content_effect, b"opacity", self)
+        fade_out.setDuration(115)
+        fade_out.setStartValue(self.content_effect.opacity())
+        fade_out.setEndValue(0.18)
+        fade_out.setEasingCurve(QEasingCurve.Type.InOutCubic)
+
+        def fade_in() -> None:
+            apply()
+            fade = QPropertyAnimation(self.content_effect, b"opacity", self)
+            fade.setDuration(210)
+            fade.setStartValue(0.18)
+            fade.setEndValue(1.0)
+            fade.setEasingCurve(QEasingCurve.Type.OutCubic)
+            self._content_animation = fade
+            fade.start()
+
+        fade_out.finished.connect(fade_in)
+        self._content_animation = fade_out
+        fade_out.start()
+
+    def _arrive(self) -> None:
+        self._exit_animation = None
+        self.content_effect.setOpacity(0.0)
+        self.setGeometry(self._geometry(self._collapsed_height, -32))
         self.show()
         self.raise_()
         self.activateWindow()
+        self._geometry_animation.stop()
+        self._geometry_animation.setDuration(620)
+        self._geometry_animation.setStartValue(self.geometry())
+        self._geometry_animation.setEndValue(self._geometry(self._expanded_height))
+        self._geometry_animation.start()
+        fade = QPropertyAnimation(self.content_effect, b"opacity", self)
+        fade.setDuration(340)
+        fade.setStartValue(0.0)
+        fade.setEndValue(1.0)
+        fade.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._content_animation = fade
+        QTimer.singleShot(170, fade.start)
+
+    def _depart(self) -> None:
+        self._geometry_animation.stop()
+        self._geometry_animation.setDuration(380)
+        self._geometry_animation.setStartValue(self.geometry())
+        self._geometry_animation.setEndValue(self._geometry(self._collapsed_height, -30))
+        self._geometry_animation.setEasingCurve(QEasingCurve.Type.InCubic)
+        self._geometry_animation.finished.connect(self.close)
+        self._geometry_animation.start()
+        fade = QPropertyAnimation(self.content_effect, b"opacity", self)
+        fade.setDuration(180)
+        fade.setStartValue(self.content_effect.opacity())
+        fade.setEndValue(0.0)
+        self._exit_animation = fade
+        fade.start()
+
+    def show_approval(self) -> None:
+        self._set_copy("approval", "Approve face verification", "Your camera stays off until you approve.", True, self.isVisible())
+        if not self.isVisible():
+            self._arrive()
 
     def show_scanning(self) -> None:
-        self.glyph.set_state("scanning")
-        self.title.setText("Looking for you")
-        self.detail.setText("Keep your face in view. You can still use your password if this does not work.")
-        self.buttons.hide()
-        self.show()
+        self._set_copy("scanning", "Looking for you", "Hold still for a moment.", False)
+        if not self.isVisible():
+            self._arrive()
 
     def show_result(self, success: bool) -> None:
-        self.glyph.set_state("success" if success else "failure")
-        self.title.setText("Verified" if success else "Not recognized")
-        self.detail.setText("Continuing securely." if success else "Face verification ended. Your password prompt is ready.")
-        self.buttons.hide()
-        QTimer.singleShot(900 if success else 1400, self.close)
+        self._set_copy(
+            "success" if success else "failure",
+            "Verified" if success else "Not recognized",
+            "Continuing securely." if success else "Use your password instead.",
+            False,
+        )
+        QTimer.singleShot(880 if success else 1350, self._depart)
 
 
 class HudServer(QObject):
