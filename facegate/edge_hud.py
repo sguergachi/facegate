@@ -402,7 +402,9 @@ class EdgeHud:
         self.close.set_opacity(0)
 
         hover = Gtk.EventControllerMotion()
-        hover.connect("enter", lambda *_: self._set_hover(True))
+        # Reveal on real pointer movement, not on "enter": the island growing
+        # under a resting cursor also produces an enter event.
+        hover.connect("motion", lambda *_: self._set_hover(True))
         hover.connect("leave", lambda *_: self._set_hover(False))
         self.window.add_controller(hover)
 
@@ -533,6 +535,8 @@ class EdgeHud:
         if not self.visible:
             return
         shown = hovered and not self.departing
+        if shown == (self.close_alpha.target == 1.0):
+            return
         self.close_alpha.to(1.0 if shown else 0.0, self.now, 0.18 if shown else 0.24, 0.0 if shown else 0.12)
         self.close.set_can_target(shown)
 
