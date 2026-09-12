@@ -31,6 +31,10 @@ camera scan to begin.
 Requirements: an active KDE/Wayland graphical session, Howdy already working
 for `sudo`, `pam-python`, Python 3, GTK 4, and `gtk4-layer-shell`.
 
+On Arch/KDE, the supplied user service preloads the installed layer-shell
+library so the GTK introspection binding receives the layer role before GTK
+connects to Wayland.
+
 ```bash
 cd ~/Dev/facegate
 sudo ./install.sh
