@@ -66,6 +66,7 @@ class LivingFace(Gtk.DrawingArea):
         self.set_content_width(104)
         self.set_content_height(104)
         self.phase = 0.0
+        self.elapsed = 0.0
         self.state = "approval"
         self.previous_state = "approval"
         self.transition = 1.0
@@ -78,6 +79,7 @@ class LivingFace(Gtk.DrawingArea):
             self.transition = 0.0
 
     def advance(self, elapsed: float) -> None:
+        self.elapsed += elapsed
         self.phase = (self.phase + elapsed * (1.05 if self.state == "scanning" else 0.48)) % 1.0
         self.transition = min(1.0, self.transition + elapsed * 5.2)
         self.queue_draw()
@@ -92,17 +94,28 @@ class LivingFace(Gtk.DrawingArea):
     def _draw(self, _area: Gtk.DrawingArea, context: Any, width: int, height: int) -> None:
         color, smile, open_eyes, look_range, scan = self._values()
         orbit = self.phase * math.tau
-        bob = math.sin(orbit * 0.62) * (1.0 + scan * 0.8)
-        tilt = math.sin(orbit * (0.75 + scan * 1.6)) * (0.7 + scan * 1.5)
+        # An unhurried blink at rest makes the character feel present. During a
+        # search it blinks less, as if it is concentrating on the scan.
+        blink_period = 3.9 if scan < 0.5 else 5.3
+        blink_phase = (self.elapsed % blink_period) / blink_period
+        blink = 1.0
+        if 0.78 < blink_phase < 0.86:
+            blink = abs(blink_phase - 0.82) / 0.04
+        eye_open *= max(0.08, blink)
+        bob = math.sin(orbit * 0.62) * (0.75 + scan * 1.1)
+        tilt = math.sin(orbit * (0.75 + scan * 1.6)) * (0.5 + scan * 1.8)
+        # Searching is a sequence of small, deliberate looks—not a jitter.
         look = math.sin(orbit * (0.7 + scan * 1.8)) * look_range
+        if scan > 0.5:
+            look += math.sin(orbit * 0.47) * 1.4
         context.scale(width / 128, height / 128)
         context.translate(64, 64 + bob)
         context.rotate(math.radians(tilt))
         context.translate(-64, -64)
 
         # Subtle halo; it breathes rather than flashing.
-        context.set_source_rgba(*color, 0.10 + scan * 0.13)
-        context.arc(64, 64, 58 + math.sin(orbit) * 1.5, 0, math.tau)
+        context.set_source_rgba(*color, 0.08 + scan * 0.16)
+        context.arc(64, 64, 56 + math.sin(orbit * 0.65) * (1.0 + scan * 1.8), 0, math.tau)
         context.fill()
 
         context.set_line_cap(1)
@@ -133,6 +146,9 @@ class LivingFace(Gtk.DrawingArea):
             context.arc(eye_x + look * 0.22, 58, 2.6, 0, math.tau)
             context.set_source_rgba(*color, 1.0)
             context.fill()
+            context.arc(eye_x + look * 0.22 + 0.7, 57.2, 0.65, 0, math.tau)
+            context.set_source_rgba(1.0, 1.0, 1.0, 0.92)
+            context.fill()
         context.move_to(54, 76)
         context.curve_to(59, 76 + 8 * smile, 69, 76 + 8 * smile, 74, 76)
         context.set_line_width(2.0)
@@ -148,6 +164,13 @@ class LivingFace(Gtk.DrawingArea):
             context.set_line_width(1.6)
             context.set_source_rgba(*color, 0.82 * scan)
             context.stroke()
+            # A second, quiet focus pulse arrives only at the end of each pass.
+            focus = max(0.0, math.sin(orbit * 2.0)) * scan
+            if focus > 0:
+                context.arc(64, 64, 47 + focus * 4, 0, math.tau)
+                context.set_line_width(0.9)
+                context.set_source_rgba(*color, focus * 0.30)
+                context.stroke()
             context.restore()
             y = 27 + self.phase * 74
             gradient = __import__("cairo").LinearGradient(25, y, 103, y)
