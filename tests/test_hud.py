@@ -2,7 +2,7 @@ import unittest
 
 import cairo
 
-from facegate.edge_hud import ISLAND_WIDTH, MarkModel, Spring, Tween, island_path, paint_mark
+from facegate.edge_hud import ISLAND_WIDTH, MARK_PROFILES, MarkModel, Spring, Tween, island_path, mark_values, paint_mark
 from facegate.hud import approval_timeout_ms
 
 
@@ -19,8 +19,38 @@ class HudRequestTests(unittest.TestCase):
             for state in states:
                 for transition in (0.0, 0.5, 1.0):
                     surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 72, 72)
-                    model = MarkModel(state, previous, transition, 1.2, 0.2, 0.37)
+                    model = MarkModel(state, MARK_PROFILES[previous], transition, 1.2, 0.2, 0.37)
                     paint_mark(cairo.Context(surface), 72, model)
+
+    def test_ring_completion_is_continuous_frame_to_frame(self):
+        """Scanning to success must never pop.
+
+        The moving head changes a little every frame, so measure each frame's
+        total change: a seam shows up as one frame far above the rest (the old
+        comet-to-ring swap measured over 30x the median).
+        """
+        model = MarkModel("success", MARK_PROFILES["scanning"], 0.0, 0.0, 0.0, 0.3)
+        previous = None
+        energies = []
+        for _ in range(110):
+            model.transition = min(1.0, model.transition + 1 / (0.55 * 144))
+            model.spin = (model.spin + mark_values(model)[-1] / 144) % 1.0
+            model.state_elapsed += 1 / 144
+            model.elapsed += 1 / 144
+            surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 72, 72)
+            paint_mark(cairo.Context(surface), 72, model)
+            alpha = bytes(surface.get_data())[3::4]
+            if previous is not None:
+                energies.append(sum(abs(a - b) for a, b in zip(alpha, previous)))
+            previous = alpha
+        median = sorted(energies)[len(energies) // 2]
+        self.assertLess(max(energies), 4 * median)
+
+    def test_state_change_mid_transition_starts_from_what_is_visible(self):
+        model = MarkModel("scanning", MARK_PROFILES["approval"], 0.4)
+        visible = mark_values(model)
+        model.origin, model.state, model.transition = visible, "success", 0.0
+        self.assertEqual(mark_values(model), visible)
 
 
 class MotionTests(unittest.TestCase):

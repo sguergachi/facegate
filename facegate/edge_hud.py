@@ -162,36 +162,77 @@ def island_path(context: Any, center: float, width: float, height: float) -> Non
     context.close_path()
 
 
+MARK_STATE_SECONDS = 0.55
+RING_SECTORS = 72
+
+# r, g, b, idle ring alpha, arc length (turns), arc alpha, solidity (0 = comet
+# tail, 1 = even ring), smile, eye openness, spin (turns/s)
+MARK_PROFILES = {
+    "approval": (*WHITE, 0.16, 0.0, 0.0, 0.0, 0.55, 1.0, 0.0),
+    "scanning": (0.39, 0.82, 1.00, 0.08, 0.28, 1.0, 0.0, 0.2, 0.92, 0.85),
+    "success": (0.19, 0.82, 0.35, 0.0, 1.0, 1.0, 1.0, 1.0, 0.9, 0.0),
+    "failure": (1.00, 0.27, 0.23, 0.0, 1.0, 0.9, 1.0, -0.3, 0.85, 0.0),
+}
+
+
 @dataclass
 class MarkModel:
     """Everything needed to paint one frame of the presence mark."""
 
     state: str = "approval"
-    previous: str = "approval"
+    # The values on screen when the state last changed, so a new state always
+    # blends from exactly what was visible, even mid-transition.
+    origin: tuple[float, ...] | None = None
     transition: float = 1.0
     elapsed: float = 0.0
     state_elapsed: float = 10.0
     spin: float = 0.0
 
 
-# colour, idle ring alpha, arc length (turns), arc alpha, smile, eye openness, spin (turns/s)
-MARK_PROFILES = {
-    "approval": (WHITE, 0.16, 0.0, 0.0, 0.55, 1.0, 0.0),
-    "scanning": ((0.39, 0.82, 1.00), 0.08, 0.28, 1.0, 0.2, 0.92, 0.85),
-    "success": ((0.19, 0.82, 0.35), 0.0, 1.0, 1.0, 1.0, 0.9, 0.0),
-    "failure": ((1.00, 0.27, 0.23), 0.0, 1.0, 0.9, -0.3, 0.85, 0.0),
-}
+def mark_values(model: MarkModel) -> tuple[float, ...]:
+    target = MARK_PROFILES[model.state]
+    origin = model.origin or target
+    amount = smoothstep(clamp(model.transition))
+    return tuple(mix(before, after, amount) for before, after in zip(origin, target))
+
+
+def ring_pattern(color: tuple[float, float, float], head: float, length: float, alpha: float, solidity: float, radius: float) -> Any:
+    """A conic gradient along the ring, brightest at the head.
+
+    One continuous mesh means one stroke: there are no segment joints, and a
+    comet that grows to a full, even ring is the same drawing throughout.
+    """
+    def opacity(behind: float) -> float:
+        if length <= 0:
+            return 0.0
+        comet = clamp(1 - behind / length) ** 1.8
+        # The tail edge glides continuously instead of stepping by sector.
+        edge = clamp((length - behind) * RING_SECTORS + 1)
+        return alpha * mix(comet, 1.0, solidity) * edge
+
+    inner, outer = radius - 3, radius + 3
+    mesh = cairo.MeshPattern()
+    previous_angle, previous_alpha = head, opacity(0.0)
+    for index in range(1, RING_SECTORS + 1):
+        behind = index / RING_SECTORS
+        angle = head - behind * math.tau
+        value = opacity(behind) if index < RING_SECTORS or length >= 1 else 0.0
+        mesh.begin_patch()
+        mesh.move_to(math.cos(previous_angle) * outer, math.sin(previous_angle) * outer)
+        mesh.line_to(math.cos(angle) * outer, math.sin(angle) * outer)
+        mesh.line_to(math.cos(angle) * inner, math.sin(angle) * inner)
+        mesh.line_to(math.cos(previous_angle) * inner, math.sin(previous_angle) * inner)
+        for corner, corner_alpha in ((0, previous_alpha), (1, value), (2, value), (3, previous_alpha)):
+            mesh.set_corner_color_rgba(corner, *color, corner_alpha)
+        mesh.end_patch()
+        previous_angle, previous_alpha = angle, value
+    return mesh
 
 
 def paint_mark(context: Any, size: float, model: MarkModel) -> None:
     """Paint a friendly abstract sensing mark: a lens ring with two lights."""
-    before = MARK_PROFILES[model.previous]
-    after = MARK_PROFILES[model.state]
-    amount = smoothstep(clamp(model.transition))
-    color = tuple(mix(before[0][index], after[0][index], amount) for index in range(3))
-    ring_alpha, arc_length, arc_alpha, smile, eyes, _spin = (
-        mix(before[index], after[index], amount) for index in range(1, 7)
-    )
+    r, g, b, ring_alpha, arc_length, arc_alpha, solidity, smile, eyes, _spin = mark_values(model)
+    color = (r, g, b)
     face = tuple(mix(WHITE[index], color[index], 0.3) for index in range(3))
     unit = MARK_SIZE + 2 * MARK_BLEED
     context.save()
@@ -202,10 +243,10 @@ def paint_mark(context: Any, size: float, model: MarkModel) -> None:
     if model.state == "failure":
         shake = 4.0 * math.sin(model.state_elapsed * math.tau * 5.5) * math.exp(-model.state_elapsed * 6.5)
     elif model.state == "success":
-        scale = 1.0 + 0.05 * math.sin(math.pi * clamp(model.state_elapsed / 0.42))
+        # The pulse lands as the ring closes, not before.
+        scale += 0.04 * math.sin(math.pi * clamp((model.state_elapsed - 0.32) / 0.45))
     context.translate(unit / 2 + shake, unit / 2)
     context.scale(scale, scale)
-    context.set_line_cap(cairo.LINE_CAP_ROUND)
 
     ring = MARK_SIZE / 2 - 2
     if ring_alpha > 0.005:
@@ -214,32 +255,23 @@ def paint_mark(context: Any, size: float, model: MarkModel) -> None:
         context.set_source_rgba(*color, ring_alpha)
         context.stroke()
     if arc_alpha > 0.005 and arc_length > 0.002:
+        head = model.spin * math.tau - math.pi / 2
+        context.set_source(ring_pattern(color, head, min(arc_length, 1.0), arc_alpha, solidity, ring))
         context.set_line_width(2.5)
-        if arc_length >= 0.995:
-            context.arc(0, 0, ring, 0, math.tau)
-            context.set_source_rgba(*color, arc_alpha)
-            context.stroke()
-        else:
-            # A comet: brightest at the head, fading along its tail.
-            head = model.spin * math.tau - math.pi / 2
-            sweep = arc_length * math.tau
-            segments = 32
-            context.set_line_cap(cairo.LINE_CAP_BUTT)
-            for index in range(segments):
-                start = head - sweep * (1 - index / segments)
-                end = head - sweep * (1 - (index + 1) / segments)
-                context.arc(0, 0, ring, start, end + 0.01)
-                context.set_source_rgba(*color, arc_alpha * ((index + 1) / segments) ** 1.8)
-                context.stroke()
+        context.arc(0, 0, ring, 0, math.tau)
+        context.stroke()
+        # A rounded head, fading away as the ring becomes even.
+        cap = arc_alpha * (1 - solidity) * clamp(arc_length * 20)
+        if cap > 0.005:
             context.arc(math.cos(head) * ring, math.sin(head) * ring, 1.25, 0, math.tau)
-            context.set_source_rgba(*color, arc_alpha)
+            context.set_source_rgba(*color, cap)
             context.fill()
 
     blink = 1.0
-    if model.state in ("approval", "scanning"):
-        phase = (model.elapsed % 4.6) / 4.6
-        if 0.9 < phase < 0.95:
-            blink = max(0.1, abs(phase - 0.925) / 0.025)
+    phase = (model.elapsed % 4.6) / 4.6
+    if 0.9 < phase < 0.95:
+        # Results settle the eyes open smoothly rather than snapping mid-blink.
+        blink = mix(max(0.1, abs(phase - 0.925) / 0.025), 1.0, solidity)
     look = math.sin(model.elapsed * 1.7) * 1.4 * arc_alpha * (1 - arc_length)
     for eye_x in (-6.5, 6.5):
         context.save()
@@ -271,18 +303,18 @@ class PresenceMark(Gtk.DrawingArea):
         model = self.model
         if state == model.state:
             return
-        model.previous = model.state if animate else state
+        model.origin = mark_values(model) if animate else None
         model.state = state
         model.transition = 0.0 if animate else 1.0
         model.state_elapsed = 0.0
 
     def advance(self, elapsed: float) -> None:
         model = self.model
-        speed = mix(MARK_PROFILES[model.previous][6], MARK_PROFILES[model.state][6], smoothstep(model.transition))
+        speed = mark_values(model)[-1]
         model.elapsed += elapsed
         model.state_elapsed += elapsed
         model.spin = (model.spin + speed * elapsed) % 1.0
-        model.transition = min(1.0, model.transition + elapsed / 0.5)
+        model.transition = min(1.0, model.transition + elapsed / MARK_STATE_SECONDS)
         self.queue_draw()
 
 
