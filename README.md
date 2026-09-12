@@ -26,6 +26,9 @@ camera scan to begin.
 - **Verified** — the arc closes into a green ring before sudo continues.
 - **Not recognized** — a brief red shake, then the normal password prompt.
 
+Hover the island to reveal a close button (or press Escape) if you want to
+cancel or it ever lingers.
+
 The spacing and hierarchy are governed by the measured [layout contract](DESIGN.md),
 including the grid, concentric radii, and spring-based motion choreography.
 

@@ -49,3 +49,12 @@ secondary label, `#1c1c1e` secondary fill; cyan `#64d2ff` for scanning, green
   pulse; failure turns red with a short, decaying shake.
 - **Exit:** content fades in 160 ms, then the island retracts into the bezel
   on a critically damped spring.
+
+## Close
+
+A 28 pt round close button sits 16 pt from the island's top and right edges.
+It fades in over 180 ms while the pointer is over the island and fades out
+120 ms after it leaves, so it never competes with the two primary choices.
+Close (or Escape) declines a pending approval, which falls back to the
+password prompt, or dismisses any other state. The island then stays hidden
+for the rest of that attempt, even if Howdy reports a result afterwards.

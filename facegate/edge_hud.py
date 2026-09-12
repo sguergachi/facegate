@@ -51,6 +51,7 @@ COPY_TO_ACTIONS = 24
 BUTTON_HEIGHT = 44
 BUTTON_GAP = 8
 STATUS_BOTTOM = 28
+CLOSE_SIZE = 28
 ISLAND_RADIUS = BUTTON_HEIGHT // 2 + INSET
 SHOULDER = 10
 COLLAPSED_WIDTH = 124
@@ -333,6 +334,7 @@ class EdgeHud:
         self.pending: PendingApproval | None = None
         self.approval_timeout: int | None = None
         self.dismiss_timeout: int | None = None
+        self.silenced = False
         self.visible = False
         self.departing = False
         self.view: View | None = None
@@ -381,6 +383,28 @@ class EdgeHud:
         for item in self.items:
             self.layer.put(item.widget, 0, 0)
             item.widget.set_opacity(0)
+
+        # A quiet escape hatch that appears only while the pointer is over the
+        # island, so it never competes with the primary choice.
+        glyph = Gtk.DrawingArea()
+        glyph.set_content_width(CLOSE_SIZE)
+        glyph.set_content_height(CLOSE_SIZE)
+        glyph.set_draw_func(self._draw_close_glyph)
+        self.close = Gtk.Button(child=glyph)
+        self.close.add_css_class("close")
+        self.close.set_size_request(CLOSE_SIZE, CLOSE_SIZE)
+        self.close.set_focus_on_click(False)
+        self.close.set_can_target(False)
+        self.close.update_property([Gtk.AccessibleProperty.LABEL], ["Close"])
+        self.close.connect("clicked", lambda *_: self.cancel())
+        self.close_alpha = Tween()
+        self.layer.put(self.close, 0, 0)
+        self.close.set_opacity(0)
+
+        hover = Gtk.EventControllerMotion()
+        hover.connect("enter", lambda *_: self._set_hover(True))
+        hover.connect("leave", lambda *_: self._set_hover(False))
+        self.window.add_controller(hover)
 
         keys = Gtk.EventControllerKey()
         keys.connect("key-pressed", self._on_key)
@@ -451,6 +475,16 @@ class EdgeHud:
             button.secondary:hover { background-color: #2c2c2e; }
             button.secondary:active { background-color: #3a3a3c; }
             button:focus-visible { outline: 2px solid rgba(255, 255, 255, 0.4); outline-offset: 2px; }
+            button.close {
+                min-width: 28px;
+                min-height: 28px;
+                padding: 0;
+                border-radius: 14px;
+                background-color: #1c1c1e;
+                color: #98989d;
+            }
+            button.close:hover { background-color: #2c2c2e; color: #f5f5f7; }
+            button.close:active { background-color: #3a3a3c; color: #f5f5f7; }
         """)
         Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
 
@@ -487,6 +521,33 @@ class EdgeHud:
         covered_down = clamp((self.height.value - item.y - item.height) / 12 + 1)
         covered_across = clamp((self.width.value - item.width) / 32 + 1)
         item.widget.set_opacity(alpha * covered_down * covered_across)
+
+    def _place_close(self) -> None:
+        x = (SURFACE_WIDTH + ISLAND_WIDTH) / 2 - INSET - CLOSE_SIZE
+        self.layer.set_child_transform(self.close, Gsk.Transform().translate(Graphene.Point().init(x, INSET)))
+        covered_down = clamp((self.height.value - INSET - CLOSE_SIZE) / 12 + 1)
+        covered_across = clamp((self.width.value - ISLAND_WIDTH) / 16 + 1)
+        self.close.set_opacity(self.close_alpha.value(self.now) * covered_down * covered_across)
+
+    def _set_hover(self, hovered: bool) -> None:
+        if not self.visible:
+            return
+        shown = hovered and not self.departing
+        self.close_alpha.to(1.0 if shown else 0.0, self.now, 0.18 if shown else 0.24, 0.0 if shown else 0.12)
+        self.close.set_can_target(shown)
+
+    @staticmethod
+    def _draw_close_glyph(area: Gtk.DrawingArea, context: Any, width: int, height: int) -> None:
+        color = area.get_color()
+        context.set_source_rgba(color.red, color.green, color.blue, color.alpha)
+        context.set_line_width(1.75)
+        context.set_line_cap(cairo.LINE_CAP_ROUND)
+        half = 4.5
+        context.move_to(width / 2 - half, height / 2 - half)
+        context.line_to(width / 2 + half, height / 2 + half)
+        context.move_to(width / 2 + half, height / 2 - half)
+        context.line_to(width / 2 - half, height / 2 + half)
+        context.stroke()
 
     # Choreography -----------------------------------------------------------
 
@@ -535,6 +596,8 @@ class EdgeHud:
         self.mark.set_state(view.state, animate=False)
         for item in self.items:
             item.alpha = Tween()
+        self.close_alpha = Tween()
+        self.close.set_can_target(False)
         self.width.value, self.width.velocity = COLLAPSED_WIDTH, 0.0
         self.height.value, self.height.velocity = 0.0, 0.0
         self.width.configure(0.5, 0.8)
@@ -555,8 +618,10 @@ class EdgeHud:
         self.scheduled.clear()
         self.approve.set_sensitive(False)
         self.password.set_sensitive(False)
+        self.close.set_can_target(False)
         for item in self.items:
             item.alpha.to(0, self.now, 0.16)
+        self.close_alpha.to(0, self.now, 0.16)
 
         def collapse(_now: float) -> None:
             self.width.configure(0.42, 1.0)
@@ -573,8 +638,8 @@ class EdgeHud:
             # Re-base the timeline on the first real frame after presenting.
             shift = now - self.now
             self.scheduled = [(time + shift, action) for time, action in self.scheduled]
-            for item in self.items:
-                item.alpha.start += shift
+            for tween in [item.alpha for item in self.items] + [self.close_alpha]:
+                tween.start += shift
             self.last_frame = now
         elapsed = min(now - self.last_frame, 1 / 30)
         self.last_frame = now
@@ -589,6 +654,7 @@ class EdgeHud:
         self.mark.advance(elapsed)
         for item in self.items:
             self._place(item)
+        self._place_close()
         self.backdrop.queue_draw()
         self._update_input_region()
 
@@ -598,6 +664,7 @@ class EdgeHud:
             and self.height.target == 0
             and self.height.value < 0.5
             and all(item.alpha.done(now) for item in self.items)
+            and self.close_alpha.done(now)
         ):
             self.window.set_visible(False)
             self.visible = False
@@ -628,28 +695,43 @@ class EdgeHud:
         context.fill()
 
     def _on_key(self, _controller: Any, keyval: int, _keycode: int, _state: Any) -> bool:
-        if not self.pending:
-            return False
-        if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
+        if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter) and self.pending:
             self.resolve(True)
             return True
-        if keyval == Gdk.KEY_Escape:
-            self.resolve(False)
+        if keyval == Gdk.KEY_Escape and self.visible:
+            self.cancel()
             return True
         return False
+
+    def cancel(self) -> None:
+        """Close on the user's request: decline any pending approval and stay
+        hidden for the rest of this attempt, even if Howdy reports back later."""
+        self.silenced = True
+        if self.dismiss_timeout:
+            GLib.source_remove(self.dismiss_timeout)
+            self.dismiss_timeout = None
+        if self.pending:
+            self.resolve(False)
+        else:
+            self.dismiss()
 
     # Protocol ---------------------------------------------------------------
 
     def present_approval(self) -> None:
+        self.silenced = False
         self._present(APPROVAL)
 
     def present_scanning(self) -> None:
         # Howdy cannot be interrupted once running, so no action is offered.
         # If sudo is cancelled mid-scan no result ever arrives; never linger.
+        if self.silenced:
+            return
         self._present(SCANNING)
         self.dismiss_timeout = GLib.timeout_add(SCAN_WATCHDOG_MS, self.dismiss)
 
     def present_result(self, success: bool) -> None:
+        if self.silenced:
+            return
         self._present(SUCCESS if success else FAILURE)
         self.dismiss_timeout = GLib.timeout_add(1100 if success else 1600, self.dismiss)
 
