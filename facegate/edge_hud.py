@@ -195,7 +195,10 @@ class EdgeHud:
         self.window = Gtk.Window()
         self.window.set_decorated(False)
         self.window.set_resizable(False)
-        self.window.set_default_size(1, ISLAND_HEIGHT)
+        # A zero requested width is the layer-shell contract for a surface
+        # stretched between left and right anchors. Giving GTK the island's
+        # natural width made KWin place that small surface at the output's left.
+        self.window.set_default_size(0, ISLAND_HEIGHT)
         Gtk4LayerShell.init_for_window(self.window)
         Gtk4LayerShell.set_layer(self.window, Gtk4LayerShell.Layer.OVERLAY)
         Gtk4LayerShell.set_anchor(self.window, Gtk4LayerShell.Edge.TOP, True)
