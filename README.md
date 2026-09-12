@@ -26,6 +26,9 @@ camera scan to begin.
 - **Verified** — brief green confirmation before sudo continues.
 - **Not recognized** — brief red state, then use the normal password prompt.
 
+The spacing and hierarchy are governed by the measured [layout contract](DESIGN.md),
+including the 8-point grid and real-desktop visual QA checklist.
+
 ## Install
 
 Requirements: an active KDE/Wayland graphical session, Howdy already working

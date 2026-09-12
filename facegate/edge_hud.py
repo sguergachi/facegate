@@ -33,7 +33,7 @@ from .protocol import MAX_MESSAGE_BYTES, decode, encode
 # in the middle of the desktop. Its portrait proportion makes that movement
 # feel intentional, like an expanding hardware cutout.
 ISLAND_WIDTH = 360
-ISLAND_HEIGHT = 342
+ISLAND_HEIGHT = 320
 COLLAPSED_WIDTH = 118
 COLLAPSED_HEIGHT = 34
 SOCKET_NAME = "facegate.sock"
@@ -119,6 +119,11 @@ class LivingFace(Gtk.DrawingArea):
         context.translate(64, 64 + bob)
         context.rotate(math.radians(tilt))
         context.translate(-64, -64)
+        # The visual glyph needs to occupy more of its small layout cell than
+        # a conventional icon; this is optical centering, not extra padding.
+        context.translate(64, 64)
+        context.scale(1.35, 1.35)
+        context.translate(-64, -64)
 
         # Two soft lights and one open smile, floating directly on the island.
         # No disc, visor, or enclosing contour: a character should feel like a
@@ -146,7 +151,7 @@ class LivingFace(Gtk.DrawingArea):
             # Searching is communicated by three gentle satellites, not by a
             # scanner line across the face. Their cadence is intentionally
             # slow, so it reads as attention rather than alarm.
-            for offset, radius, alpha in ((0.0, 34, 0.88), (2.18, 40, 0.48), (4.36, 46, 0.22)):
+            for offset, radius, alpha in ((0.0, 30, 0.88), (2.18, 36, 0.48), (4.36, 42, 0.22)):
                 theta = orbit + offset
                 pulse = 0.65 + 0.35 * math.sin(orbit * 1.8 + offset)
                 context.arc(64 + math.cos(theta) * radius, 64 + math.sin(theta) * radius, 2.2 + pulse, 0, math.tau)
@@ -208,17 +213,17 @@ class EdgeHud:
         self.content.set_valign(Gtk.Align.CENTER)
         self.content.set_margin_start(24)
         self.content.set_margin_end(24)
-        self.content.set_margin_top(20)
-        self.content.set_margin_bottom(18)
+        self.content.set_margin_top(24)
+        self.content.set_margin_bottom(24)
         self.canvas.add_overlay(self.content)
         self.face = LivingFace()
-        self.face.set_content_width(92)
-        self.face.set_content_height(92)
+        self.face.set_content_width(64)
+        self.face.set_content_height(64)
         self.face.set_halign(Gtk.Align.CENTER)
         self.content.append(self.face)
         copy = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         copy.set_halign(Gtk.Align.CENTER)
-        copy.set_margin_top(7)
+        copy.set_margin_top(8)
         self.title = Gtk.Label(label="Verify with Face")
         self.title.set_halign(Gtk.Align.CENTER)
         self.title.set_xalign(0.5)
@@ -231,14 +236,14 @@ class EdgeHud:
         self.detail.add_css_class("detail")
         copy.append(self.detail)
         self.content.append(copy)
-        actions = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=7)
-        actions.set_margin_top(15)
+        actions = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        actions.set_margin_top(24)
         self.password = Gtk.Button(label="Use password")
         self.password.add_css_class("password")
         self.approve = Gtk.Button(label="Approve & start camera")
         self.approve.add_css_class("approve")
-        self.password.set_size_request(-1, 31)
-        self.approve.set_size_request(-1, 43)
+        self.password.set_size_request(-1, 44)
+        self.approve.set_size_request(-1, 44)
         actions.append(self.approve)
         actions.append(self.password)
         self.content.append(actions)
@@ -273,9 +278,9 @@ class EdgeHud:
                 box-shadow: none;
             }
             label { color: #f5f5f7; }
-            .title { font-size: 17px; font-weight: 700; }
+            .title { font-size: 17px; font-weight: 600; }
             .detail { color: #a1a1a6; font-size: 12px; }
-            button { border-radius: 15px; font-size: 12px; font-weight: 650; }
+            button { border-radius: 16px; font-size: 13px; font-weight: 600; }
             button.approve { background: #f5f5f7; color: #000000; border: none; }
             button.approve label { color: #000000; }
             button.approve:hover { background: #ffffff; }
