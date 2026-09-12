@@ -45,5 +45,9 @@ runuser -u "${target_user}" -- env \
   XDG_RUNTIME_DIR="/run/user/${target_uid}" \
   DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${target_uid}/bus" \
   systemctl --user enable --now facegate.service
+runuser -u "${target_user}" -- env \
+  XDG_RUNTIME_DIR="/run/user/${target_uid}" \
+  DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${target_uid}/bus" \
+  systemctl --user restart facegate.service
 
 echo "FaceGate installed. Test with: sudo -k; sudo -v"

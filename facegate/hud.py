@@ -43,6 +43,11 @@ def default_socket_path() -> Path:
     return Path(runtime) / SOCKET_NAME
 
 
+def approval_timeout_ms(value: object) -> int:
+    """Keep a PAM-provided consent timeout inside a humane, safe range."""
+    return max(1_000, min(int(value), 30_000))
+
+
 class FaceGlyph(QWidget):
     """A lightweight animated scanner glyph: idle, scanning, success, error."""
 
@@ -275,7 +280,7 @@ class FaceGateApp(QObject):
                 return
             self.pending = PendingApproval(connection, request_id)
             self.dialog.show_approval()
-            self.approval_timeout.start(max(1_000, min(int(message.get("timeout_ms", 12_000), 30_000))))
+            self.approval_timeout.start(approval_timeout_ms(message.get("timeout_ms", 12_000)))
             return
         if phase == "scanning":
             self.reply(connection, {"ok": True})
