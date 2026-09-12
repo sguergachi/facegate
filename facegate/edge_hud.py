@@ -825,10 +825,68 @@ class HudServer:
             connection.close()
 
 
+class Demo:
+    """Loops the real request flow without PAM, Howdy, or the camera.
+
+    Approve pretends to scan, then alternates success and failure. Use
+    Password, close, or Escape decline. A new request follows each ending.
+    """
+
+    SCAN_MS = 2_400
+    PAUSE_MS = 2_500
+
+    def __init__(self, hud: EdgeHud) -> None:
+        self.hud = hud
+        self.succeed = True
+        self.reader: socket.socket | None = None
+
+    def start(self) -> None:
+        print("[demo] FaceGate test mode — Approve, Use Password, hover to close, or Esc. Ctrl+C quits.", flush=True)
+        GLib.timeout_add(600, self._request)
+
+    def _request(self) -> bool:
+        writer, self.reader = socket.socketpair()
+        self.reader.setblocking(False)
+        print("[demo] requesting approval", flush=True)
+        self.hud.handle_request({"id": "demo", "phase": "approval", "timeout_ms": 30_000}, writer)
+        GLib.timeout_add(50, self._await_reply)
+        return False
+
+    def _await_reply(self) -> bool:
+        try:
+            raw = self.reader.recv(MAX_MESSAGE_BYTES)
+        except BlockingIOError:
+            return True
+        self.reader.close()
+        approved = bool(raw) and decode(raw.split(b"\n", 1)[0]).get("approved") is True
+        if not approved:
+            print("[demo] declined — next request shortly", flush=True)
+            GLib.timeout_add(self.PAUSE_MS, self._request)
+            return False
+        print("[demo] approved — simulating a scan", flush=True)
+        GLib.timeout_add(self.SCAN_MS, self._finish)
+        return False
+
+    def _finish(self) -> bool:
+        success, self.succeed = self.succeed, not self.succeed
+        print("[demo] result: %s" % ("success" if success else "failure"), flush=True)
+        self.hud.present_result(success)
+        GLib.timeout_add(self.PAUSE_MS + 1_600, self._request)
+        return False
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="FaceGate top-edge layer-shell HUD")
     parser.add_argument("--socket", type=Path, default=default_socket_path())
+    parser.add_argument("--demo", action="store_true", help="loop the HUD flow without PAM or the camera")
     args = parser.parse_args()
+    if args.demo:
+        hud = EdgeHud()
+        Demo(hud).start()
+        try:
+            return GLib.MainLoop().run() or 0
+        except KeyboardInterrupt:
+            return 0
     args.socket.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     args.socket.unlink(missing_ok=True)
     hud = EdgeHud()

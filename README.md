@@ -55,13 +55,24 @@ the PAM file. To revert:
 sudo ./uninstall.sh
 ```
 
+## Test mode
+
+Run the HUD from this checkout without PAM, Howdy, or the camera. It loops the
+real flow (approve → simulated scan → alternating success/failure; decline via
+Use Password, the hover close button, or Escape) and does not touch the
+installed service:
+
+```bash
+scripts/demo.sh
+```
+
 ## Development checks
 
 ```bash
 PYTHONPATH=. python3 -m unittest discover -s tests -v
 python3 -m py_compile facegate/*.py
 python2 -m py_compile pam/facegate-pam.py
-shellcheck install.sh uninstall.sh
+shellcheck install.sh uninstall.sh scripts/demo.sh
 ```
 
 ## Security model
