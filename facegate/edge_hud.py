@@ -29,11 +29,13 @@ from gi.repository import Gdk, GLib, Gtk, Gtk4LayerShell  # noqa: E402
 from .protocol import MAX_MESSAGE_BYTES, decode, encode
 
 
-# Keep the expanded experience compact: an island, never a modal card.
-ISLAND_WIDTH = 420
-ISLAND_HEIGHT = 118
-COLLAPSED_WIDTH = 132
-COLLAPSED_HEIGHT = 38
+# This is deliberately a downward, top-edge interaction—not a dialog placed
+# in the middle of the desktop. Its portrait proportion makes that movement
+# feel intentional, like an expanding hardware cutout.
+ISLAND_WIDTH = 360
+ISLAND_HEIGHT = 342
+COLLAPSED_WIDTH = 118
+COLLAPSED_HEIGHT = 34
 SOCKET_NAME = "facegate.sock"
 
 
@@ -52,7 +54,12 @@ def rounded_path(context: Any, x: float, y: float, width: float, height: float, 
 
 
 class LivingFace(Gtk.DrawingArea):
-    """The iconic FaceGate character, animated at the display's frame cadence."""
+    """A warm, abstract presence mark animated at the display's frame cadence.
+
+    It intentionally has no enclosing head, visor, or camera-frame. Those
+    shapes read as a mask at a glance; two calm lights and a small smile carry
+    the friendly character more quietly.
+    """
 
     PROFILES = {
         "approval": ((0.96, 0.96, 0.98), 0.18, 1.0, 2.0, 0.0),
@@ -113,75 +120,38 @@ class LivingFace(Gtk.DrawingArea):
         context.rotate(math.radians(tilt))
         context.translate(-64, -64)
 
-        # Subtle halo; it breathes rather than flashing.
-        context.set_source_rgba(*color, 0.08 + scan * 0.16)
-        context.arc(64, 64, 56 + math.sin(orbit * 0.65) * (1.0 + scan * 1.8), 0, math.tau)
-        context.fill()
-
-        context.set_line_cap(1)
-        context.set_line_width(3.2)
-        context.set_source_rgba(*color, 1.0)
-        for x, y, dx, dy in ((14, 14, 1, 1), (114, 14, -1, 1), (14, 114, 1, -1), (114, 114, -1, -1)):
-            context.move_to(x, y)
-            context.line_to(x + dx * 21, y)
-            context.move_to(x, y)
-            context.line_to(x, y + dy * 21)
-        context.stroke()
-
-        # Friendly, abstract face: it never previews or stores camera imagery.
-        rounded_path(context, 42, 35, 44, 57, 20)
-        context.set_source_rgba(0.025, 0.025, 0.03, 1.0)
-        context.fill_preserve()
-        context.set_line_width(2.0)
-        context.set_source_rgba(0.96, 0.96, 0.98, 0.88)
-        context.stroke()
+        # Two soft lights and one open smile, floating directly on the island.
+        # No disc, visor, or enclosing contour: a character should feel like a
+        # companion, never like a surveillance mask.
         eye_height = max(3.0, 12 * open_eyes)
-        for eye_x in (56, 72):
-            rounded_path(context, eye_x - 10, 58 - eye_height / 2, 20, eye_height, eye_height / 2)
-            context.set_source_rgba(0.025, 0.025, 0.03, 1.0)
-            context.fill_preserve()
-            context.set_line_width(1.7)
-            context.set_source_rgba(*color, 0.9)
-            context.stroke()
-            context.arc(eye_x + look * 0.22, 58, 2.6, 0, math.tau)
+        for eye_x in (54, 74):
+            context.save()
+            context.translate(eye_x + look * 0.22, 57)
+            context.scale(1.0, eye_height / 12)
+            context.arc(0, 0, 4.4, 0, math.tau)
             context.set_source_rgba(*color, 1.0)
             context.fill()
-            context.arc(eye_x + look * 0.22 + 0.7, 57.2, 0.65, 0, math.tau)
+            context.arc(1.1, -1.0, 0.85, 0, math.tau)
             context.set_source_rgba(1.0, 1.0, 1.0, 0.92)
             context.fill()
-        context.move_to(54, 76)
-        context.curve_to(59, 76 + 8 * smile, 69, 76 + 8 * smile, 74, 76)
-        context.set_line_width(2.0)
+            context.restore()
+        context.move_to(53, 75)
+        context.curve_to(58, 75 + 10 * smile, 70, 75 + 10 * smile, 75, 75)
+        context.set_line_width(2.4)
+        context.set_line_cap(1)
         context.set_source_rgba(*color, 1.0)
         context.stroke()
 
         if scan > 0.01:
-            context.save()
-            context.translate(64, 64)
-            context.rotate(orbit)
-            context.translate(-64, -64)
-            context.arc(64, 64, 40, math.radians(-38), math.radians(50))
-            context.set_line_width(1.6)
-            context.set_source_rgba(*color, 0.82 * scan)
-            context.stroke()
-            # A second, quiet focus pulse arrives only at the end of each pass.
-            focus = max(0.0, math.sin(orbit * 2.0)) * scan
-            if focus > 0:
-                context.arc(64, 64, 47 + focus * 4, 0, math.tau)
-                context.set_line_width(0.9)
-                context.set_source_rgba(*color, focus * 0.30)
-                context.stroke()
-            context.restore()
-            y = 27 + self.phase * 74
-            gradient = __import__("cairo").LinearGradient(25, y, 103, y)
-            gradient.add_color_stop_rgba(0.0, *color, 0.0)
-            gradient.add_color_stop_rgba(0.5, *color, scan)
-            gradient.add_color_stop_rgba(1.0, *color, 0.0)
-            context.set_source(gradient)
-            context.set_line_width(2.4)
-            context.move_to(25, y)
-            context.line_to(103, y)
-            context.stroke()
+            # Searching is communicated by three gentle satellites, not by a
+            # scanner line across the face. Their cadence is intentionally
+            # slow, so it reads as attention rather than alarm.
+            for offset, radius, alpha in ((0.0, 34, 0.88), (2.18, 40, 0.48), (4.36, 46, 0.22)):
+                theta = orbit + offset
+                pulse = 0.65 + 0.35 * math.sin(orbit * 1.8 + offset)
+                context.arc(64 + math.cos(theta) * radius, 64 + math.sin(theta) * radius, 2.2 + pulse, 0, math.tau)
+                context.set_source_rgba(*color, alpha * scan * pulse)
+                context.fill()
 
 
 @dataclass
@@ -195,17 +165,14 @@ class EdgeHud:
         self.window = Gtk.Window()
         self.window.set_decorated(False)
         self.window.set_resizable(False)
-        # A zero requested width is the layer-shell contract for a surface
-        # stretched between left and right anchors. Giving GTK the island's
-        # natural width made KWin place that small surface at the output's left.
-        self.window.set_default_size(0, ISLAND_HEIGHT)
+        self.window.set_default_size(ISLAND_WIDTH, ISLAND_HEIGHT)
         Gtk4LayerShell.init_for_window(self.window)
         Gtk4LayerShell.set_layer(self.window, Gtk4LayerShell.Layer.OVERLAY)
         Gtk4LayerShell.set_anchor(self.window, Gtk4LayerShell.Edge.TOP, True)
-        Gtk4LayerShell.set_anchor(self.window, Gtk4LayerShell.Edge.LEFT, True)
-        Gtk4LayerShell.set_anchor(self.window, Gtk4LayerShell.Edge.RIGHT, True)
         Gtk4LayerShell.set_exclusive_zone(self.window, -1)
         Gtk4LayerShell.set_keyboard_mode(self.window, Gtk4LayerShell.KeyboardMode.ON_DEMAND)
+        self.positioned = False
+        self.window.connect("map", self._position_on_mapped_monitor)
 
         self.reveal = 0.0
         self.departing = False
@@ -215,19 +182,16 @@ class EdgeHud:
         self.approval_timeout: int | None = None
 
         self._install_css()
-        root = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         root.add_css_class("facegate-root")
-        root.set_hexpand(True)
-        root.set_halign(Gtk.Align.FILL)
+        root.set_hexpand(False)
+        root.set_halign(Gtk.Align.CENTER)
         root.set_valign(Gtk.Align.START)
         self.canvas = Gtk.Overlay()
         self.canvas.add_css_class("facegate-canvas")
         self.canvas.set_size_request(ISLAND_WIDTH, ISLAND_HEIGHT)
-        # The layer surface spans the monitor. Let the canvas receive that full
-        # allocation, then center the only visible island inside it. A Gtk.Box
-        # otherwise packs a fixed-width child from the left edge.
-        self.canvas.set_hexpand(True)
-        self.canvas.set_halign(Gtk.Align.FILL)
+        self.canvas.set_hexpand(False)
+        self.canvas.set_halign(Gtk.Align.CENTER)
         self.canvas.set_valign(Gtk.Align.START)
         self.backdrop = Gtk.DrawingArea()
         self.backdrop.set_draw_func(self._draw_island)
@@ -235,45 +199,69 @@ class EdgeHud:
         root.append(self.canvas)
         self.window.set_child(root)
 
-        self.content = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=13)
-        self.content.set_size_request(ISLAND_WIDTH, ISLAND_HEIGHT)
+        self.content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        # Let the stack retain its natural height so Overlay can centre the
+        # complete composition; forcing it to panel height left a dead band
+        # below the buttons.
+        self.content.set_size_request(ISLAND_WIDTH, -1)
         self.content.set_halign(Gtk.Align.CENTER)
         self.content.set_valign(Gtk.Align.CENTER)
-        self.content.set_margin_start(16)
-        self.content.set_margin_end(16)
+        self.content.set_margin_start(24)
+        self.content.set_margin_end(24)
+        self.content.set_margin_top(20)
+        self.content.set_margin_bottom(18)
         self.canvas.add_overlay(self.content)
         self.face = LivingFace()
-        self.face.set_content_width(64)
-        self.face.set_content_height(64)
+        self.face.set_content_width(92)
+        self.face.set_content_height(92)
+        self.face.set_halign(Gtk.Align.CENTER)
         self.content.append(self.face)
-        copy = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        copy.set_hexpand(True)
-        copy.set_valign(Gtk.Align.CENTER)
+        copy = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        copy.set_halign(Gtk.Align.CENTER)
+        copy.set_margin_top(7)
         self.title = Gtk.Label(label="Verify with Face")
-        self.title.set_halign(Gtk.Align.START)
-        self.title.set_xalign(0)
+        self.title.set_halign(Gtk.Align.CENTER)
+        self.title.set_xalign(0.5)
         self.title.add_css_class("title")
         copy.append(self.title)
         self.detail = Gtk.Label(label="Camera starts only after approval.")
-        self.detail.set_halign(Gtk.Align.START)
-        self.detail.set_xalign(0)
+        self.detail.set_halign(Gtk.Align.CENTER)
+        self.detail.set_xalign(0.5)
         self.detail.set_wrap(True)
         self.detail.add_css_class("detail")
         copy.append(self.detail)
         self.content.append(copy)
-        actions = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
-        actions.set_valign(Gtk.Align.CENTER)
-        self.password = Gtk.Button(label="Password")
+        actions = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=7)
+        actions.set_margin_top(15)
+        self.password = Gtk.Button(label="Use password")
         self.password.add_css_class("password")
-        self.approve = Gtk.Button(label="Approve")
+        self.approve = Gtk.Button(label="Approve & start camera")
         self.approve.add_css_class("approve")
-        self.password.set_size_request(96, 25)
-        self.approve.set_size_request(96, 36)
-        actions.append(self.password)
+        self.password.set_size_request(-1, 31)
+        self.approve.set_size_request(-1, 43)
         actions.append(self.approve)
+        actions.append(self.password)
         self.content.append(actions)
         self.approve.connect("clicked", lambda *_: self.resolve(True))
         self.password.connect("clicked", lambda *_: self.resolve(False))
+
+    def _position_on_mapped_monitor(self, *_args: Any) -> None:
+        """Pin the narrow layer surface to the true center of its output."""
+        if self.positioned:
+            return
+        surface = self.window.get_surface()
+        display = Gdk.Display.get_default()
+        monitor = display.get_monitor_at_surface(surface) if surface else None
+        if not monitor:
+            GLib.idle_add(self._position_on_mapped_monitor)
+            return
+        geometry = monitor.get_geometry()
+        margin = max(0, (geometry.width - ISLAND_WIDTH) // 2)
+        Gtk4LayerShell.set_monitor(self.window, monitor)
+        Gtk4LayerShell.set_anchor(self.window, Gtk4LayerShell.Edge.LEFT, True)
+        Gtk4LayerShell.set_margin(self.window, Gtk4LayerShell.Edge.LEFT, margin)
+        self.positioned = True
+        print("[facegate] positioned %dx%d at left margin %d" % (geometry.width, geometry.height, margin), flush=True)
 
     @staticmethod
     def _install_css() -> None:
@@ -285,9 +273,9 @@ class EdgeHud:
                 box-shadow: none;
             }
             label { color: #f5f5f7; }
-            .title { font-size: 16px; font-weight: 700; }
-            .detail { color: #a1a1a6; font-size: 11px; }
-            button { border-radius: 13px; font-size: 12px; font-weight: 600; }
+            .title { font-size: 17px; font-weight: 700; }
+            .detail { color: #a1a1a6; font-size: 12px; }
+            button { border-radius: 15px; font-size: 12px; font-weight: 650; }
             button.approve { background: #f5f5f7; color: #000000; border: none; }
             button.approve label { color: #000000; }
             button.approve:hover { background: #ffffff; }
