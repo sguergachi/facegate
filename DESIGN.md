@@ -59,3 +59,10 @@ opens under a resting cursor does not reveal it) and fades out
 Close (or Escape) declines a pending approval, which falls back to the
 password prompt, or dismisses any other state. The island then stays hidden
 for the rest of that attempt, even if Howdy reports a result afterwards.
+
+## Placement
+
+Each time the island appears it asks KWin for the active output
+(`org.kde.KWin.activeOutputName`, which follows the mouse by default) and pins
+itself to the top center of that monitor. Without KWin it falls back to the
+output the compositor chooses.

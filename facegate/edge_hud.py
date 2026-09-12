@@ -30,7 +30,7 @@ gi.require_version("Gdk", "4.0")
 gi.require_version("Gsk", "4.0")
 gi.require_version("Graphene", "1.0")
 gi.require_version("Gtk4LayerShell", "1.0")
-from gi.repository import Gdk, GLib, Graphene, Gsk, Gtk, Gtk4LayerShell  # noqa: E402
+from gi.repository import Gdk, Gio, GLib, Graphene, Gsk, Gtk, Gtk4LayerShell  # noqa: E402
 
 from .protocol import MAX_MESSAGE_BYTES, decode, encode
 
@@ -422,23 +422,46 @@ class EdgeHud:
         label.set_xalign(0.5)
         return label
 
-    def _position_on_mapped_monitor(self, *_args: Any) -> None:
-        """Pin the layer surface to the true center of its output."""
-        if self.positioned:
-            return
-        surface = self.window.get_surface()
-        display = Gdk.Display.get_default()
-        monitor = display.get_monitor_at_surface(surface) if surface else None
-        if not monitor:
-            GLib.idle_add(self._position_on_mapped_monitor)
-            return
+    @staticmethod
+    def _monitor_under_pointer() -> Gdk.Monitor | None:
+        """Wayland hides the global pointer from clients, so ask KWin which
+        output is active; by default that is the one under the mouse."""
+        try:
+            bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+            reply = bus.call_sync(
+                "org.kde.KWin", "/KWin", "org.kde.KWin", "activeOutputName",
+                None, GLib.VariantType.new("(s)"), Gio.DBusCallFlags.NONE, 200, None,
+            )
+        except GLib.Error:
+            return None
+        connector = reply.unpack()[0]
+        monitors = Gdk.Display.get_default().get_monitors()
+        for index in range(monitors.get_n_items()):
+            monitor = monitors.get_item(index)
+            if monitor.get_connector() == connector:
+                return monitor
+        return None
+
+    def _pin_to(self, monitor: Gdk.Monitor) -> None:
+        """Pin the layer surface to the true center of the monitor's top edge."""
         geometry = monitor.get_geometry()
         margin = max(0, (geometry.width - SURFACE_WIDTH) // 2)
         Gtk4LayerShell.set_monitor(self.window, monitor)
         Gtk4LayerShell.set_anchor(self.window, Gtk4LayerShell.Edge.LEFT, True)
         Gtk4LayerShell.set_margin(self.window, Gtk4LayerShell.Edge.LEFT, margin)
         self.positioned = True
-        print("[facegate] positioned %dx%d at left margin %d" % (geometry.width, geometry.height, margin), flush=True)
+        print("[facegate] showing on %s (%dx%d, left margin %d)" % (monitor.get_connector(), geometry.width, geometry.height, margin), flush=True)
+
+    def _position_on_mapped_monitor(self, *_args: Any) -> None:
+        """Fallback without KWin: center on whichever output the compositor chose."""
+        if self.positioned:
+            return
+        surface = self.window.get_surface()
+        monitor = Gdk.Display.get_default().get_monitor_at_surface(surface) if surface else None
+        if not monitor:
+            GLib.idle_add(self._position_on_mapped_monitor)
+            return
+        self._pin_to(monitor)
 
     @staticmethod
     def _install_css() -> None:
@@ -611,6 +634,12 @@ class EdgeHud:
         stagger = [self.mark_item, self.title_item, self.detail_item] + ([self.actions_item] if view.actions else [])
         for index, item in enumerate(stagger):
             item.alpha.to(1, self.now, 0.42, 0.12 + index * 0.045)
+        # Follow the pointer: choose the output afresh every time we appear.
+        monitor = self._monitor_under_pointer()
+        if monitor:
+            self._pin_to(monitor)
+        else:
+            self.positioned = False
         self.window.present()
         self.window.add_tick_callback(self._on_frame)
 
