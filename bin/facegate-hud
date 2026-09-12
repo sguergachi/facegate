@@ -5,6 +5,6 @@ import sys
 
 sys.path.insert(0, "/usr/local/lib/facegate")
 
-from facegate.hud import main
+from facegate.edge_hud import main
 
 raise SystemExit(main())

@@ -1,8 +1,10 @@
 # FaceGate
 
 FaceGate adds an explicit, Face ID-style consent screen before Howdy uses the
-camera for `sudo`. It is designed for KDE/Wayland: the visual HUD runs in your
-normal desktop session, while a tiny PAM adapter stays root-owned.
+camera for `sudo`. On KDE/Wayland it uses a true layer-shell surface, so the
+black island is anchored to the monitor's physical top edge rather than placed
+as an ordinary desktop window. The visual HUD runs in your normal desktop
+session, while a tiny PAM adapter stays root-owned.
 
 ## What it changes
 
@@ -26,8 +28,8 @@ camera scan to begin.
 
 ## Install
 
-Requirements: an active graphical user session, Howdy already working for
-`sudo`, `pam-python`, Python 3, and PyQt6.
+Requirements: an active KDE/Wayland graphical session, Howdy already working
+for `sudo`, `pam-python`, Python 3, GTK 4, and `gtk4-layer-shell`.
 
 ```bash
 cd ~/Dev/facegate

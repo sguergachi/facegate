@@ -5,6 +5,7 @@ PartOf=graphical-session.target
 
 [Service]
 Type=simple
+Environment=GDK_BACKEND=wayland
 ExecStart=/usr/local/bin/facegate-hud
 Restart=on-failure
 RestartSec=2
