@@ -61,44 +61,114 @@ def approval_timeout_ms(value: object) -> int:
 
 
 class FaceGlyph(QWidget):
-    """A lightweight animated scanner glyph: idle, scanning, success, error."""
+    """A symbolic, living face that communicates the scanner's state without video."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setFixedSize(128, 128)
         self._state = "approval"
+        self._previous_state = "approval"
+        self._transition = 1.0
         self._phase = 0.0
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
         self._timer.start(16)
 
     def set_state(self, state: str) -> None:
+        if state == self._state:
+            return
+        self._previous_state = self._state
         self._state = state
+        self._transition = 0.0
         self.update()
 
     def _tick(self) -> None:
-        self._phase = (self._phase + 0.012) % 1.0
+        speed = 0.019 if self._state == "scanning" else 0.009
+        self._phase = (self._phase + speed) % 1.0
+        self._transition = min(1.0, self._transition + 0.07)
         self.update()
+
+    @staticmethod
+    def _mix(first: float, second: float, amount: float) -> float:
+        return first + (second - first) * amount
+
+    @staticmethod
+    def _mix_color(first: QColor, second: QColor, amount: float) -> QColor:
+        return QColor(
+            round(first.red() + (second.red() - first.red()) * amount),
+            round(first.green() + (second.green() - first.green()) * amount),
+            round(first.blue() + (second.blue() - first.blue()) * amount),
+            round(first.alpha() + (second.alpha() - first.alpha()) * amount),
+        )
+
+    @staticmethod
+    def _profile(state: str) -> dict[str, object]:
+        return {
+            "approval": {
+                "accent": QColor("#f5f5f7"), "scan": 0.0, "smile": 0.16,
+                "eye_open": 1.0, "look": 2.2, "tilt": 0.7, "halo": 0.22,
+            },
+            "scanning": {
+                "accent": QColor("#b7f7ff"), "scan": 1.0, "smile": 0.04,
+                "eye_open": 0.92, "look": 7.5, "tilt": 2.3, "halo": 0.66,
+            },
+            "success": {
+                "accent": QColor("#e9fff0"), "scan": 0.18, "smile": 1.0,
+                "eye_open": 0.46, "look": 0.0, "tilt": 0.0, "halo": 0.92,
+            },
+            "failure": {
+                "accent": QColor("#ffb4bd"), "scan": 0.0, "smile": -0.18,
+                "eye_open": 0.76, "look": 1.3, "tilt": 0.5, "halo": 0.28,
+            },
+        }[state]
+
+    def _value(self, key: str) -> float:
+        previous = self._profile(self._previous_state)
+        current = self._profile(self._state)
+        return self._mix(float(previous[key]), float(current[key]), self._transition)
+
+    def _color(self) -> QColor:
+        previous = self._profile(self._previous_state)
+        current = self._profile(self._state)
+        return self._mix_color(previous["accent"], current["accent"], self._transition)
+
+    @staticmethod
+    def _draw_eye(painter: QPainter, x: float, y: float, openness: float, pupil_offset: float, color: QColor) -> None:
+        height = max(3.0, 12.0 * openness)
+        painter.setPen(QPen(QColor(color.red(), color.green(), color.blue(), 220), 1.7))
+        painter.setBrush(QColor(6, 6, 7))
+        painter.drawRoundedRect(QRectF(x - 10, y - height / 2, 20, height), height / 2, height / 2)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(color)
+        painter.drawEllipse(QRectF(x - 2.6 + pupil_offset, y - 2.6, 5.2, 5.2))
 
     def paintEvent(self, event: Any) -> None:  # noqa: N802 - Qt API
         del event
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        accent = self._color()
+        scan = self._value("scan")
+        smile = self._value("smile")
+        eye_open = self._value("eye_open")
+        look_range = self._value("look")
+        halo_strength = self._value("halo")
+        orbit = self._phase * 6.283185307
+        bob = __import__("math").sin(orbit * 0.58) * (1.0 + scan * 0.75)
+        tilt = __import__("math").sin(orbit * (0.8 + scan * 1.5)) * self._value("tilt")
+        look = __import__("math").sin(orbit * (0.74 + scan * 1.85)) * look_range
         rect = QRectF(13, 13, 102, 102)
-        colors = {
-            "approval": QColor("#f5f5f7"),
-            "scanning": QColor("#b7f7ff"),
-            "success": QColor("#e9fff0"),
-            "failure": QColor("#ffb4bd"),
-        }
-        accent = colors.get(self._state, colors["approval"])
 
         glow = QLinearGradient(0, 0, 0, self.height())
-        glow.setColorAt(0, QColor(accent.red(), accent.green(), accent.blue(), 45))
+        glow.setColorAt(0, QColor(accent.red(), accent.green(), accent.blue(), round(64 * halo_strength)))
         glow.setColorAt(1, QColor(accent.red(), accent.green(), accent.blue(), 0))
         painter.setBrush(glow)
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.drawEllipse(rect.adjusted(-7, -7, 7, 7))
+        painter.drawEllipse(rect.adjusted(-10, -10, 10, 10))
+
+        painter.save()
+        painter.translate(64, 64 + bob)
+        painter.rotate(tilt)
+        painter.translate(-64, -64)
 
         pen = QPen(accent, 3.2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
         painter.setPen(pen)
@@ -109,24 +179,30 @@ class FaceGlyph(QWidget):
             painter.drawLine(QPointF(x, y), QPointF(x + dx * corner, y))
             painter.drawLine(QPointF(x, y), QPointF(x, y + dy * corner))
 
-        if self._state == "success":
-            painter.drawLine(QPointF(39, 66), QPointF(58, 85))
-            painter.drawLine(QPointF(58, 85), QPointF(94, 44))
-            return
-        if self._state == "failure":
-            painter.drawLine(QPointF(45, 45), QPointF(83, 83))
-            painter.drawLine(QPointF(83, 45), QPointF(45, 83))
-            return
-
-        # A friendly, abstract face instead of a camera preview.
+        # A friendly, iconic face: alive enough to look for you, abstract enough
+        # to never imply that camera imagery is shown in the HUD.
         face = QPainterPath()
-        face.addRoundedRect(QRectF(43, 36, 42, 54), 19, 19)
-        painter.setPen(QPen(QColor(232, 245, 255, 210), 2.2))
+        face.addRoundedRect(QRectF(42, 35, 44, 57), 20, 20)
+        painter.setPen(QPen(QColor(245, 245, 247, 220), 2.0))
+        painter.setBrush(QColor(8, 8, 9))
         painter.drawPath(face)
-        painter.drawPoint(QPointF(56, 58))
-        painter.drawPoint(QPointF(72, 58))
-        painter.drawArc(QRectF(55, 63, 18, 13), 10 * 16, 160 * 16)
-        if self._state == "scanning":
+        self._draw_eye(painter, 56, 58, eye_open, look * 0.22, accent)
+        self._draw_eye(painter, 72, 58, eye_open, look * 0.22, accent)
+        mouth = QPainterPath()
+        mouth.moveTo(54, 76)
+        mouth.quadTo(64, 76 + 10 * smile, 74, 76)
+        painter.setPen(QPen(accent, 2.0, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        painter.drawPath(mouth)
+        if scan > 0.01:
+            # A quiet orbital trace and traveling line make the face feel like it
+            # is actively searching, inspired by Hello's moving eye language.
+            painter.save()
+            painter.translate(64, 64)
+            painter.rotate(self._phase * 360)
+            painter.translate(-64, -64)
+            painter.setPen(QPen(QColor(accent.red(), accent.green(), accent.blue(), round(220 * scan)), 1.6))
+            painter.drawArc(QRectF(24, 24, 80, 80), -38 * 16, 88 * 16)
+            painter.restore()
             scan_y = 27 + self._phase * 74
             scan = QLinearGradient(25, scan_y, 103, scan_y)
             scan.setColorAt(0, QColor(accent.red(), accent.green(), accent.blue(), 0))
@@ -134,6 +210,7 @@ class FaceGlyph(QWidget):
             scan.setColorAt(1, QColor(accent.red(), accent.green(), accent.blue(), 0))
             painter.setPen(QPen(scan, 2.4))
             painter.drawLine(QPointF(25, scan_y), QPointF(103, scan_y))
+        painter.restore()
 
 
 @dataclass
@@ -156,11 +233,14 @@ class FaceGateDialog(QDialog):
             | Qt.WindowType.Tool
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setFixedWidth(416)
-        self.setMinimumHeight(52)
+        self.setMinimumWidth(172)
+        self.setMaximumWidth(416)
+        self.setMinimumHeight(48)
         self.setMaximumHeight(390)
+        self._expanded_width = 416
+        self._collapsed_width = 172
         self._expanded_height = 376
-        self._collapsed_height = 52
+        self._collapsed_height = 48
         self._geometry_animation = QPropertyAnimation(self, b"geometry", self)
         self._geometry_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
         self._content_animation: QPropertyAnimation | None = None
@@ -169,7 +249,7 @@ class FaceGateDialog(QDialog):
         shell = QFrame(self)
         shell.setObjectName("shell")
         shell.setStyleSheet(
-            "QFrame#shell { background: #000000; border: 1px solid rgba(255, 255, 255, 38); border-radius: 26px; }"
+            "QFrame#shell { background: #000000; border: none; border-radius: 26px; }"
             "QLabel { color: #f5f5f7; }"
             "QPushButton { border-radius: 15px; padding: 12px 20px; font-weight: 600; font-size: 14px; }"
             "QPushButton#approve { background: #f5f5f7; color: #000000; }"
@@ -221,10 +301,12 @@ class FaceGateDialog(QDialog):
         self.approve.clicked.connect(self.approved)
         self.cancel.clicked.connect(self.rejected)
 
-    def _geometry(self, height: int, y_offset: int = 0) -> QRect:
+    def _geometry(self, width: int, height: int, y_offset: int = 0) -> QRect:
         screen = self.screen() or QApplication.primaryScreen()
-        area = screen.availableGeometry()
-        return QRect(area.x() + (area.width() - self.width()) // 2, area.y() + 8 + y_offset, self.width(), height)
+        # Deliberately use the whole physical panel, not availableGeometry().
+        # The latter begins below Plasma's panel and makes this read as a dialog.
+        panel = screen.geometry()
+        return QRect(panel.x() + (panel.width() - width) // 2, panel.y() + y_offset, width, height)
 
     def _set_copy(self, state: str, title: str, detail: str, buttons: bool, animate: bool = True) -> None:
         def apply() -> None:
@@ -260,15 +342,16 @@ class FaceGateDialog(QDialog):
 
     def _arrive(self) -> None:
         self._exit_animation = None
+        self.content.hide()
         self.content_effect.setOpacity(0.0)
-        self.setGeometry(self._geometry(self._collapsed_height, -32))
+        self.setGeometry(self._geometry(self._collapsed_width, self._collapsed_height, -34))
         self.show()
         self.raise_()
         self.activateWindow()
         self._geometry_animation.stop()
         self._geometry_animation.setDuration(620)
         self._geometry_animation.setStartValue(self.geometry())
-        self._geometry_animation.setEndValue(self._geometry(self._expanded_height))
+        self._geometry_animation.setEndValue(self._geometry(self._expanded_width, self._expanded_height))
         self._geometry_animation.start()
         fade = QPropertyAnimation(self.content_effect, b"opacity", self)
         fade.setDuration(340)
@@ -276,13 +359,18 @@ class FaceGateDialog(QDialog):
         fade.setEndValue(1.0)
         fade.setEasingCurve(QEasingCurve.Type.OutCubic)
         self._content_animation = fade
-        QTimer.singleShot(170, fade.start)
+
+        def reveal_content() -> None:
+            self.content.show()
+            fade.start()
+
+        QTimer.singleShot(170, reveal_content)
 
     def _depart(self) -> None:
         self._geometry_animation.stop()
         self._geometry_animation.setDuration(380)
         self._geometry_animation.setStartValue(self.geometry())
-        self._geometry_animation.setEndValue(self._geometry(self._collapsed_height, -30))
+        self._geometry_animation.setEndValue(self._geometry(self._collapsed_width, self._collapsed_height, -34))
         self._geometry_animation.setEasingCurve(QEasingCurve.Type.InCubic)
         self._geometry_animation.finished.connect(self.close)
         self._geometry_animation.start()
