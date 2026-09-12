@@ -30,10 +30,10 @@ from .protocol import MAX_MESSAGE_BYTES, decode, encode
 
 
 # Keep the expanded experience compact: an island, never a modal card.
-ISLAND_WIDTH = 352
-ISLAND_HEIGHT = 300
-COLLAPSED_WIDTH = 150
-COLLAPSED_HEIGHT = 44
+ISLAND_WIDTH = 420
+ISLAND_HEIGHT = 118
+COLLAPSED_WIDTH = 132
+COLLAPSED_HEIGHT = 38
 SOCKET_NAME = "facegate.sock"
 
 
@@ -101,7 +101,7 @@ class LivingFace(Gtk.DrawingArea):
         blink = 1.0
         if 0.78 < blink_phase < 0.86:
             blink = abs(blink_phase - 0.82) / 0.04
-        eye_open *= max(0.08, blink)
+        open_eyes *= max(0.08, blink)
         bob = math.sin(orbit * 0.62) * (0.75 + scan * 1.1)
         tilt = math.sin(orbit * (0.75 + scan * 1.6)) * (0.5 + scan * 1.8)
         # Searching is a sequence of small, deliberate looks—not a jitter.
@@ -220,7 +220,11 @@ class EdgeHud:
         self.canvas = Gtk.Overlay()
         self.canvas.add_css_class("facegate-canvas")
         self.canvas.set_size_request(ISLAND_WIDTH, ISLAND_HEIGHT)
-        self.canvas.set_halign(Gtk.Align.CENTER)
+        # The layer surface spans the monitor. Let the canvas receive that full
+        # allocation, then center the only visible island inside it. A Gtk.Box
+        # otherwise packs a fixed-width child from the left edge.
+        self.canvas.set_hexpand(True)
+        self.canvas.set_halign(Gtk.Align.FILL)
         self.canvas.set_valign(Gtk.Align.START)
         self.backdrop = Gtk.DrawingArea()
         self.backdrop.set_draw_func(self._draw_island)
@@ -228,36 +232,40 @@ class EdgeHud:
         root.append(self.canvas)
         self.window.set_child(root)
 
-        self.content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        self.content = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=13)
         self.content.set_size_request(ISLAND_WIDTH, ISLAND_HEIGHT)
         self.content.set_halign(Gtk.Align.CENTER)
-        self.content.set_valign(Gtk.Align.START)
-        self.content.set_margin_top(14)
-        self.content.set_margin_start(24)
-        self.content.set_margin_end(24)
+        self.content.set_valign(Gtk.Align.CENTER)
+        self.content.set_margin_start(16)
+        self.content.set_margin_end(16)
         self.canvas.add_overlay(self.content)
-        self.eyebrow = Gtk.Label(label="FACE VERIFY")
-        self.eyebrow.add_css_class("eyebrow")
-        self.content.append(self.eyebrow)
         self.face = LivingFace()
-        self.face.set_halign(Gtk.Align.CENTER)
+        self.face.set_content_width(64)
+        self.face.set_content_height(64)
         self.content.append(self.face)
+        copy = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        copy.set_hexpand(True)
+        copy.set_valign(Gtk.Align.CENTER)
         self.title = Gtk.Label(label="Verify with Face")
+        self.title.set_halign(Gtk.Align.START)
+        self.title.set_xalign(0)
         self.title.add_css_class("title")
-        self.content.append(self.title)
+        copy.append(self.title)
         self.detail = Gtk.Label(label="Camera starts only after approval.")
+        self.detail.set_halign(Gtk.Align.START)
+        self.detail.set_xalign(0)
         self.detail.set_wrap(True)
-        self.detail.set_justify(Gtk.Justification.CENTER)
         self.detail.add_css_class("detail")
-        self.content.append(self.detail)
-        self.content.append(Gtk.Box())
-        actions = Gtk.Box(spacing=10)
+        copy.append(self.detail)
+        self.content.append(copy)
+        actions = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+        actions.set_valign(Gtk.Align.CENTER)
         self.password = Gtk.Button(label="Password")
         self.password.add_css_class("password")
         self.approve = Gtk.Button(label="Approve")
         self.approve.add_css_class("approve")
-        self.password.set_hexpand(True)
-        self.approve.set_hexpand(True)
+        self.password.set_size_request(96, 25)
+        self.approve.set_size_request(96, 36)
         actions.append(self.password)
         actions.append(self.approve)
         self.content.append(actions)
@@ -274,13 +282,14 @@ class EdgeHud:
                 box-shadow: none;
             }
             label { color: #f5f5f7; }
-            .eyebrow { color: #8e8e93; font-size: 10px; font-weight: 700; letter-spacing: 1.6px; }
-            .title { font-size: 18px; font-weight: 700; }
-            .detail { color: #a1a1a6; font-size: 12px; }
-            button { min-height: 40px; border-radius: 14px; font-size: 13px; font-weight: 600; }
+            .title { font-size: 16px; font-weight: 700; }
+            .detail { color: #a1a1a6; font-size: 11px; }
+            button { border-radius: 13px; font-size: 12px; font-weight: 600; }
             button.approve { background: #f5f5f7; color: #000000; border: none; }
+            button.approve label { color: #000000; }
             button.approve:hover { background: #ffffff; }
             button.password { background: #1c1c1e; color: #f5f5f7; border: none; }
+            button.password label { color: #f5f5f7; }
             button.password:hover { background: #2c2c2e; }
         """)
         Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
@@ -334,7 +343,7 @@ class EdgeHud:
         self.face.set_state("scanning")
         self.title.set_text("Looking for you")
         self.detail.set_text("Hold still for a moment.")
-        self.password.set_visible(False)
+        self.password.set_visible(True)
         self.approve.set_visible(False)
         self._show()
 
