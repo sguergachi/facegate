@@ -1,5 +1,9 @@
 # FaceGate
 
+<p align="center">
+  <img src="media/facegate-demo.gif" alt="FaceGate island on a KDE desktop: sudo approved by face, then a second attempt where the face isn't recognized and the password is used instead" width="960">
+</p>
+
 FaceGate adds an explicit, Face ID-style consent screen before Howdy uses the
 camera for `sudo`. On KDE/Wayland it uses a true layer-shell surface, so the
 black island is anchored to the monitor's physical top edge rather than placed
