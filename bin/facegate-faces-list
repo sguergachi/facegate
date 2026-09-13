@@ -1,0 +1,10 @@
+#!/usr/bin/python3 -I
+"""Lists your faces for FaceGate Settings; started through pkexec, no prompt."""
+
+import sys
+
+sys.path.insert(0, "/usr/local/lib/facegate")
+
+from facegate.faces_helper import main
+
+raise SystemExit(main(["list"]))

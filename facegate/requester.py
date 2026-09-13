@@ -24,6 +24,8 @@ APP_NAMES = {
     "claude": "Claude Code", "codex": "Codex", "aider": "Aider", "sshd": "SSH",
     "plasma-discover": "Discover", "systemsettings": "System Settings", "partitionmanager": "Partition Manager",
     "pamac-manager": "Pamac", "octopi": "Octopi", "gparted": "GParted",
+    # The kernel truncates comm to 15 characters.
+    "facegate-settin": "FaceGate Settings", "facegate-settings": "FaceGate Settings",
 }
 STOP_AT = frozenset(["systemd", "init", "kwin_wayland", "plasmashell", "sddm", "login", "gdm", "startplasma-wayland"])
 MAX_COMMAND_CHARS = 160
