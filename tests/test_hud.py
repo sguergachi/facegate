@@ -2,7 +2,7 @@ import unittest
 
 import cairo
 
-from facegate.edge_hud import ISLAND_WIDTH, MARK_PROFILES, MarkModel, Spring, Tween, island_path, mark_values, paint_mark, ring_head
+from facegate.edge_hud import APPROVAL, ISLAND_WIDTH, approval_view, MARK_PROFILES, MarkModel, Spring, Tween, island_path, mark_values, paint_mark, ring_head
 from facegate.hud import approval_timeout_ms
 
 
@@ -64,6 +64,25 @@ class HudRequestTests(unittest.TestCase):
         visible = mark_values(model)
         model.origin, model.state, model.transition = visible, "success", 0.0
         self.assertEqual(mark_values(model), visible)
+
+
+class RequesterTests(unittest.TestCase):
+    def test_names_the_requester_host_and_command(self):
+        view = approval_view({"app": "Claude Code", "host": "T3 Code", "command": "sudo pacman -Syu"})
+        self.assertEqual(view.title, "Claude Code wants sudo")
+        self.assertEqual(view.command, "sudo pacman -Syu")
+        self.assertIn("via T3 Code", view.detail)
+        self.assertTrue(view.actions)
+
+    def test_missing_or_malformed_requester_keeps_the_generic_prompt(self):
+        for requester in (None, {}, "Konsole", {"app": "", "command": None}):
+            self.assertEqual(approval_view(requester), APPROVAL)
+
+    def test_requester_text_is_flattened_and_bounded(self):
+        view = approval_view({"app": "Evil\nApp" + "x" * 80, "command": "sudo rm\t-rf /tmp/a\x1b[31m"})
+        self.assertNotIn("\n", view.title)
+        self.assertLessEqual(len(view.title), len(" wants sudo") + 32)
+        self.assertTrue(all(char.isprintable() for char in view.command))
 
 
 class MotionTests(unittest.TestCase):

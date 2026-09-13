@@ -70,3 +70,14 @@ Each time the island appears it asks KWin for the active output
 (`org.kde.KWin.activeOutputName`, which follows the mouse by default) and pins
 itself to the top center of that monitor. Without KWin it falls back to the
 output the compositor chooses.
+
+## Requester
+
+The PAM adapter runs inside `sudo`, so it reads the exact command from its own
+argv and walks up the process tree, skipping shells and wrappers, to name the
+app that ran it and the app hosting that (for example **Claude Code** via
+**T3 Code**). The approval title becomes "‹app› wants sudo", the command sits
+in a single-line monospace chip (8 pt from title and detail, middle-ellipsized,
+full content width), and the detail names the host. The text is flattened to
+printable characters and length-limited. It is informative only: a process can
+rename itself, so it never influences authentication.

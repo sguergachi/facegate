@@ -21,7 +21,8 @@ camera scan to begin.
 
 ## HUD states
 
-- **Approve face verification** — camera remains off until approval.
+- **‹App› wants sudo** — names the app that ran sudo, the exact command, and
+  the app hosting it; the camera remains off until approval.
 - **Looking for you** — a scanning arc sweeps the mark while Howdy runs.
 - **Verified** — the arc closes into a green ring before sudo continues.
 - **Not recognized** — a brief red shake, then the normal password prompt.

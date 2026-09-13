@@ -58,6 +58,83 @@ def emit_hud(username, phase, payload=None):
     request_hud(username, phase, payload, timeout=1)
 
 
+# Processes that only relay a command; the requester is whoever launched them.
+RELAYS = frozenset([
+    "sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "nu", "xonsh",
+    "sudo", "su", "doas", "env", "timeout", "nohup", "script", "xargs", "setsid",
+    "time", "watch", "make", "just", "tmux", "tmux: server", "screen",
+])
+# Apps that host other programs: shown as "via ...".
+APP_NAMES = {
+    "konsole": "Konsole", "yakuake": "Yakuake", "kitty": "kitty", "alacritty": "Alacritty",
+    "foot": "foot", "wezterm-gui": "WezTerm", "ghostty": "Ghostty", "gnome-terminal-": "GNOME Terminal",
+    "gnome-terminal-server": "GNOME Terminal", "xterm": "XTerm", "tilix": "Tilix", "terminator": "Terminator",
+    "code": "VS Code", "codium": "VSCodium", "cursor": "Cursor", "zed": "Zed", "zeditor": "Zed",
+    "t3code": "T3 Code", "kate": "Kate", "dolphin": "Dolphin", "idea": "IntelliJ IDEA",
+    "claude": "Claude Code", "codex": "Codex", "aider": "Aider", "sshd": "SSH",
+}
+STOP_AT = frozenset(["systemd", "init", "kwin_wayland", "plasmashell", "sddm", "login", "gdm", "startplasma-wayland"])
+MAX_COMMAND_CHARS = 160
+
+
+def read_process(pid):
+    with open("/proc/%d/stat" % pid) as stat:
+        raw = stat.read()
+    # comm may contain spaces or parentheses; the parent pid follows the last ')'.
+    comm = raw[raw.index("(") + 1:raw.rindex(")")]
+    parent = int(raw[raw.rindex(")") + 2:].split()[1])
+    with open("/proc/%d/cmdline" % pid) as cmdline:
+        argv = [arg for arg in cmdline.read().split("\0") if arg]
+    return comm, parent, argv
+
+
+def process_name(comm, argv):
+    for candidate in [os.path.basename(argv[0]) if argv else "", comm]:
+        if candidate in APP_NAMES:
+            return APP_NAMES[candidate]
+    return comm
+
+
+def quote(arg):
+    safe = "@%+=:,./-_"
+    if arg and all(char.isalnum() or char in safe for char in arg):
+        return arg
+    return "'" + arg.replace("'", "'\"'\"'") + "'"
+
+
+def describe_requester(sudo_pid):
+    """Name the app that ran sudo and the exact command, for display only.
+
+    A process can rename itself, so this is informative, never an
+    authorization input.
+    """
+    _comm, parent, argv = read_process(sudo_pid)
+    command = " ".join(["sudo"] + [quote(arg) for arg in argv[1:]])
+    command = "".join(char if char >= " " else " " for char in command)
+    if len(command) > MAX_COMMAND_CHARS:
+        command = command[:MAX_COMMAND_CHARS - 1] + u"…".encode("utf-8")
+    requester = {"command": command}
+    pid, depth = parent, 0
+    while pid > 1 and depth < 32:
+        depth += 1
+        try:
+            comm, next_pid, argv = read_process(pid)
+        except (IOError, OSError, ValueError):
+            break
+        if comm in STOP_AT:
+            break
+        executable = os.path.basename(argv[0]) if argv else ""
+        if comm not in RELAYS and executable not in RELAYS:
+            name = process_name(comm, argv)
+            if "app" not in requester:
+                requester["app"] = name
+            elif name != requester["app"] and (comm in APP_NAMES or executable in APP_NAMES):
+                requester["host"] = name
+                break
+        pid = next_pid
+    return requester
+
+
 def should_skip(config):
     if config.getboolean("core", "disabled"):
         return True
@@ -87,10 +164,15 @@ def do_auth(pamh):
         log("Unable to read Howdy configuration: %s" % error)
         return pamh.PAM_AUTHINFO_UNAVAIL
 
+    try:
+        requester = describe_requester(os.getpid())
+    except Exception as error:
+        log("Unable to describe the sudo requester: %s" % error)
+        requester = {}
     consent = request_hud(
         username,
         "approval",
-        {"service": "sudo", "timeout_ms": CONSENT_TIMEOUT_SECONDS * 1000},
+        {"service": "sudo", "timeout_ms": CONSENT_TIMEOUT_SECONDS * 1000, "requester": requester},
         timeout=CONSENT_TIMEOUT_SECONDS + 2,
     )
     if not consent or not consent.get("approved"):

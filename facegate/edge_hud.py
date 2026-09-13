@@ -30,7 +30,8 @@ gi.require_version("Gdk", "4.0")
 gi.require_version("Gsk", "4.0")
 gi.require_version("Graphene", "1.0")
 gi.require_version("Gtk4LayerShell", "1.0")
-from gi.repository import Gdk, Gio, GLib, Graphene, Gsk, Gtk, Gtk4LayerShell  # noqa: E402
+gi.require_version("Pango", "1.0")
+from gi.repository import Gdk, Gio, GLib, Graphene, Gsk, Gtk, Gtk4LayerShell, Pango  # noqa: E402
 
 from .protocol import MAX_MESSAGE_BYTES, decode, encode
 
@@ -47,6 +48,7 @@ MARK_SIZE = 56
 MARK_BLEED = 8
 MARK_TO_TITLE = 16
 TITLE_TO_DETAIL = 4
+COMMAND_GAP = 8
 COPY_TO_ACTIONS = 24
 BUTTON_HEIGHT = 44
 BUTTON_GAP = 8
@@ -60,7 +62,7 @@ TEXT_WIDTH = ISLAND_WIDTH - 2 * 32
 
 # The surface leaves room for the concave shoulders and spring overshoot.
 SURFACE_WIDTH = ISLAND_WIDTH + 2 * SHOULDER + 24
-SURFACE_HEIGHT = 280
+SURFACE_HEIGHT = 320
 
 WHITE = (0.96, 0.96, 0.97)
 
@@ -334,9 +336,33 @@ class View:
     title: str
     detail: str
     actions: bool
+    command: str = ""
 
 
 APPROVAL = View("approval", "Verify with Face", "The camera turns on only after you approve.", True)
+
+
+def _display_text(value: object, limit: int) -> str:
+    text = "".join(char if char.isprintable() else " " for char in str(value or "")).strip()
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def approval_view(requester: object) -> View:
+    """Say who is asking, as reported by the root-side PAM adapter.
+
+    This is informational: a process can rename itself, so the command and
+    app name help the user decide, but never grant anything.
+    """
+    if not isinstance(requester, dict):
+        return APPROVAL
+    app = _display_text(requester.get("app"), 32)
+    host = _display_text(requester.get("host"), 32)
+    command = _display_text(requester.get("command"), 160)
+    if not app and not command:
+        return APPROVAL
+    title = "%s wants sudo" % app if app else "Sudo requested"
+    detail = "via %s · Camera starts on approval" % host if host else "Camera starts only after you approve."
+    return View("approval", title, detail, True, command)
 SCANNING = View("scanning", "Looking for you", "Hold still for a moment.", False)
 SUCCESS = View("success", "Verified", "Continuing securely.", False)
 FAILURE = View("failure", "Not recognized", "Use your password instead.", False)
@@ -401,6 +427,16 @@ class EdgeHud:
         self.mark = PresenceMark()
         self.title = self._label("title")
         self.detail = self._label("detail")
+        # The exact command, as a single ellipsized line that hugs its text.
+        self.command = Gtk.Label()
+        self.command.add_css_class("command")
+        self.command.set_single_line_mode(True)
+        self.command.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+        self.command.set_halign(Gtk.Align.CENTER)
+        command_row = Gtk.Box()
+        command_row.set_size_request(CONTENT_WIDTH, -1)
+        command_row.append(self.command)
+        self.command.set_hexpand(True)
         actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=BUTTON_GAP, homogeneous=True)
         actions.set_size_request(CONTENT_WIDTH, BUTTON_HEIGHT)
         self.password = Gtk.Button(label="Use Password")
@@ -419,9 +455,10 @@ class EdgeHud:
         self.mark_item.y = TOP_INSET - MARK_BLEED
         self.title_item = Item(self.title, TEXT_WIDTH)
         self.detail_item = Item(self.detail, TEXT_WIDTH)
+        self.command_item = Item(command_row, CONTENT_WIDTH)
         self.actions_item = Item(actions, CONTENT_WIDTH)
         self.actions_item.height = BUTTON_HEIGHT
-        self.items = (self.mark_item, self.title_item, self.detail_item, self.actions_item)
+        self.items = (self.mark_item, self.title_item, self.command_item, self.detail_item, self.actions_item)
         for item in self.items:
             self.layer.put(item.widget, 0, 0)
             item.widget.set_opacity(0)
@@ -520,6 +557,15 @@ class EdgeHud:
             }
             .title { color: #f5f5f7; font-size: 17px; font-weight: 600; letter-spacing: -0.2px; }
             .detail { color: #98989d; font-size: 13px; font-weight: 400; }
+            .command {
+                font-family: "JetBrains Mono", "Fira Code", monospace;
+                font-feature-settings: "calt" 0;
+                font-size: 12px;
+                color: #f5f5f7;
+                background-color: #1c1c1e;
+                border-radius: 8px;
+                padding: 4px 10px;
+            }
             button {
                 min-height: 44px;
                 padding: 0 16px;
@@ -564,7 +610,15 @@ class EdgeHud:
         self.title_item.height = self.title.measure(Gtk.Orientation.VERTICAL, TEXT_WIDTH)[1]
         self.detail_item.height = self.detail.measure(Gtk.Orientation.VERTICAL, TEXT_WIDTH)[1]
         self.title_item.y = TOP_INSET + MARK_SIZE + MARK_TO_TITLE
-        self.detail_item.y = self.title_item.y + self.title_item.height + TITLE_TO_DETAIL
+        title_bottom = self.title_item.y + self.title_item.height
+        if view.command:
+            self.command.set_text(view.command)
+            self.command.set_tooltip_text(view.command)
+            self.command_item.height = self.command_item.widget.measure(Gtk.Orientation.VERTICAL, CONTENT_WIDTH)[1]
+            self.command_item.y = title_bottom + COMMAND_GAP
+            self.detail_item.y = self.command_item.y + self.command_item.height + COMMAND_GAP
+        else:
+            self.detail_item.y = title_bottom + TITLE_TO_DETAIL
         copy_bottom = self.detail_item.y + self.detail_item.height
         self.actions_item.y = copy_bottom + COPY_TO_ACTIONS
         if view.actions:
@@ -639,20 +693,20 @@ class EdgeHud:
         self.mark_item.alpha.to(1, self.now, 0.3)
         self.width.configure(0.5, 0.86)
         self.width.target = ISLAND_WIDTH
-        if previous and previous.title == view.title and previous.actions == view.actions:
+        if previous and (previous.title, previous.command, previous.actions) == (view.title, view.command, view.actions):
             return
         # Outgoing copy leaves quickly; the island then reshapes around the
         # incoming copy while it settles in.
-        for item in (self.title_item, self.detail_item, self.actions_item):
+        for item in (self.title_item, self.command_item, self.detail_item, self.actions_item):
             item.alpha.to(0, self.now, 0.14)
 
         def swap(now: float) -> None:
             self.height.configure(0.5, 0.86)
             self.height.target = self._layout(view)
-            self.title_item.alpha.to(1, now, 0.36)
-            self.detail_item.alpha.to(1, now, 0.36, 0.04)
-            if view.actions:
-                self.actions_item.alpha.to(1, now, 0.36, 0.08)
+            incoming = [self.title_item] + ([self.command_item] if view.command else [])
+            incoming += [self.detail_item] + ([self.actions_item] if view.actions else [])
+            for index, item in enumerate(incoming):
+                item.alpha.to(1, now, 0.36, index * 0.04)
 
         self._at(0.15, swap)
 
@@ -673,7 +727,8 @@ class EdgeHud:
         self.height.configure(0.56, 0.8)
         self.width.target = ISLAND_WIDTH
         self.height.target = self._layout(view)
-        stagger = [self.mark_item, self.title_item, self.detail_item] + ([self.actions_item] if view.actions else [])
+        stagger = [self.mark_item, self.title_item] + ([self.command_item] if view.command else [])
+        stagger += [self.detail_item] + ([self.actions_item] if view.actions else [])
         for index, item in enumerate(stagger):
             item.alpha.to(1, self.now, 0.42, 0.12 + index * 0.045)
         # Follow the pointer: choose the output afresh every time we appear.
@@ -792,9 +847,9 @@ class EdgeHud:
 
     # Protocol ---------------------------------------------------------------
 
-    def present_approval(self) -> None:
+    def present_approval(self, requester: object = None) -> None:
         self.silenced = False
-        self._present(APPROVAL)
+        self._present(approval_view(requester))
 
     def present_scanning(self) -> None:
         # Howdy cannot be interrupted once running, so no action is offered.
@@ -842,7 +897,7 @@ class EdgeHud:
                 self.reply(connection, {"approved": False, "reason": "busy"})
                 return False
             self.pending = PendingApproval(connection, str(message.get("id", "")))
-            self.present_approval()
+            self.present_approval(message.get("requester"))
             try:
                 requested = int(message.get("timeout_ms", 12_000))
             except (TypeError, ValueError):
@@ -904,11 +959,17 @@ class Demo:
     """
 
     SCAN_MS = 2_400
+    REQUESTERS = (
+        {"app": "Konsole", "command": "sudo pacman -Syu"},
+        {"app": "Claude Code", "host": "T3 Code", "command": "sudo systemctl restart facegate.service"},
+        {"app": "python3", "host": "VS Code", "command": "sudo python3 scripts/flash_firmware.py --device /dev/ttyUSB0 --baud 115200 --verify"},
+    )
     PAUSE_MS = 2_500
 
     def __init__(self, hud: EdgeHud) -> None:
         self.hud = hud
         self.succeed = True
+        self.round = 0
         self.reader: socket.socket | None = None
 
     def start(self) -> None:
@@ -919,7 +980,9 @@ class Demo:
         writer, self.reader = socket.socketpair()
         self.reader.setblocking(False)
         print("[demo] requesting approval", flush=True)
-        self.hud.handle_request({"id": "demo", "phase": "approval", "timeout_ms": 30_000}, writer)
+        requester = self.REQUESTERS[self.round % len(self.REQUESTERS)]
+        self.round += 1
+        self.hud.handle_request({"id": "demo", "phase": "approval", "timeout_ms": 30_000, "requester": requester}, writer)
         GLib.timeout_add(50, self._await_reply)
         return False
 
