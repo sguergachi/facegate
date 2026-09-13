@@ -46,7 +46,8 @@ secondary label, `#1c1c1e` secondary fill; cyan `#64d2ff` for scanning, green
   leaves in 140 ms, then the island re-springs to the new height (0.50 / 0.86)
   while the new copy settles in.
 - **Result:** the ring is one continuous conic-gradient stroke, so success grows
-  the scanning comet, evens its tail, and closes it into a green ring with no
+  the scanning comet forward (clockwise, like the scan), evens its tail, and
+  closes it into a green ring with no
   redraw or swap; the small pulse lands as it closes. State blends always start
   from the values on screen, so a result arriving mid-transition cannot jump.
   Failure turns red with a short, decaying shake.

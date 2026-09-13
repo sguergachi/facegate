@@ -196,6 +196,16 @@ def mark_values(model: MarkModel) -> tuple[float, ...]:
     return tuple(mix(before, after, amount) for before, after in zip(origin, target))
 
 
+def ring_head(spin: float, arc_length: float) -> float:
+    """The arc is anchored at its tail and grows forward from it.
+
+    Screen coordinates point down, so increasing angles run clockwise: the
+    scan spins clockwise and a growing arc closes the ring clockwise too.
+    """
+    tail = spin * math.tau - math.pi / 2
+    return tail + min(arc_length, 1.0) * math.tau
+
+
 def ring_pattern(color: tuple[float, float, float], head: float, length: float, alpha: float, solidity: float, radius: float) -> Any:
     """A conic gradient along the ring, brightest at the head.
 
@@ -255,7 +265,7 @@ def paint_mark(context: Any, size: float, model: MarkModel) -> None:
         context.set_source_rgba(*color, ring_alpha)
         context.stroke()
     if arc_alpha > 0.005 and arc_length > 0.002:
-        head = model.spin * math.tau - math.pi / 2
+        head = ring_head(model.spin, arc_length)
         context.set_source(ring_pattern(color, head, min(arc_length, 1.0), arc_alpha, solidity, ring))
         context.set_line_width(2.5)
         context.arc(0, 0, ring, 0, math.tau)
