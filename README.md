@@ -9,10 +9,14 @@ FaceGate is a Face ID-style interface for
 project that does the real work: it drives the IR webcam and performs the face
 comparison. FaceGate doesn't replace any of that; it adds an explicit consent
 screen before Howdy uses the camera for `sudo`, and shows the scan and its
-result. On KDE/Wayland it uses a true layer-shell surface, so the black island
+result. It uses a true layer-shell surface, so the black island
 is anchored to the monitor's physical top edge rather than placed as an
 ordinary desktop window. The visual HUD runs in your normal desktop
 session, while a tiny PAM adapter stays root-owned.
+
+> **KDE Plasma on Wayland only.** FaceGate replaces Plasma's polkit agent and
+> asks KWin which monitor you're on, so GNOME, Hyprland, Sway, X11 and other
+> desktops aren't supported.
 
 ## What it changes
 
@@ -52,23 +56,55 @@ Press **Deny** to decline, or Escape to dismiss the island at any point.
 The spacing and hierarchy are governed by the measured [layout contract](DESIGN.md),
 including the grid, concentric radii, and spring-based motion choreography.
 
+## Managing faces
+
+Open **FaceGate** from the app menu (or run `facegate-settings`). The first
+time, it shows how FaceGate works over three short pages (replay them with
+`facegate-settings --welcome`), then helps you add your face. After that it
+lists the faces Howdy knows for your account, under a large header that
+collapses into a compact bar as you scroll.
+
+- **Add a Face** first asks for admin approval in the island. The island then
+  shows a live, face-following IR preview feathered into its rounded
+  rectangle. A trace fills its rim clockwise as samples are captured, while the
+  island says what it needs ("Move a little closer"), then closes green.
+  Cancel or Escape stops the scan and saves nothing.
+- **Remove** a face with the trash button, then **Remove** again. It also asks
+  for admin approval.
+
+Faces are Howdy's own models, so `sudo howdy list` shows them too. Each one
+keeps five encodings taken a moment apart, rather than Howdy's single frame.
+The visual language, spacing and motion rules are in [DESIGN.md](DESIGN.md).
+
 ## Install
 
-Requirements: an active KDE/Wayland graphical session,
-[Howdy](https://github.com/boltgolt/howdy) installed and already working for
-`sudo` (follow its setup guide first), `pam-python`, Python 3, GTK 4, and
-`gtk4-layer-shell`.
-
-On Arch/KDE, the supplied user service preloads the installed layer-shell
-library so the GTK introspection binding receives the layer role before GTK
-connects to Wayland.
+Requirements: an Arch-based system running KDE Plasma on Wayland, and a
+webcam (an infrared one works best).
 
 ```bash
-cd ~/Dev/facegate
-sudo ./install.sh
-sudo -k
-sudo -v
+git clone https://github.com/sguergachi/facegate.git
+cd facegate
+./setup.sh
 ```
+
+Run it as yourself, not with `sudo`. Setup walks through:
+
+1. Installing FaceGate's packages (GTK 4, `gtk4-layer-shell`, PyGObject, pycairo,
+   `v4l-utils`).
+2. Installing [Howdy](https://github.com/boltgolt/howdy) and `pam-python` from
+   the AUR with `paru` or `yay`, offering to install `paru` if neither exists.
+   Building dlib can take 10 minutes or more.
+3. Choosing the camera, preferring an infrared sensor when there is one.
+4. Running `install.sh`, which puts FaceGate in front of `sudo` and polkit
+   prompts. Your password still works as a fallback.
+5. Opening FaceGate's onboarding, which explains how it works and adds your
+   face.
+
+If Howdy is already set up, setup skips what's done. `sudo ./install.sh` on its
+own only does step 4.
+
+The supplied user service preloads the installed layer-shell library so the GTK
+introspection binding receives the layer role before GTK connects to Wayland.
 
 The installer creates a timestamped backup in `/etc/facegate/` before it edits
 the PAM file. To revert:
@@ -88,6 +124,13 @@ installed service:
 scripts/demo.sh
 ```
 
+To loop the Add Face scan with your real camera instead (it counts samples but
+never loads Howdy's models or saves a face):
+
+```bash
+scripts/demo.sh enroll
+```
+
 ## Development checks
 
 ```bash
@@ -103,7 +146,22 @@ The Unix socket is mode `0600` in `/run/user/$UID`, and the HUD lives entirely
 in the user's desktop session so it can render under Wayland. Its response only
 starts Howdy. A successful Howdy comparison remains the sole successful PAM
 result; the HUD cannot grant sudo on its own. FaceGate never stores camera
-frames, biometric templates, passwords, or sudo credentials.
+frames, passwords, or sudo credentials.
+
+FaceGate Settings reads and changes faces through two small root helpers,
+started with `pkexec`, because Howdy's models are root-only:
+
+- `facegate-faces-list` (polkit action `org.facegate.list-faces`) only returns
+  labels and dates, so an active local session needs no prompt.
+- `facegate-faces` (polkit action `org.facegate.manage-faces`) adds or removes
+  a face. It asks for admin authentication every time and never keeps it.
+
+Both only ever touch the models of the user who ran them, and each run does
+one thing and exits. Face templates are written to Howdy's store
+(`/usr/lib/security/howdy/models`) and never leave the machine. Preview frames
+stream only to the island over its `0600` socket and are not saved. The
+installed package is root-owned so no user process can change the helpers'
+code.
 
 ## Credits
 

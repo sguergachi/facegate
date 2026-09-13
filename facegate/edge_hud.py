@@ -14,11 +14,12 @@ content, so every frame on a high-refresh display is a real step.
 from __future__ import annotations
 
 import argparse
+import base64
 import math
 import os
 import socket
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -33,7 +34,7 @@ gi.require_version("Gtk4LayerShell", "1.0")
 gi.require_version("Pango", "1.0")
 from gi.repository import Gdk, Gio, GLib, Graphene, Gsk, Gtk, Gtk4LayerShell, Pango  # noqa: E402
 
-from .protocol import MAX_MESSAGE_BYTES, decode, encode
+from .protocol import MAX_MESSAGE_BYTES, MAX_STREAM_BYTES, PREVIEW_HEIGHT, PREVIEW_WIDTH, decode, encode
 
 SOCKET_NAME = "facegate.sock"
 SCAN_WATCHDOG_MS = 20_000
@@ -62,12 +63,15 @@ TEXT_WIDTH = ISLAND_WIDTH - 2 * 32
 
 # The surface leaves room for the concave shoulders and spring overshoot.
 SURFACE_WIDTH = ISLAND_WIDTH + 2 * SHOULDER + 24
-SURFACE_HEIGHT = 380
+SURFACE_HEIGHT = 440
 
 WHITE = (0.96, 0.96, 0.97)
 
 
 def default_socket_path() -> Path:
+    if os.environ.get("FACEGATE_SOCKET"):
+        # Lets a checkout's HUD and Settings talk without touching the installed one.
+        return Path(os.environ["FACEGATE_SOCKET"])
     return Path(os.environ.get("XDG_RUNTIME_DIR", "/run/user/%d" % os.getuid())) / SOCKET_NAME
 
 
@@ -79,12 +83,43 @@ def mix(first: float, second: float, amount: float) -> float:
     return first + (second - first) * amount
 
 
-def ease_out(progress: float) -> float:
-    return 1 - (1 - progress) ** 4
+def cubic_bezier(x1: float, y1: float, x2: float, y2: float) -> Callable[[float], float]:
+    """A CSS cubic-bezier timing function: progress in, eased progress out."""
+
+    def sample(a: float, b: float, t: float) -> float:
+        return 3 * a * (1 - t) ** 2 * t + 3 * b * (1 - t) * t * t + t ** 3
+
+    def curve(progress: float) -> float:
+        if progress <= 0.0 or progress >= 1.0:
+            return clamp(progress)
+        # Solve x(t) = progress by bisection; the curves are monotonic in x.
+        low, high = 0.0, 1.0
+        for _ in range(24):
+            middle = (low + high) / 2
+            if sample(x1, x2, middle) < progress:
+                low = middle
+            else:
+                high = middle
+        return sample(y1, y2, (low + high) / 2)
+
+    return curve
 
 
-def ease_in(progress: float) -> float:
-    return progress * progress
+# Emil Kowalski's strong UI curves: built-in easings are too weak to feel
+# intentional, and ease-in delays the very moment someone is watching.
+EASE_OUT = cubic_bezier(0.23, 1, 0.32, 1)
+EASE_IN_OUT = cubic_bezier(0.77, 0, 0.175, 1)
+EASE_OUT_CSS = "cubic-bezier(0.23, 1, 0.32, 1)"
+
+
+def reduced_motion() -> bool:
+    """Plasma's "Animation speed: Instant" turns GTK animations off.
+
+    Reduced motion means gentler, not none: keep fades and colour changes,
+    drop travel, scaling and bounce.
+    """
+    settings = Gtk.Settings.get_default()
+    return bool(settings) and not settings.get_property("gtk-enable-animations")
 
 
 def smoothstep(progress: float) -> float:
@@ -135,9 +170,8 @@ class Tween:
             return self.target
         if now <= self.start:
             return self.origin
-        progress = (now - self.start) / self.duration
-        curve = ease_out if self.target > self.origin else ease_in
-        return mix(self.origin, self.target, curve(progress))
+        # Appearing and leaving both start fast: ease-in is never used on UI.
+        return mix(self.origin, self.target, EASE_OUT((now - self.start) / self.duration))
 
     def done(self, now: float) -> bool:
         return self.duration <= 0 or now >= self.start + self.duration
@@ -331,6 +365,199 @@ class PresenceMark(Gtk.DrawingArea):
         self.queue_draw()
 
 
+# Enrollment preview ---------------------------------------------------------
+
+PREVIEW_RADIUS = 30
+PREVIEW_FEATHER = 36
+PREVIEW_TO_TITLE = 16
+# The progress trace outlines the rim, where the image has faded to nothing;
+# the bleed leaves room for its glow.
+TRACE_INSET = 2
+PREVIEW_BLEED = 6
+# Lit IR frames often arrive at half the camera rate; each fades into the next.
+FRAME_BLEND_SECONDS = 0.07
+IR_TINT = (0.84, 0.94, 1.0)
+PREVIEW_COLORS = {"scanning": MARK_PROFILES["scanning"][:3], "success": MARK_PROFILES["success"][:3], "failure": MARK_PROFILES["failure"][:3]}
+
+_feather_masks: dict[tuple[int, int], cairo.ImageSurface] = {}
+
+
+def feather_mask(width: int, height: int) -> cairo.ImageSurface:
+    """An A8 rounded rectangle whose last PREVIEW_FEATHER pixels fade to nothing."""
+    key = (width, height)
+    if key in _feather_masks:
+        return _feather_masks[key]
+    stride = cairo.ImageSurface.format_stride_for_width(cairo.FORMAT_A8, width)
+    data = bytearray(stride * height)
+    radius = min(PREVIEW_RADIUS, width / 2, height / 2)
+    half_width, half_height = width / 2 - radius, height / 2 - radius
+    for y in range(height):
+        qy = abs(y + 0.5 - height / 2) - half_height
+        row = y * stride
+        for x in range(width):
+            qx = abs(x + 0.5 - width / 2) - half_width
+            # Signed distance to the rounded rectangle, negative inside.
+            outside = math.hypot(max(qx, 0.0), max(qy, 0.0))
+            edge = outside + min(max(qx, qy), 0.0) - radius
+            data[row + x] = round(255 * smoothstep(clamp(-edge / PREVIEW_FEATHER)))
+    mask = cairo.ImageSurface.create_for_data(data, cairo.FORMAT_A8, width, height, stride)
+    _feather_masks[key] = mask
+    return mask
+
+
+def grey_surface(pixels: bytes, width: int, height: int) -> cairo.ImageSurface:
+    """Wrap 8-bit greyscale rows as an A8 surface: luminance becomes coverage."""
+    stride = cairo.ImageSurface.format_stride_for_width(cairo.FORMAT_A8, width)
+    if len(pixels) != width * height:
+        raise ValueError("frame size does not match its dimensions")
+    if stride == width:
+        data = bytearray(pixels)
+    else:
+        padding = bytes(stride - width)
+        data = bytearray(b"".join(pixels[row * width:(row + 1) * width] + padding for row in range(height)))
+    return cairo.ImageSurface.create_for_data(data, cairo.FORMAT_A8, width, height, stride)
+
+
+def rounded_rect_path(context: Any, x: float, y: float, width: float, height: float, radius: float) -> float:
+    """A clockwise rounded rectangle starting at top center; returns its length."""
+    radius = max(0.0, min(radius, width / 2, height / 2))
+    right, bottom = x + width, y + height
+    context.new_path()
+    context.move_to(x + width / 2, y)
+    context.line_to(right - radius, y)
+    context.arc(right - radius, y + radius, radius, -math.pi / 2, 0)
+    context.line_to(right, bottom - radius)
+    context.arc(right - radius, bottom - radius, radius, 0, math.pi / 2)
+    context.line_to(x + radius, bottom)
+    context.arc(x + radius, bottom - radius, radius, math.pi / 2, math.pi)
+    context.line_to(x, y + radius)
+    context.arc(x + radius, y + radius, radius, math.pi, 3 * math.pi / 2)
+    context.close_path()
+    return 2 * (width - 2 * radius) + 2 * (height - 2 * radius) + math.tau * radius
+
+
+@dataclass
+class PreviewModel:
+    """One frame of the enrollment preview."""
+
+    state: str = "scanning"
+    progress: float = 0.0
+    # 0 while scanning, rising to 1 as the result colour takes over.
+    result: float = 0.0
+    # A brief brightening each time a sample is captured.
+    pulse: float = 0.0
+    elapsed: float = 0.0
+    state_elapsed: float = 0.0
+    # How far the newest frame has faded in over the one before it.
+    blend: float = 1.0
+
+
+def paint_preview(context: Any, width: float, height: float, frame: cairo.ImageSurface | None, model: PreviewModel, previous: cairo.ImageSurface | None = None) -> None:
+    """The IR image feathered into a rounded rectangle, and the progress trace."""
+    color = PREVIEW_COLORS.get(model.state, PREVIEW_COLORS["scanning"])
+    context.save()
+    if model.state == "failure":
+        context.translate(6 * math.sin(model.state_elapsed * math.tau * 5.5) * math.exp(-model.state_elapsed * 6.5), 0)
+    if frame is not None:
+        glow = 0.9 + 0.1 * model.pulse
+        tint = tuple(mix(IR_TINT[index], color[index], 0.25 * model.result) * glow for index in range(3))
+        context.push_group()
+        # Adding weighted frames is an exact cross-fade of their luminance.
+        context.set_operator(cairo.OPERATOR_ADD)
+        blend = clamp(model.blend) if previous is not None else 1.0
+        for image, weight in ((previous, 1 - blend), (frame, blend)):
+            if image is None or weight <= 0.001:
+                continue
+            context.save()
+            context.scale(width / image.get_width(), height / image.get_height())
+            pattern = cairo.SurfacePattern(image)
+            pattern.set_filter(cairo.FILTER_GOOD)
+            context.set_source_rgba(*tint, weight)
+            context.mask(pattern)
+            context.restore()
+        context.set_operator(cairo.OPERATOR_OVER)
+        if model.pulse > 0.01:
+            context.set_source_rgba(*color, 0.1 * model.pulse)
+            context.paint()
+        context.pop_group_to_source()
+        context.mask_surface(feather_mask(round(width), round(height)), 0, 0)
+
+    length = rounded_rect_path(context, TRACE_INSET, TRACE_INSET, width - 2 * TRACE_INSET, height - 2 * TRACE_INSET, PREVIEW_RADIUS - TRACE_INSET)
+    context.set_line_cap(cairo.LINE_CAP_ROUND)
+    searching = (1 - model.progress) * (1 - model.result)
+    if searching > 0.01:
+        # A short comet circles until the first sample lands.
+        phase = (model.elapsed * 0.4) % 1.0
+        context.set_dash([length * 0.12, length * 0.88], (1 - phase) * length)
+        context.set_source_rgba(*color, 0.55 * searching)
+        context.set_line_width(2.0)
+        context.stroke_preserve()
+    progress = max(model.progress, model.result if model.state == "success" else 0.0)
+    if progress > 0.002:
+        # Captured samples fill the rim clockwise from the top.
+        context.set_dash([] if progress >= 0.999 else [length * progress, length * 2], 0)
+        for line_width, alpha in ((7.0, 0.14 + 0.22 * model.pulse), (2.0, 0.95)):
+            context.set_line_width(line_width)
+            context.set_source_rgba(*color, alpha)
+            context.stroke_preserve()
+    context.new_path()
+    context.restore()
+
+
+class PreviewArea(Gtk.DrawingArea):
+    def __init__(self) -> None:
+        super().__init__()
+        self.set_content_width(PREVIEW_WIDTH + 2 * PREVIEW_BLEED)
+        self.set_content_height(PREVIEW_HEIGHT + 2 * PREVIEW_BLEED)
+        self.model = PreviewModel()
+        self.progress = Spring(0.0)
+        self.progress.configure(0.45, 0.9)
+        # Written by the socket thread, picked up on the frame clock.
+        self.latest: cairo.ImageSurface | None = None
+        self.shown: cairo.ImageSurface | None = None
+        self.previous: cairo.ImageSurface | None = None
+        self.set_draw_func(self._draw)
+
+    def _draw(self, _area: Gtk.DrawingArea, context: Any, _width: int, _height: int) -> None:
+        context.translate(PREVIEW_BLEED, PREVIEW_BLEED)
+        paint_preview(context, PREVIEW_WIDTH, PREVIEW_HEIGHT, self.shown, self.model, self.previous)
+
+    def reset(self) -> None:
+        self.model = PreviewModel()
+        self.progress.value = self.progress.target = self.progress.velocity = 0.0
+        self.latest = self.shown = self.previous = None
+
+    def set_progress(self, value: float) -> None:
+        value = clamp(value)
+        if value > self.progress.target:
+            self.model.pulse = 1.0
+        self.progress.target = value
+
+    def set_state(self, state: str) -> None:
+        if state != self.model.state:
+            self.model.state = state
+            self.model.state_elapsed = 0.0
+            if state == "success":
+                self.progress.target = 1.0
+                self.model.pulse = 1.0
+
+    def advance(self, elapsed: float) -> None:
+        model = self.model
+        latest = self.latest
+        if latest is not self.shown:
+            self.previous, self.shown = self.shown, latest
+            model.blend = 0.0
+        model.blend = min(1.0, model.blend + elapsed / FRAME_BLEND_SECONDS)
+        model.elapsed += elapsed
+        model.state_elapsed += elapsed
+        self.progress.step(elapsed)
+        model.progress = clamp(self.progress.value)
+        model.pulse = max(0.0, model.pulse - elapsed / 0.45)
+        target = 0.0 if model.state == "scanning" else 1.0
+        model.result += (target - model.result) * (1 - math.exp(-elapsed * 8))
+        self.queue_draw()
+
+
 @dataclass(frozen=True)
 class View:
     state: str
@@ -341,6 +568,8 @@ class View:
     password: bool = False
     primary: str = "Approve"
     secondary: str = "Deny"
+    # Enrollment shows the live camera preview in place of the mark.
+    preview: bool = False
 
 
 APPROVAL_HINT = "Approve to verify with your face."
@@ -402,6 +631,18 @@ def approval_view(requester: object) -> View:
 SCANNING = View("scanning", "Looking for you", "Hold still for a moment.", False)
 SUCCESS = View("success", "Verified", "Continuing securely.", False)
 FAILURE = View("failure", "Not recognized", "Use your password instead.", False)
+ENROLLING = View("scanning", "Adding your face", "Waiting for the camera…", True, primary="", secondary="Cancel", preview=True)
+ENROLLED = View("success", "Face added", "You can now approve with a glance.", False, preview=True)
+
+
+def enroll_failed(detail: object) -> View:
+    return View("failure", "Couldn't add your face", _display_text(detail, 120) or "Please try again.", False, preview=True)
+
+
+@dataclass
+class Enrollment:
+    connection: socket.socket
+    finished: bool = False
 
 
 class Item:
@@ -437,6 +678,7 @@ class EdgeHud:
         self.window.connect("map", self._position_on_mapped_monitor)
 
         self.pending: PendingApproval | None = None
+        self.enrollment: Enrollment | None = None
         self.approval_timeout: int | None = None
         self.dismiss_timeout: int | None = None
         self.silenced = False
@@ -497,6 +739,10 @@ class EdgeHud:
         self.on_password_cancel: Callable[[], None] | None = None
         self.polkit: Any = None
 
+        self.preview = PreviewArea()
+        self.preview_item = Item(self.preview, PREVIEW_WIDTH + 2 * PREVIEW_BLEED)
+        self.preview_item.height = PREVIEW_HEIGHT + 2 * PREVIEW_BLEED
+        self.preview_item.y = TOP_INSET - PREVIEW_BLEED
         self.mark_item = Item(self.mark, MARK_SIZE + 2 * MARK_BLEED)
         self.mark_item.height = MARK_SIZE + 2 * MARK_BLEED
         self.mark_item.y = TOP_INSET - MARK_BLEED
@@ -507,7 +753,7 @@ class EdgeHud:
         self.actions_item.height = BUTTON_HEIGHT
         self.entry_item = Item(self.entry, CONTENT_WIDTH)
         self.entry_item.height = BUTTON_HEIGHT
-        self.items = (self.mark_item, self.title_item, self.command_item, self.detail_item, self.entry_item, self.actions_item)
+        self.items = (self.mark_item, self.preview_item, self.title_item, self.command_item, self.detail_item, self.entry_item, self.actions_item)
         for item in self.items:
             self.layer.put(item.widget, 0, 0)
             item.widget.set_opacity(0)
@@ -602,8 +848,10 @@ class EdgeHud:
                 text-shadow: none;
                 font-size: 15px;
                 font-weight: 600;
-                transition: background-color 180ms ease-out, color 180ms ease-out;
+                transition: background-color 180ms ease, color 180ms ease, transform 160ms cubic-bezier(0.23, 1, 0.32, 1);
             }
+            /* Press feedback: the button gives under the pointer. */
+            button:active { transform: scale(0.97); }
             button.primary { background-color: #f5f5f7; }
             button.primary label { color: #000000; }
             button.primary:hover { background-color: #ffffff; }
@@ -623,7 +871,7 @@ class EdgeHud:
                 background-color: #1c1c1e;
                 color: #f5f5f7;
                 font-size: 15px;
-                transition: box-shadow 180ms ease-out;
+                transition: box-shadow 180ms ease;
             }
             passwordentry.password:focus-within { box-shadow: inset 0 0 0 1.5px rgba(255, 255, 255, 0.28); }
             passwordentry.password text { color: #f5f5f7; caret-color: #f5f5f7; }
@@ -640,7 +888,7 @@ class EdgeHud:
         self.detail.set_text(view.detail)
         self.title_item.height = self.title.measure(Gtk.Orientation.VERTICAL, TEXT_WIDTH)[1]
         self.detail_item.height = self.detail.measure(Gtk.Orientation.VERTICAL, TEXT_WIDTH)[1]
-        self.title_item.y = TOP_INSET + MARK_SIZE + MARK_TO_TITLE
+        self.title_item.y = TOP_INSET + (PREVIEW_HEIGHT + PREVIEW_TO_TITLE if view.preview else MARK_SIZE + MARK_TO_TITLE)
         copy_bottom = self.title_item.y + self.title_item.height
         if view.command:
             self.command.set_text(view.command)
@@ -652,6 +900,7 @@ class EdgeHud:
             self.detail_item.y = copy_bottom + (COMMAND_GAP if view.command else TITLE_TO_DETAIL)
             copy_bottom = self.detail_item.y + self.detail_item.height
         self.approve.set_label(view.primary)
+        self.approve.set_visible(bool(view.primary))
         self.deny.set_label(view.secondary)
         if view.password:
             self.entry_item.y = copy_bottom + FIELD_GAP
@@ -665,8 +914,9 @@ class EdgeHud:
     def _place(self, item: Item) -> None:
         alpha = item.alpha.value(self.now)
         # Content settles downward into place, following the island's motion.
-        offset = (1 - alpha) * -8
-        scale = 0.96 + 0.04 * alpha
+        travel = 0.0 if reduced_motion() else 1 - alpha
+        offset = travel * -8
+        scale = 1 - 0.04 * travel
         x = (SURFACE_WIDTH - item.width) / 2
         transform = (
             Gsk.Transform()
@@ -711,10 +961,13 @@ class EdgeHud:
         self.departing = False
         self.scheduled.clear()
         self.mark.set_state(view.state)
-        self.mark_item.alpha.to(1, self.now, 0.3)
+        self.preview.set_state(view.state)
+        top, other = self._top_items(view)
+        top.alpha.to(1, self.now, 0.24)
+        other.alpha.to(0, self.now, 0.14)
         self.width.configure(0.5, 0.86)
         self.width.target = ISLAND_WIDTH
-        copy = lambda shown: (shown.title, shown.command, shown.detail, shown.actions, shown.password, shown.primary, shown.secondary)
+        copy = lambda shown: (shown.title, shown.command, shown.detail, shown.actions, shown.password, shown.primary, shown.secondary, shown.preview)
         if previous and copy(previous) == copy(view):
             # Only the mark changes (for example success after a password check).
             return
@@ -730,11 +983,31 @@ class EdgeHud:
             incoming += ([self.detail_item] if view.detail else []) + ([self.entry_item] if view.password else [])
             incoming += [self.actions_item] if view.actions else []
             for index, item in enumerate(incoming):
-                item.alpha.to(1, now, 0.36, index * 0.04)
+                item.alpha.to(1, now, 0.26, index * 0.04)
             if view.password:
                 self.entry.grab_focus()
 
         self._at(0.15, swap)
+
+    def _top_items(self, view: View) -> tuple[Item, Item]:
+        """The item heading the island for this view, and the one it replaces."""
+        return (self.preview_item, self.mark_item) if view.preview else (self.mark_item, self.preview_item)
+
+    def update_detail(self, detail: str) -> None:
+        """Swap only the detail line, easing the island to its new height."""
+        view = self.view
+        if not view or self.departing or view.detail == detail:
+            return
+        self.view = replace(view, detail=detail)
+        self.detail_item.alpha.to(0, self.now, 0.1)
+
+        def swap(now: float) -> None:
+            if self.view and self.view.detail == detail:
+                self.height.configure(0.45, 0.9)
+                self.height.target = self._layout(self.view)
+                self.detail_item.alpha.to(1, now, 0.24)
+
+        self._at(0.1, swap)
 
     def _arrive(self, view: View) -> None:
         self.visible = True
@@ -751,11 +1024,11 @@ class EdgeHud:
         self.height.configure(0.56, 0.8)
         self.width.target = ISLAND_WIDTH
         self.height.target = self._layout(view)
-        stagger = [self.mark_item, self.title_item] + ([self.command_item] if view.command else [])
+        stagger = [self._top_items(view)[0], self.title_item] + ([self.command_item] if view.command else [])
         stagger += ([self.detail_item] if view.detail else []) + ([self.entry_item] if view.password else [])
         stagger += [self.actions_item] if view.actions else []
         for index, item in enumerate(stagger):
-            item.alpha.to(1, self.now, 0.42, 0.12 + index * 0.045)
+            item.alpha.to(1, self.now, 0.3, 0.1 + index * 0.04)
         if view.password:
             GLib.idle_add(lambda: (self.entry.grab_focus(), False)[1])
         # Follow the pointer: choose the output afresh every time we appear.
@@ -811,6 +1084,8 @@ class EdgeHud:
         self.width.step(elapsed)
         self.height.step(elapsed)
         self.mark.advance(elapsed)
+        if self.view and self.view.preview:
+            self.preview.advance(elapsed)
         for item in self.items:
             self._place(item)
         self.backdrop.queue_draw()
@@ -870,7 +1145,7 @@ class EdgeHud:
         self.resolve(True)
 
     def _secondary(self) -> None:
-        if self.view and self.view.password:
+        if self.view and (self.view.password or self.view.preview):
             self.cancel()
             return
         self.resolve(False)
@@ -903,6 +1178,13 @@ class EdgeHud:
         if self.dismiss_timeout:
             GLib.source_remove(self.dismiss_timeout)
             self.dismiss_timeout = None
+        if self.enrollment:
+            # Settings stops the scan; its closing the stream ends the session.
+            enrollment, self.enrollment = self.enrollment, None
+            if not enrollment.finished:
+                self._send(enrollment.connection, {"cancel": True})
+            self.dismiss()
+            return
         if self.polkit and self.polkit.active:
             # Cancelling a polkit request cancels the whole authentication.
             self.polkit.cancel_active()
@@ -962,6 +1244,63 @@ class EdgeHud:
         else:
             self.dismiss()
 
+    @staticmethod
+    def _send(connection: socket.socket, payload: dict[str, Any]) -> None:
+        try:
+            connection.sendall(encode(payload))
+        except OSError:
+            pass
+
+    # Enrollment: FaceGate Settings streams the scan while it adds a face.
+
+    @property
+    def enrolling(self) -> bool:
+        return bool(self.enrollment and not self.enrollment.finished)
+
+    def begin_enrollment(self, connection: socket.socket) -> bool:
+        if self.pending or self.enrolling or (self.polkit and self.polkit.active):
+            self.reply(connection, {"ok": False, "reason": "busy"})
+            return False
+        self._send(connection, {"ok": True})
+        # A retry may start while the last result is still showing.
+        self.enrollment = Enrollment(connection)
+        self.silenced = False
+        self.preview.reset()
+        self._present(ENROLLING)
+        return False
+
+    def enrollment_message(self, connection: socket.socket, message: dict[str, Any]) -> bool:
+        enrollment = self.enrollment
+        if not enrollment or enrollment.connection is not connection or enrollment.finished:
+            return False
+        if "progress" in message:
+            try:
+                self.preview.set_progress(float(message["progress"]))
+            except (TypeError, ValueError):
+                pass
+        if isinstance(message.get("hint"), str):
+            self.update_detail(_display_text(message["hint"], 120))
+        result = message.get("result")
+        if result in ("success", "failure"):
+            enrollment.finished = True
+            self._present(ENROLLED if result == "success" else enroll_failed(message.get("detail")))
+            self.dismiss_timeout = GLib.timeout_add(1_600 if result == "success" else 2_600, self._end_enrollment_view)
+        return False
+
+    def _end_enrollment_view(self) -> bool:
+        if self.enrollment and self.enrollment.finished:
+            self.enrollment = None
+        return self.dismiss()
+
+    def end_enrollment(self, connection: socket.socket) -> bool:
+        """The stream closed. Without a result, Settings went away mid-scan."""
+        enrollment = self.enrollment
+        connection.close()
+        if enrollment and enrollment.connection is connection and not enrollment.finished:
+            self.enrollment = None
+            self.dismiss()
+        return False
+
     def _approval_timed_out(self) -> bool:
         self.approval_timeout = None
         self.resolve(False)
@@ -970,7 +1309,7 @@ class EdgeHud:
     def handle_request(self, message: dict[str, Any], connection: socket.socket) -> bool:
         phase = message.get("phase")
         if phase == "approval":
-            if self.pending:
+            if self.pending or self.enrolling:
                 self.reply(connection, {"approved": False, "reason": "busy"})
                 return False
             requester = message.get("requester")
@@ -1032,10 +1371,64 @@ class HudServer:
     def _read_one(self, connection: socket.socket) -> None:
         try:
             connection.settimeout(25)
-            message = decode(connection.recv(MAX_MESSAGE_BYTES + 1).split(b"\n", 1)[0])
-            GLib.idle_add(self.hud.handle_request, message, connection)
+            first, rest = self._first_line(connection)
+            message = decode(first)
         except (OSError, ValueError):
             connection.close()
+            return
+        if message.get("phase") == "enroll":
+            self._stream(connection, rest)
+            return
+        GLib.idle_add(self.hud.handle_request, message, connection)
+
+    @staticmethod
+    def _first_line(connection: socket.socket) -> tuple[bytes, bytes]:
+        buffer = b""
+        while b"\n" not in buffer:
+            chunk = connection.recv(MAX_MESSAGE_BYTES + 1)
+            if not chunk:
+                raise ValueError("connection closed before a message")
+            buffer += chunk
+            if len(buffer) > MAX_MESSAGE_BYTES and b"\n" not in buffer:
+                raise ValueError("first message too long")
+        first, rest = buffer.split(b"\n", 1)
+        return first, rest
+
+    def _stream(self, connection: socket.socket, buffer: bytes) -> None:
+        """Follow one enrollment until Settings closes it.
+
+        Frames are decoded here, off the main loop, and only the newest one is
+        kept: the island draws whatever is latest on its next frame.
+        """
+        GLib.idle_add(self.hud.begin_enrollment, connection)
+        connection.settimeout(None)
+        try:
+            while True:
+                while b"\n" in buffer:
+                    line, buffer = buffer.split(b"\n", 1)
+                    message = decode(line, MAX_STREAM_BYTES)
+                    if "frame" in message:
+                        self._take_frame(message)
+                    else:
+                        GLib.idle_add(self.hud.enrollment_message, connection, message)
+                if len(buffer) > MAX_STREAM_BYTES:
+                    raise ValueError("stream message too long")
+                chunk = connection.recv(65_536)
+                if not chunk:
+                    break
+                buffer += chunk
+        except (OSError, ValueError):
+            pass
+        GLib.idle_add(self.hud.end_enrollment, connection)
+
+    def _take_frame(self, message: dict[str, Any]) -> None:
+        try:
+            width, height = int(message["w"]), int(message["h"])
+            if (width, height) != (PREVIEW_WIDTH, PREVIEW_HEIGHT):
+                return
+            self.hud.preview.latest = grey_surface(base64.b64decode(message["frame"]), width, height)
+        except (KeyError, TypeError, ValueError):
+            pass
 
 
 class Demo:
@@ -1102,8 +1495,14 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="FaceGate top-edge layer-shell HUD")
     parser.add_argument("--socket", type=Path, default=default_socket_path())
     parser.add_argument("--demo", action="store_true", help="loop the HUD flow without PAM or the camera")
+    parser.add_argument("--demo-enroll", action="store_true", help="loop the Add Face scan with the real camera, saving nothing")
+    parser.add_argument("--camera", help="camera for --demo-enroll (default: the first infrared one)")
     parser.add_argument("--no-polkit-agent", action="store_true", help="leave polkit prompts to the desktop's own agent")
     args = parser.parse_args()
+    if args.demo_enroll:
+        from .enroll_demo import main as enroll_demo
+
+        return enroll_demo(args.camera)
     if args.demo:
         hud = EdgeHud()
         Demo(hud).start()
