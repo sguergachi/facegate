@@ -4,10 +4,14 @@
   <img src="media/facegate-demo.gif" alt="FaceGate island on a KDE desktop: sudo approved by face, then a second attempt where the face isn't recognized and the password is used instead" width="960">
 </p>
 
-FaceGate adds an explicit, Face ID-style consent screen before Howdy uses the
-camera for `sudo`. On KDE/Wayland it uses a true layer-shell surface, so the
-black island is anchored to the monitor's physical top edge rather than placed
-as an ordinary desktop window. The visual HUD runs in your normal desktop
+FaceGate is a Face ID-style interface for
+[Howdy](https://github.com/boltgolt/howdy), the Linux face authentication
+project that does the real work: it drives the IR webcam and performs the face
+comparison. FaceGate doesn't replace any of that; it adds an explicit consent
+screen before Howdy uses the camera for `sudo`, and shows the scan and its
+result. On KDE/Wayland it uses a true layer-shell surface, so the black island
+is anchored to the monitor's physical top edge rather than placed as an
+ordinary desktop window. The visual HUD runs in your normal desktop
 session, while a tiny PAM adapter stays root-owned.
 
 ## What it changes
@@ -50,8 +54,10 @@ including the grid, concentric radii, and spring-based motion choreography.
 
 ## Install
 
-Requirements: an active KDE/Wayland graphical session, Howdy already working
-for `sudo`, `pam-python`, Python 3, GTK 4, and `gtk4-layer-shell`.
+Requirements: an active KDE/Wayland graphical session,
+[Howdy](https://github.com/boltgolt/howdy) installed and already working for
+`sudo` (follow its setup guide first), `pam-python`, Python 3, GTK 4, and
+`gtk4-layer-shell`.
 
 On Arch/KDE, the supplied user service preloads the installed layer-shell
 library so the GTK introspection binding receives the layer role before GTK
@@ -98,3 +104,11 @@ in the user's desktop session so it can render under Wayland. Its response only
 starts Howdy. A successful Howdy comparison remains the sole successful PAM
 result; the HUD cannot grant sudo on its own. FaceGate never stores camera
 frames, biometric templates, passwords, or sudo credentials.
+
+## Credits
+
+Face recognition, IR camera handling, and the PAM integration FaceGate builds on
+come from [Howdy](https://github.com/boltgolt/howdy) by boltgolt and its
+contributors. FaceGate is an independent UI layer and is not affiliated with the
+Howdy project; please report recognition or camera issues to Howdy and UI issues
+here.
