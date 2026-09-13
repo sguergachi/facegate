@@ -22,7 +22,7 @@ camera scan to begin.
 ## HUD states
 
 - **‹App› wants sudo** — names the app that ran sudo, the exact command, and
-  the app hosting it; the camera remains off until approval.
+  the app hosting it; the camera stays off until you approve.
 - **Looking for you** — a scanning arc sweeps the mark while Howdy runs.
 - **Verified** — the arc closes into a green ring before sudo continues.
 - **Not recognized** — a brief red shake, then the normal password prompt.
@@ -60,7 +60,7 @@ sudo ./uninstall.sh
 
 Run the HUD from this checkout without PAM, Howdy, or the camera. It loops the
 real flow (approve → simulated scan → alternating success/failure; decline via
-Use Password, the hover close button, or Escape) and does not touch the
+Deny, the hover close button, or Escape) and does not touch the
 installed service:
 
 ```bash

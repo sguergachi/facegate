@@ -339,7 +339,7 @@ class View:
     command: str = ""
 
 
-APPROVAL = View("approval", "Verify with Face", "The camera turns on only after you approve.", True)
+APPROVAL = View("approval", "Verify with Face", "", True)
 
 
 def _display_text(value: object, limit: int) -> str:
@@ -361,7 +361,7 @@ def approval_view(requester: object) -> View:
     if not app and not command:
         return APPROVAL
     title = "%s wants sudo" % app if app else "Sudo requested"
-    detail = "via %s · Camera starts on approval" % host if host else "Camera starts only after you approve."
+    detail = "via %s" % host if host else ""
     return View("approval", title, detail, True, command)
 SCANNING = View("scanning", "Looking for you", "Hold still for a moment.", False)
 SUCCESS = View("success", "Verified", "Continuing securely.", False)
@@ -439,16 +439,16 @@ class EdgeHud:
         self.command.set_hexpand(True)
         actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=BUTTON_GAP, homogeneous=True)
         actions.set_size_request(CONTENT_WIDTH, BUTTON_HEIGHT)
-        self.password = Gtk.Button(label="Use Password")
-        self.password.add_css_class("secondary")
+        self.deny = Gtk.Button(label="Deny")
+        self.deny.add_css_class("secondary")
         self.approve = Gtk.Button(label="Approve")
         self.approve.add_css_class("primary")
-        for button in (self.password, self.approve):
+        for button in (self.deny, self.approve):
             button.set_size_request(-1, BUTTON_HEIGHT)
             button.set_focus_on_click(False)
             actions.append(button)
         self.approve.connect("clicked", lambda *_: self.resolve(True))
-        self.password.connect("clicked", lambda *_: self.resolve(False))
+        self.deny.connect("clicked", lambda *_: self.resolve(False))
 
         self.mark_item = Item(self.mark, MARK_SIZE + 2 * MARK_BLEED)
         self.mark_item.height = MARK_SIZE + 2 * MARK_BLEED
@@ -610,16 +610,16 @@ class EdgeHud:
         self.title_item.height = self.title.measure(Gtk.Orientation.VERTICAL, TEXT_WIDTH)[1]
         self.detail_item.height = self.detail.measure(Gtk.Orientation.VERTICAL, TEXT_WIDTH)[1]
         self.title_item.y = TOP_INSET + MARK_SIZE + MARK_TO_TITLE
-        title_bottom = self.title_item.y + self.title_item.height
+        copy_bottom = self.title_item.y + self.title_item.height
         if view.command:
             self.command.set_text(view.command)
             self.command.set_tooltip_text(view.command)
             self.command_item.height = self.command_item.widget.measure(Gtk.Orientation.VERTICAL, CONTENT_WIDTH)[1]
-            self.command_item.y = title_bottom + COMMAND_GAP
-            self.detail_item.y = self.command_item.y + self.command_item.height + COMMAND_GAP
-        else:
-            self.detail_item.y = title_bottom + TITLE_TO_DETAIL
-        copy_bottom = self.detail_item.y + self.detail_item.height
+            self.command_item.y = copy_bottom + COMMAND_GAP
+            copy_bottom = self.command_item.y + self.command_item.height
+        if view.detail:
+            self.detail_item.y = copy_bottom + (COMMAND_GAP if view.command else TITLE_TO_DETAIL)
+            copy_bottom = self.detail_item.y + self.detail_item.height
         self.actions_item.y = copy_bottom + COPY_TO_ACTIONS
         if view.actions:
             return self.actions_item.y + BUTTON_HEIGHT + INSET
@@ -682,7 +682,7 @@ class EdgeHud:
             GLib.source_remove(self.dismiss_timeout)
             self.dismiss_timeout = None
         self.approve.set_sensitive(view.actions)
-        self.password.set_sensitive(view.actions)
+        self.deny.set_sensitive(view.actions)
         if not self.visible:
             self._arrive(view)
             return
@@ -704,7 +704,7 @@ class EdgeHud:
             self.height.configure(0.5, 0.86)
             self.height.target = self._layout(view)
             incoming = [self.title_item] + ([self.command_item] if view.command else [])
-            incoming += [self.detail_item] + ([self.actions_item] if view.actions else [])
+            incoming += ([self.detail_item] if view.detail else []) + ([self.actions_item] if view.actions else [])
             for index, item in enumerate(incoming):
                 item.alpha.to(1, now, 0.36, index * 0.04)
 
@@ -728,7 +728,7 @@ class EdgeHud:
         self.width.target = ISLAND_WIDTH
         self.height.target = self._layout(view)
         stagger = [self.mark_item, self.title_item] + ([self.command_item] if view.command else [])
-        stagger += [self.detail_item] + ([self.actions_item] if view.actions else [])
+        stagger += ([self.detail_item] if view.detail else []) + ([self.actions_item] if view.actions else [])
         for index, item in enumerate(stagger):
             item.alpha.to(1, self.now, 0.42, 0.12 + index * 0.045)
         # Follow the pointer: choose the output afresh every time we appear.
@@ -747,7 +747,7 @@ class EdgeHud:
         self.departing = True
         self.scheduled.clear()
         self.approve.set_sensitive(False)
-        self.password.set_sensitive(False)
+        self.deny.set_sensitive(False)
         self.close.set_can_target(False)
         for item in self.items:
             item.alpha.to(0, self.now, 0.16)
@@ -973,7 +973,7 @@ class Demo:
         self.reader: socket.socket | None = None
 
     def start(self) -> None:
-        print("[demo] FaceGate test mode — Approve, Use Password, hover to close, or Esc. Ctrl+C quits.", flush=True)
+        print("[demo] FaceGate test mode — Approve, Deny, hover to close, or Esc. Ctrl+C quits.", flush=True)
         GLib.timeout_add(600, self._request)
 
     def _request(self) -> bool:

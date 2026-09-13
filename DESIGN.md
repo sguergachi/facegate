@@ -25,7 +25,7 @@ its height follows the state rather than leaving dead space.
 
 Text blocks are 280 wide (32 from each edge) so copy never runs to the rim.
 Only two button levels exist: a white primary (**Approve**, right) and a dark
-secondary (**Use Password**, left). Scanning and result states show no button,
+secondary (**Deny**, left; declining the scan leaves sudo at its password prompt). Scanning and result states show no button,
 because Howdy cannot be interrupted once it is running.
 
 Colours follow Apple's dark palette: `#000` island, `#f5f5f7` label, `#98989d`
@@ -77,7 +77,7 @@ The PAM adapter runs inside `sudo`, so it reads the exact command from its own
 argv and walks up the process tree, skipping shells and wrappers, to name the
 app that ran it and the app hosting that (for example **Claude Code** via
 **T3 Code**). The approval title becomes "‹app› wants sudo", the command sits
-in a single-line monospace chip (8 pt from title and detail, middle-ellipsized,
-full content width), and the detail names the host. The text is flattened to
+in a single-line monospace chip (8 pt below the title, middle-ellipsized,
+full content width), and a "via ‹host›" line follows only when there is a host. The text is flattened to
 printable characters and length-limited. It is informative only: a process can
 rename itself, so it never influences authentication.
