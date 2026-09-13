@@ -8,11 +8,17 @@ session, while a tiny PAM adapter stays root-owned.
 
 ## What it changes
 
-Only the Howdy rule in `/etc/pam.d/sudo` is replaced:
+Only the Howdy rules for `sudo` and polkit are replaced:
 
 ```text
-sudo → FaceGate consent HUD → existing Howdy compare.py → sudo or password fallback
+sudo / pkexec / KDE admin prompt → FaceGate consent HUD → existing Howdy compare.py → allow, or password fallback
 ```
+
+- `/etc/pam.d/sudo` is edited in place (timestamped backup in `/etc/facegate/`).
+- Polkit's rule ships in `/usr/lib/pam.d/polkit-1`, so the installer writes an
+  overriding `/etc/pam.d/polkit-1` with the Howdy line gated. It survives package
+  updates, and the uninstaller removes it. For polkit the island reads
+  "‹app› wants admin access"; KDE's own password dialog still opens alongside it.
 
 SDDM is deliberately untouched. If FaceGate is closed, rejects the request,
 times out, or face recognition fails, PAM continues to the normal password

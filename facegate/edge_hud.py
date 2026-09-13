@@ -358,9 +358,13 @@ def approval_view(requester: object) -> View:
     app = _display_text(requester.get("app"), 32)
     host = _display_text(requester.get("host"), 32)
     command = _display_text(requester.get("command"), 160)
+    # sudo and polkit (pkexec, and graphical "Authentication Required" prompts).
+    wants = "admin access" if requester.get("service") == "polkit-1" else "sudo"
     if not app and not command:
-        return APPROVAL
-    title = "%s wants sudo" % app if app else "Sudo requested"
+        if wants == "sudo":
+            return APPROVAL
+        return View("approval", "Admin access requested", APPROVAL_HINT, True)
+    title = "%s wants %s" % (app, wants) if app else "%s requested" % wants.capitalize()
     # Apple-style: say who is asking, then how approving allows it.
     detail = "via %s\n%s" % (host, APPROVAL_HINT) if host else APPROVAL_HINT
     return View("approval", title, detail, True, command)

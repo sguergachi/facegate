@@ -77,12 +77,16 @@ STOP_AT = frozenset(["systemd", "init", "kwin_wayland", "plasmashell", "sddm", "
 MAX_COMMAND_CHARS = 160
 
 
-def read_process(pid):
+def read_stat(pid):
     with open("/proc/%d/stat" % pid) as stat:
         raw = stat.read()
-    # comm may contain spaces or parentheses; the parent pid follows the last ')'.
-    comm = raw[raw.index("(") + 1:raw.rindex(")")]
-    parent = int(raw[raw.rindex(")") + 2:].split()[1])
+    # comm may contain spaces or parentheses; the other fields follow the last ')'.
+    return raw[raw.index("(") + 1:raw.rindex(")")], raw[raw.rindex(")") + 2:].split()
+
+
+def read_process(pid):
+    comm, fields = read_stat(pid)
+    parent = int(fields[1])
     with open("/proc/%d/cmdline" % pid) as cmdline:
         argv = [arg for arg in cmdline.read().split("\0") if arg]
     return comm, parent, argv
@@ -102,14 +106,45 @@ def quote(arg):
     return "'" + arg.replace("'", "'\"'\"'") + "'"
 
 
-def describe_requester(sudo_pid):
-    """Name the app that ran sudo and the exact command, for display only.
+def real_uid(pid):
+    with open("/proc/%d/status" % pid) as status:
+        for line in status:
+            if line.startswith("Uid:"):
+                return int(line.split()[1])
+    return -1
+
+
+def newest_process(name, uid):
+    """The most recently started process called name run by uid, if any.
+
+    Matches the real uid: setuid programs such as pkexec run as root.
+    """
+    newest, newest_start = None, -1
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            comm, fields = read_stat(int(entry))
+            if comm != name or real_uid(int(entry)) != uid:
+                continue
+            start = int(fields[19])
+        except (IOError, OSError, ValueError, IndexError):
+            continue
+        if start > newest_start:
+            newest, newest_start = int(entry), start
+    return newest
+
+
+def describe_requester(pid):
+    """Name the app that ran a privileged command and the exact command, for
+    display only.
 
     A process can rename itself, so this is informative, never an
     authorization input.
     """
-    _comm, parent, argv = read_process(sudo_pid)
-    command = " ".join(["sudo"] + [quote(arg) for arg in argv[1:]])
+    _comm, parent, argv = read_process(pid)
+    program = os.path.basename(argv[0]) if argv else "sudo"
+    command = " ".join([program] + [quote(arg) for arg in argv[1:]])
     command = "".join(char if char >= " " else " " for char in command)
     if len(command) > MAX_COMMAND_CHARS:
         command = command[:MAX_COMMAND_CHARS - 1] + u"…".encode("utf-8")
@@ -164,15 +199,23 @@ def do_auth(pamh):
         log("Unable to read Howdy configuration: %s" % error)
         return pamh.PAM_AUTHINFO_UNAVAIL
 
+    service = getattr(pamh, "service", None) or "sudo"
     try:
-        requester = describe_requester(os.getpid())
+        if service == "polkit-1":
+            # PAM runs in polkit's agent helper, a child of the desktop's
+            # authentication agent; the requester is the pkexec that asked.
+            pkexec = newest_process("pkexec", pwd.getpwnam(username).pw_uid)
+            requester = describe_requester(pkexec) if pkexec else {}
+        else:
+            requester = describe_requester(os.getpid())
     except Exception as error:
-        log("Unable to describe the sudo requester: %s" % error)
+        log("Unable to describe the %s requester: %s" % (service, error))
         requester = {}
+    requester["service"] = service
     consent = request_hud(
         username,
         "approval",
-        {"service": "sudo", "timeout_ms": CONSENT_TIMEOUT_SECONDS * 1000, "requester": requester},
+        {"service": service, "timeout_ms": CONSENT_TIMEOUT_SECONDS * 1000, "requester": requester},
         timeout=CONSENT_TIMEOUT_SECONDS + 2,
     )
     if not consent or not consent.get("approved"):

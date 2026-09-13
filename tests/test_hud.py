@@ -75,8 +75,13 @@ class RequesterTests(unittest.TestCase):
         self.assertEqual(approval_view({"app": "Konsole", "command": "sudo -v"}).detail, "Approve to verify with your face.")
         self.assertTrue(view.actions)
 
+    def test_polkit_requests_ask_for_admin_access(self):
+        view = approval_view({"service": "polkit-1", "app": "Dolphin", "command": "pkexec /usr/bin/kate"})
+        self.assertEqual(view.title, "Dolphin wants admin access")
+        self.assertEqual(approval_view({"service": "polkit-1"}).title, "Admin access requested")
+
     def test_missing_or_malformed_requester_keeps_the_generic_prompt(self):
-        for requester in (None, {}, "Konsole", {"app": "", "command": None}):
+        for requester in (None, {}, "Konsole", {"app": "", "command": None}, {"service": "sudo"}):
             self.assertEqual(approval_view(requester), APPROVAL)
 
     def test_requester_text_is_flattened_and_bounded(self):
