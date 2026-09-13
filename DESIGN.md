@@ -54,15 +54,12 @@ secondary label, `#1c1c1e` secondary fill; cyan `#64d2ff` for scanning, green
 - **Exit:** content fades in 160 ms, then the island retracts into the bezel
   on a critically damped spring.
 
-## Close
+## Dismissal
 
-A 28 pt round close button sits 16 pt from the island's top and right edges.
-It fades in over 180 ms once the mouse moves over the island (an island that
-opens under a resting cursor does not reveal it) and fades out
-120 ms after it leaves, so it never competes with the two primary choices.
-Close (or Escape) declines a pending approval, which falls back to the
-password prompt, or dismisses any other state. The island then stays hidden
-for the rest of that attempt, even if Howdy reports a result afterwards.
+There is no separate close control: **Deny** declines the request (sudo falls
+back to its password prompt). Escape does the same, or dismisses any other
+state and keeps the island hidden for the rest of that attempt. A 20 s
+watchdog closes a scan that never receives a result.
 
 ## Placement
 

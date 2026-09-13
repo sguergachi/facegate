@@ -27,8 +27,7 @@ camera scan to begin.
 - **Verified** — the arc closes into a green ring before sudo continues.
 - **Not recognized** — a brief red shake, then the normal password prompt.
 
-Hover the island to reveal a close button (or press Escape) if you want to
-cancel or it ever lingers.
+Press **Deny** to decline, or Escape to dismiss the island at any point.
 
 The spacing and hierarchy are governed by the measured [layout contract](DESIGN.md),
 including the grid, concentric radii, and spring-based motion choreography.
@@ -60,7 +59,7 @@ sudo ./uninstall.sh
 
 Run the HUD from this checkout without PAM, Howdy, or the camera. It loops the
 real flow (approve → simulated scan → alternating success/failure; decline via
-Deny, the hover close button, or Escape) and does not touch the
+Deny or Escape) and does not touch the
 installed service:
 
 ```bash
