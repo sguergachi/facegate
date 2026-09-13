@@ -48,15 +48,16 @@ class HudRequestTests(unittest.TestCase):
 
     def test_ring_completes_clockwise(self):
         """In y-down screen space a rising angle is clockwise; the head must never back up."""
-        model = MarkModel("success", MARK_PROFILES["scanning"], 0.0, 0.0, 0.0, 0.0)
-        spin_turns = 0.0
-        previous = ring_head(0.0, mark_values(model)[4])
-        for _ in range(110):
-            model.transition = min(1.0, model.transition + 1 / (0.55 * 144))
-            spin_turns += mark_values(model)[-1] / 144
-            head = ring_head(spin_turns, mark_values(model)[4])
-            self.assertGreaterEqual(head, previous - 1e-9)
-            previous = head
+        for result in ("success", "failure"):
+            model = MarkModel(result, MARK_PROFILES["scanning"], 0.0, 0.0, 0.0, 0.0)
+            spin_turns = 0.0
+            previous = ring_head(0.0, mark_values(model)[4])
+            for _ in range(110):
+                model.transition = min(1.0, model.transition + 1 / (0.55 * 144))
+                spin_turns += mark_values(model)[-1] / 144
+                head = ring_head(spin_turns, mark_values(model)[4])
+                self.assertGreaterEqual(head, previous - 1e-9, result)
+                previous = head
 
     def test_state_change_mid_transition_starts_from_what_is_visible(self):
         model = MarkModel("scanning", MARK_PROFILES["approval"], 0.4)
