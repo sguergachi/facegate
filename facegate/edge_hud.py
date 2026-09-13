@@ -50,6 +50,7 @@ MARK_TO_TITLE = 16
 TITLE_TO_DETAIL = 4
 COMMAND_GAP = 8
 COPY_TO_ACTIONS = 24
+FIELD_GAP = 16
 BUTTON_HEIGHT = 44
 BUTTON_GAP = 8
 STATUS_BOTTOM = 28
@@ -61,7 +62,7 @@ TEXT_WIDTH = ISLAND_WIDTH - 2 * 32
 
 # The surface leaves room for the concave shoulders and spring overshoot.
 SURFACE_WIDTH = ISLAND_WIDTH + 2 * SHOULDER + 24
-SURFACE_HEIGHT = 320
+SURFACE_HEIGHT = 380
 
 WHITE = (0.96, 0.96, 0.97)
 
@@ -170,6 +171,7 @@ RING_SECTORS = 72
 # tail, 1 = even ring), smile, eye openness, spin (turns/s)
 MARK_PROFILES = {
     "approval": (*WHITE, 0.16, 0.0, 0.0, 0.0, 0.55, 1.0, 0.0),
+    "password": (*WHITE, 0.16, 0.0, 0.0, 0.0, 0.3, 1.0, 0.0),
     "scanning": (0.39, 0.82, 1.00, 0.08, 0.28, 1.0, 0.0, 0.2, 0.92, 0.85),
     "success": (0.19, 0.82, 0.35, 0.0, 1.0, 1.0, 1.0, 1.0, 0.9, 0.0),
     "failure": (1.00, 0.27, 0.23, 0.0, 1.0, 0.9, 1.0, -0.3, 0.85, 0.0),
@@ -336,6 +338,9 @@ class View:
     detail: str
     actions: bool
     command: str = ""
+    password: bool = False
+    primary: str = "Approve"
+    secondary: str = "Deny"
 
 
 APPROVAL_HINT = "Approve to verify with your face."
@@ -347,6 +352,38 @@ def _display_text(value: object, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+PASSWORD_HINT = "Enter your password to allow this."
+PASSWORD_ERROR = "Incorrect password. Try again."
+
+
+def _request_copy(requester: object) -> tuple[str, str, list[str]]:
+    """Title, command, and context lines shared by the approval and password views."""
+    if not isinstance(requester, dict):
+        return "Verify with Face", "", []
+    app = _display_text(requester.get("app"), 32)
+    host = _display_text(requester.get("host"), 32)
+    command = _display_text(requester.get("command"), 160)
+    # polkit explains itself ("Authentication is required to ...") when there is no command.
+    message = "" if command else _display_text(requester.get("message"), 120)
+    wants = "admin access" if requester.get("service") == "polkit-1" else "sudo"
+    if app:
+        title = "%s wants %s" % (app, wants)
+    elif wants == "sudo" and not command:
+        title = "Verify with Face"
+    else:
+        title = "%s requested" % wants.capitalize()
+    lines = (["via %s" % host] if host else []) + ([message] if message else [])
+    return title, command, lines
+
+
+def password_view(requester: object, error: bool = False) -> View:
+    title, command, lines = _request_copy(requester)
+    if title == "Verify with Face":
+        title = "Password required"
+    detail = "\n".join(lines + [PASSWORD_ERROR if error else PASSWORD_HINT])
+    return View("password", title, detail, True, command, password=True, primary="Allow", secondary="Cancel")
+
+
 def approval_view(requester: object) -> View:
     """Say who is asking, as reported by the root-side PAM adapter.
 
@@ -355,19 +392,13 @@ def approval_view(requester: object) -> View:
     """
     if not isinstance(requester, dict):
         return APPROVAL
-    app = _display_text(requester.get("app"), 32)
-    host = _display_text(requester.get("host"), 32)
-    command = _display_text(requester.get("command"), 160)
-    # sudo and polkit (pkexec, and graphical "Authentication Required" prompts).
-    wants = "admin access" if requester.get("service") == "polkit-1" else "sudo"
-    if not app and not command:
-        if wants == "sudo":
-            return APPROVAL
-        return View("approval", "Admin access requested", APPROVAL_HINT, True)
-    title = "%s wants %s" % (app, wants) if app else "%s requested" % wants.capitalize()
+    title, command, lines = _request_copy(requester)
+    if title == "Verify with Face" and not lines:
+        return APPROVAL
     # Apple-style: say who is asking, then how approving allows it.
-    detail = "via %s\n%s" % (host, APPROVAL_HINT) if host else APPROVAL_HINT
-    return View("approval", title, detail, True, command)
+    return View("approval", title, "\n".join(lines + [APPROVAL_HINT]), True, command)
+
+
 SCANNING = View("scanning", "Looking for you", "Hold still for a moment.", False)
 SUCCESS = View("success", "Verified", "Continuing securely.", False)
 FAILURE = View("failure", "Not recognized", "Use your password instead.", False)
@@ -388,6 +419,7 @@ class Item:
 class PendingApproval:
     connection: socket.socket
     request_id: str
+    polkit: bool = False
 
 
 class EdgeHud:
@@ -452,8 +484,18 @@ class EdgeHud:
             button.set_size_request(-1, BUTTON_HEIGHT)
             button.set_focus_on_click(False)
             actions.append(button)
-        self.approve.connect("clicked", lambda *_: self.resolve(True))
-        self.deny.connect("clicked", lambda *_: self.resolve(False))
+        self.approve.connect("clicked", lambda *_: self._primary())
+        self.deny.connect("clicked", lambda *_: self._secondary())
+        self.entry = Gtk.PasswordEntry()
+        self.entry.add_css_class("password")
+        self.entry.set_show_peek_icon(True)
+        self.entry.set_property("placeholder-text", "Password")
+        self.entry.set_size_request(CONTENT_WIDTH, BUTTON_HEIGHT)
+        self.entry.connect("activate", lambda *_: self._primary())
+        # Set by the polkit agent while it shows the password view.
+        self.on_password: Callable[[str], None] | None = None
+        self.on_password_cancel: Callable[[], None] | None = None
+        self.polkit: Any = None
 
         self.mark_item = Item(self.mark, MARK_SIZE + 2 * MARK_BLEED)
         self.mark_item.height = MARK_SIZE + 2 * MARK_BLEED
@@ -463,7 +505,9 @@ class EdgeHud:
         self.command_item = Item(command_row, CONTENT_WIDTH)
         self.actions_item = Item(actions, CONTENT_WIDTH)
         self.actions_item.height = BUTTON_HEIGHT
-        self.items = (self.mark_item, self.title_item, self.command_item, self.detail_item, self.actions_item)
+        self.entry_item = Item(self.entry, CONTENT_WIDTH)
+        self.entry_item.height = BUTTON_HEIGHT
+        self.items = (self.mark_item, self.title_item, self.command_item, self.detail_item, self.entry_item, self.actions_item)
         for item in self.items:
             self.layer.put(item.widget, 0, 0)
             item.widget.set_opacity(0)
@@ -569,6 +613,22 @@ class EdgeHud:
             button.secondary:hover { background-color: #2c2c2e; }
             button.secondary:active { background-color: #3a3a3c; }
             button:focus-visible { outline: 2px solid rgba(255, 255, 255, 0.4); outline-offset: 2px; }
+            passwordentry.password {
+                min-height: 44px;
+                padding: 0 14px;
+                border: none;
+                border-radius: 12px;
+                outline: none;
+                box-shadow: none;
+                background-color: #1c1c1e;
+                color: #f5f5f7;
+                font-size: 15px;
+                transition: box-shadow 180ms ease-out;
+            }
+            passwordentry.password:focus-within { box-shadow: inset 0 0 0 1.5px rgba(255, 255, 255, 0.28); }
+            passwordentry.password text { color: #f5f5f7; caret-color: #f5f5f7; }
+            passwordentry.password text placeholder { color: #6e6e73; }
+            passwordentry.password image { color: #8e8e93; }
         """)
         Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
 
@@ -591,6 +651,12 @@ class EdgeHud:
         if view.detail:
             self.detail_item.y = copy_bottom + (COMMAND_GAP if view.command else TITLE_TO_DETAIL)
             copy_bottom = self.detail_item.y + self.detail_item.height
+        self.approve.set_label(view.primary)
+        self.deny.set_label(view.secondary)
+        if view.password:
+            self.entry_item.y = copy_bottom + FIELD_GAP
+            self.actions_item.y = self.entry_item.y + BUTTON_HEIGHT + FIELD_GAP
+            return self.actions_item.y + BUTTON_HEIGHT + INSET
         self.actions_item.y = copy_bottom + COPY_TO_ACTIONS
         if view.actions:
             return self.actions_item.y + BUTTON_HEIGHT + INSET
@@ -625,6 +691,14 @@ class EdgeHud:
             self.dismiss_timeout = None
         self.approve.set_sensitive(view.actions)
         self.deny.set_sensitive(view.actions)
+        self.entry.set_sensitive(view.password)
+        if view.password and view != self.view:
+            self.entry.set_text("")
+        # Typing a password needs the keyboard without a click first.
+        Gtk4LayerShell.set_keyboard_mode(
+            self.window,
+            Gtk4LayerShell.KeyboardMode.EXCLUSIVE if view.password else Gtk4LayerShell.KeyboardMode.ON_DEMAND,
+        )
         if not self.visible:
             self._arrive(view)
             return
@@ -640,20 +714,25 @@ class EdgeHud:
         self.mark_item.alpha.to(1, self.now, 0.3)
         self.width.configure(0.5, 0.86)
         self.width.target = ISLAND_WIDTH
-        if previous and (previous.title, previous.command, previous.actions) == (view.title, view.command, view.actions):
+        copy = lambda shown: (shown.title, shown.command, shown.detail, shown.actions, shown.password, shown.primary, shown.secondary)
+        if previous and copy(previous) == copy(view):
+            # Only the mark changes (for example success after a password check).
             return
         # Outgoing copy leaves quickly; the island then reshapes around the
         # incoming copy while it settles in.
-        for item in (self.title_item, self.command_item, self.detail_item, self.actions_item):
+        for item in (self.title_item, self.command_item, self.detail_item, self.entry_item, self.actions_item):
             item.alpha.to(0, self.now, 0.14)
 
         def swap(now: float) -> None:
             self.height.configure(0.5, 0.86)
             self.height.target = self._layout(view)
             incoming = [self.title_item] + ([self.command_item] if view.command else [])
-            incoming += ([self.detail_item] if view.detail else []) + ([self.actions_item] if view.actions else [])
+            incoming += ([self.detail_item] if view.detail else []) + ([self.entry_item] if view.password else [])
+            incoming += [self.actions_item] if view.actions else []
             for index, item in enumerate(incoming):
                 item.alpha.to(1, now, 0.36, index * 0.04)
+            if view.password:
+                self.entry.grab_focus()
 
         self._at(0.15, swap)
 
@@ -673,9 +752,12 @@ class EdgeHud:
         self.width.target = ISLAND_WIDTH
         self.height.target = self._layout(view)
         stagger = [self.mark_item, self.title_item] + ([self.command_item] if view.command else [])
-        stagger += ([self.detail_item] if view.detail else []) + ([self.actions_item] if view.actions else [])
+        stagger += ([self.detail_item] if view.detail else []) + ([self.entry_item] if view.password else [])
+        stagger += [self.actions_item] if view.actions else []
         for index, item in enumerate(stagger):
             item.alpha.to(1, self.now, 0.42, 0.12 + index * 0.045)
+        if view.password:
+            GLib.idle_add(lambda: (self.entry.grab_focus(), False)[1])
         # Follow the pointer: choose the output afresh every time we appear.
         monitor = self._monitor_under_pointer()
         if monitor:
@@ -693,6 +775,10 @@ class EdgeHud:
         self.scheduled.clear()
         self.approve.set_sensitive(False)
         self.deny.set_sensitive(False)
+        self.entry.set_sensitive(False)
+        self.entry.set_text("")
+        self.on_password = self.on_password_cancel = None
+        Gtk4LayerShell.set_keyboard_mode(self.window, Gtk4LayerShell.KeyboardMode.ON_DEMAND)
         for item in self.items:
             item.alpha.to(0, self.now, 0.16)
 
@@ -766,13 +852,49 @@ class EdgeHud:
         context.fill()
 
     def _on_key(self, _controller: Any, keyval: int, _keycode: int, _state: Any) -> bool:
-        if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter) and self.pending:
-            self.resolve(True)
+        if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter) and (self.pending or self.on_password):
+            self._primary()
             return True
         if keyval == Gdk.KEY_Escape and self.visible:
             self.cancel()
             return True
         return False
+
+    def _primary(self) -> None:
+        if self.view and self.view.password:
+            if self.on_password and self.entry.get_text():
+                submit, password = self.on_password, self.entry.get_text()
+                self.password_busy(True)
+                submit(password)
+            return
+        self.resolve(True)
+
+    def _secondary(self) -> None:
+        if self.view and self.view.password:
+            self.cancel()
+            return
+        self.resolve(False)
+
+    def present_password(self, requester: object, on_password: Callable[[str], None], on_cancel: Callable[[], None], error: bool = False) -> None:
+        """The polkit fallback after Deny, a timeout, or no face match."""
+        self.silenced = False
+        self.on_password, self.on_password_cancel = on_password, on_cancel
+        self._present(password_view(requester, error))
+        self.password_busy(False)
+        if error:
+            # The mark shakes, then settles back to waiting for the password.
+            self.mark.set_state("failure")
+            GLib.timeout_add(700, lambda: (self.view and self.view.password and self.mark.set_state("password"), False)[1])
+
+    def password_busy(self, busy: bool) -> None:
+        """While PAM checks the password the field locks and the ring spins."""
+        # Locking with editable rather than sensitive keeps keyboard focus in place.
+        self.entry.set_editable(not busy)
+        self.approve.set_sensitive(not busy)
+        self.deny.set_sensitive(True)
+        self.mark.set_state("scanning" if busy else "password")
+        if not busy:
+            self.entry.grab_focus()
 
     def cancel(self) -> None:
         """Close on the user's request: decline any pending approval and stay
@@ -781,6 +903,10 @@ class EdgeHud:
         if self.dismiss_timeout:
             GLib.source_remove(self.dismiss_timeout)
             self.dismiss_timeout = None
+        if self.polkit and self.polkit.active:
+            # Cancelling a polkit request cancels the whole authentication.
+            self.polkit.cancel_active()
+            return
         if self.pending:
             self.resolve(False)
         else:
@@ -800,10 +926,13 @@ class EdgeHud:
         self._present(SCANNING)
         self.dismiss_timeout = GLib.timeout_add(SCAN_WATCHDOG_MS, self.dismiss)
 
-    def present_result(self, success: bool) -> None:
+    def present_result(self, success: bool, title: str | None = None, detail: str | None = None) -> None:
         if self.silenced:
             return
-        self._present(SUCCESS if success else FAILURE)
+        view = SUCCESS if success else FAILURE
+        if title or detail:
+            view = View(view.state, title or view.title, detail or view.detail, False)
+        self._present(view)
         self.dismiss_timeout = GLib.timeout_add(1100 if success else 1600, self.dismiss)
 
     @staticmethod
@@ -826,6 +955,10 @@ class EdgeHud:
         self.reply(pending.connection, {"id": pending.request_id, "approved": approved})
         if approved:
             self.present_scanning()
+        elif pending.polkit and self.polkit and self.polkit.active and not self.silenced:
+            # PAM moves on to the password; the agent will turn the island into
+            # the password field in a moment, so don't collapse in between.
+            self.dismiss_timeout = GLib.timeout_add(3_000, self.dismiss)
         else:
             self.dismiss()
 
@@ -840,8 +973,18 @@ class EdgeHud:
             if self.pending:
                 self.reply(connection, {"approved": False, "reason": "busy"})
                 return False
-            self.pending = PendingApproval(connection, str(message.get("id", "")))
-            self.present_approval(message.get("requester"))
+            requester = message.get("requester")
+            polkit = message.get("service") == "polkit-1"
+            active = self.polkit.active if (polkit and self.polkit) else None
+            if active is not None:
+                if active.password_mode:
+                    # After Deny or a wrong password, retries go straight to the password.
+                    self.reply(connection, {"approved": False, "reason": "password"})
+                    return False
+                # The agent knows the real caller; PAM only guessed.
+                requester = active.requester
+            self.pending = PendingApproval(connection, str(message.get("id", "")), polkit)
+            self.present_approval(requester)
             try:
                 requested = int(message.get("timeout_ms", 12_000))
             except (TypeError, ValueError):
@@ -959,6 +1102,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="FaceGate top-edge layer-shell HUD")
     parser.add_argument("--socket", type=Path, default=default_socket_path())
     parser.add_argument("--demo", action="store_true", help="loop the HUD flow without PAM or the camera")
+    parser.add_argument("--no-polkit-agent", action="store_true", help="leave polkit prompts to the desktop's own agent")
     args = parser.parse_args()
     if args.demo:
         hud = EdgeHud()
@@ -972,9 +1116,21 @@ def main() -> int:
     hud = EdgeHud()
     server = HudServer(args.socket, hud)
     server.start()
+    agent = None
+    if not args.no_polkit_agent:
+        try:
+            from .polkit_agent import FaceGatePolkitAgent
+
+            agent = FaceGatePolkitAgent(hud)
+            agent.start()
+        except (ImportError, ValueError, GLib.Error) as error:
+            # Without the agent, sudo still works; polkit keeps the desktop's own dialog.
+            print("[facegate] polkit agent unavailable: %s" % error, flush=True)
     try:
         return GLib.MainLoop().run() or 0
     finally:
+        if agent:
+            agent.stop()
         server.close()
 
 

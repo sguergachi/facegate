@@ -62,6 +62,12 @@ runuser -u "${target_user}" -- env \
   XDG_RUNTIME_DIR="/run/user/${target_uid}" \
   DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${target_uid}/bus" \
   systemctl --user daemon-reload
+# FaceGate is the session's polkit agent, so the island replaces KDE's password
+# dialog. Only one agent can hold a session: retire KDE's (uninstall restores it).
+runuser -u "${target_user}" -- env \
+  XDG_RUNTIME_DIR="/run/user/${target_uid}" \
+  DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${target_uid}/bus" \
+  sh -c 'systemctl --user stop plasma-polkit-agent.service 2>/dev/null; systemctl --user mask plasma-polkit-agent.service >/dev/null 2>&1 || true'
 runuser -u "${target_user}" -- env \
   XDG_RUNTIME_DIR="/run/user/${target_uid}" \
   DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${target_uid}/bus" \

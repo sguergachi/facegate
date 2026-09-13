@@ -24,6 +24,15 @@ else
     echo "Restored ${polkit_pam} from ${polkit_backup}."
   fi
 fi
+target_user=${SUDO_USER:-}
+if [[ -n ${target_user} && ${target_user} != root ]]; then
+  target_uid=$(id -u "${target_user}")
+  # Stop FaceGate's polkit agent and give the session back to KDE's.
+  runuser -u "${target_user}" -- env \
+    XDG_RUNTIME_DIR="/run/user/${target_uid}" \
+    DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${target_uid}/bus" \
+    sh -c 'systemctl --user disable --now facegate.service 2>/dev/null; systemctl --user unmask plasma-polkit-agent.service 2>/dev/null; systemctl --user start plasma-polkit-agent.service 2>/dev/null || true'
+fi
 rm -f /usr/local/bin/facegate-hud /usr/local/lib/security/facegate/pam.py /usr/local/lib/systemd/user/facegate.service
 rm -rf /usr/local/lib/facegate /usr/local/lib/security/facegate
-echo "Restored /etc/pam.d/sudo from ${backup}. Disable the user service with: systemctl --user disable --now facegate.service"
+echo "Restored /etc/pam.d/sudo from ${backup}; KDE's polkit agent is back in charge of admin prompts."

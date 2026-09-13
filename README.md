@@ -17,8 +17,14 @@ sudo / pkexec / KDE admin prompt → FaceGate consent HUD → existing Howdy com
 - `/etc/pam.d/sudo` is edited in place (timestamped backup in `/etc/facegate/`).
 - Polkit's rule ships in `/usr/lib/pam.d/polkit-1`, so the installer writes an
   overriding `/etc/pam.d/polkit-1` with the Howdy line gated. It survives package
-  updates, and the uninstaller removes it. For polkit the island reads
-  "‹app› wants admin access"; KDE's own password dialog still opens alongside it.
+  updates, and the uninstaller removes it.
+- For graphical admin prompts (pkexec, Discover, System Settings, …) FaceGate
+  is the session's **polkit authentication agent**, replacing KDE's
+  "Authentication Required" dialog (the installer stops and masks
+  `plasma-polkit-agent.service`; the uninstaller restores it). The island is the
+  only prompt: approve to scan your face; after **Deny**, a timeout, or no face
+  match it turns into a password field (**Cancel** / **Allow**, three tries).
+  `sudo` keeps its terminal password prompt.
 
 SDDM is deliberately untouched. If FaceGate is closed, rejects the request,
 times out, or face recognition fails, PAM continues to the normal password

@@ -14,11 +14,19 @@ import os
 import pwd
 import socket
 import subprocess
+import sys
 import syslog
 import time
 import uuid
 
 import ConfigParser
+
+# The shared requester module lives in the installed FaceGate package (or the
+# checkout this file sits in, during development).
+for package_root in ("/usr/local/lib/facegate", os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")):
+    if os.path.isdir(os.path.join(package_root, "facegate")) and package_root not in sys.path:
+        sys.path.insert(0, package_root)
+from facegate import requester as requesters  # noqa: E402
 
 HOWDY_DIR = "/usr/lib/security/howdy"
 HOWDY_COMPARE = HOWDY_DIR + "/compare.py"
@@ -58,118 +66,6 @@ def emit_hud(username, phase, payload=None):
     request_hud(username, phase, payload, timeout=1)
 
 
-# Processes that only relay a command; the requester is whoever launched them.
-RELAYS = frozenset([
-    "sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "nu", "xonsh",
-    "sudo", "su", "doas", "env", "timeout", "nohup", "script", "xargs", "setsid",
-    "time", "watch", "make", "just", "tmux", "tmux: server", "screen",
-])
-# Apps that host other programs: shown as "via ...".
-APP_NAMES = {
-    "konsole": "Konsole", "yakuake": "Yakuake", "kitty": "kitty", "alacritty": "Alacritty",
-    "foot": "foot", "wezterm-gui": "WezTerm", "ghostty": "Ghostty", "gnome-terminal-": "GNOME Terminal",
-    "gnome-terminal-server": "GNOME Terminal", "xterm": "XTerm", "tilix": "Tilix", "terminator": "Terminator",
-    "code": "VS Code", "codium": "VSCodium", "cursor": "Cursor", "zed": "Zed", "zeditor": "Zed",
-    "t3code": "T3 Code", "kate": "Kate", "dolphin": "Dolphin", "idea": "IntelliJ IDEA",
-    "claude": "Claude Code", "codex": "Codex", "aider": "Aider", "sshd": "SSH",
-}
-STOP_AT = frozenset(["systemd", "init", "kwin_wayland", "plasmashell", "sddm", "login", "gdm", "startplasma-wayland"])
-MAX_COMMAND_CHARS = 160
-
-
-def read_stat(pid):
-    with open("/proc/%d/stat" % pid) as stat:
-        raw = stat.read()
-    # comm may contain spaces or parentheses; the other fields follow the last ')'.
-    return raw[raw.index("(") + 1:raw.rindex(")")], raw[raw.rindex(")") + 2:].split()
-
-
-def read_process(pid):
-    comm, fields = read_stat(pid)
-    parent = int(fields[1])
-    with open("/proc/%d/cmdline" % pid) as cmdline:
-        argv = [arg for arg in cmdline.read().split("\0") if arg]
-    return comm, parent, argv
-
-
-def process_name(comm, argv):
-    for candidate in [os.path.basename(argv[0]) if argv else "", comm]:
-        if candidate in APP_NAMES:
-            return APP_NAMES[candidate]
-    return comm
-
-
-def quote(arg):
-    safe = "@%+=:,./-_"
-    if arg and all(char.isalnum() or char in safe for char in arg):
-        return arg
-    return "'" + arg.replace("'", "'\"'\"'") + "'"
-
-
-def real_uid(pid):
-    with open("/proc/%d/status" % pid) as status:
-        for line in status:
-            if line.startswith("Uid:"):
-                return int(line.split()[1])
-    return -1
-
-
-def newest_process(name, uid):
-    """The most recently started process called name run by uid, if any.
-
-    Matches the real uid: setuid programs such as pkexec run as root.
-    """
-    newest, newest_start = None, -1
-    for entry in os.listdir("/proc"):
-        if not entry.isdigit():
-            continue
-        try:
-            comm, fields = read_stat(int(entry))
-            if comm != name or real_uid(int(entry)) != uid:
-                continue
-            start = int(fields[19])
-        except (IOError, OSError, ValueError, IndexError):
-            continue
-        if start > newest_start:
-            newest, newest_start = int(entry), start
-    return newest
-
-
-def describe_requester(pid):
-    """Name the app that ran a privileged command and the exact command, for
-    display only.
-
-    A process can rename itself, so this is informative, never an
-    authorization input.
-    """
-    _comm, parent, argv = read_process(pid)
-    program = os.path.basename(argv[0]) if argv else "sudo"
-    command = " ".join([program] + [quote(arg) for arg in argv[1:]])
-    command = "".join(char if char >= " " else " " for char in command)
-    if len(command) > MAX_COMMAND_CHARS:
-        command = command[:MAX_COMMAND_CHARS - 1] + u"…".encode("utf-8")
-    requester = {"command": command}
-    pid, depth = parent, 0
-    while pid > 1 and depth < 32:
-        depth += 1
-        try:
-            comm, next_pid, argv = read_process(pid)
-        except (IOError, OSError, ValueError):
-            break
-        if comm in STOP_AT:
-            break
-        executable = os.path.basename(argv[0]) if argv else ""
-        if comm not in RELAYS and executable not in RELAYS:
-            name = process_name(comm, argv)
-            if "app" not in requester:
-                requester["app"] = name
-            elif name != requester["app"] and (comm in APP_NAMES or executable in APP_NAMES):
-                requester["host"] = name
-                break
-        pid = next_pid
-    return requester
-
-
 def should_skip(config):
     if config.getboolean("core", "disabled"):
         return True
@@ -202,12 +98,12 @@ def do_auth(pamh):
     service = getattr(pamh, "service", None) or "sudo"
     try:
         if service == "polkit-1":
-            # PAM runs in polkit's agent helper, a child of the desktop's
-            # authentication agent; the requester is the pkexec that asked.
-            pkexec = newest_process("pkexec", pwd.getpwnam(username).pw_uid)
-            requester = describe_requester(pkexec) if pkexec else {}
+            # PAM runs in polkit's agent helper, not in the requester. FaceGate's
+            # own polkit agent knows the real caller; this is a fallback guess.
+            pkexec = requesters.newest_process("pkexec", pwd.getpwnam(username).pw_uid)
+            requester = requesters.describe_command(pkexec) if pkexec else {}
         else:
-            requester = describe_requester(os.getpid())
+            requester = requesters.describe_command(os.getpid())
     except Exception as error:
         log("Unable to describe the %s requester: %s" % (service, error))
         requester = {}

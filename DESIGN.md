@@ -79,3 +79,15 @@ full content width), then the detail: "via ‹host›" when there is one, above
 "Approve to verify with your face." The text is flattened to
 printable characters and length-limited. It is informative only: a process can
 rename itself, so it never influences authentication.
+
+## Password (polkit)
+
+When FaceGate is the polkit agent, a declined, timed-out, or failed face step
+turns the island into a password view rather than handing off to another
+dialog. It keeps the requester title and command, replaces the hint with
+"Enter your password to allow this.", and adds a 44 pt password field 16 pt
+below the copy with **Cancel** / **Allow** 16 pt below it. The island takes
+exclusive keyboard focus only while this field is shown. While PAM checks the
+password the field locks and the ring spins; a wrong password shakes the mark
+and reads "Incorrect password. Try again." After a failed face match, "Not
+recognized" holds for 0.9 s before the field appears.

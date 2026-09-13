@@ -116,3 +116,51 @@ class MotionTests(unittest.TestCase):
             context = cairo.Context(surface)
             island_path(context, 200, width, height)
             context.fill()
+
+
+class PolkitCopyTests(unittest.TestCase):
+    def test_password_view_keeps_the_requester_and_swaps_the_hint(self):
+        from facegate.edge_hud import PASSWORD_ERROR, PASSWORD_HINT, password_view
+
+        requester = {"service": "polkit-1", "app": "Konsole", "host": "T3 Code", "command": "pkexec pacman -Rns apollo"}
+        view = password_view(requester)
+        self.assertTrue(view.password)
+        self.assertEqual((view.primary, view.secondary), ("Allow", "Cancel"))
+        self.assertEqual(view.title, "Konsole wants admin access")
+        self.assertEqual(view.detail, "via T3 Code\n" + PASSWORD_HINT)
+        self.assertEqual(password_view(requester, error=True).detail, "via T3 Code\n" + PASSWORD_ERROR)
+
+    def test_polkit_message_explains_requests_without_a_command(self):
+        view = approval_view({"service": "polkit-1", "app": "Discover", "message": "Authentication is required to install software"})
+        self.assertEqual(view.title, "Discover wants admin access")
+        self.assertIn("Authentication is required to install software", view.detail)
+        with_command = approval_view({"service": "polkit-1", "app": "Konsole", "command": "pkexec true", "message": "Authentication is needed to run true"})
+        self.assertNotIn("Authentication is needed", with_command.detail)
+
+
+class RequesterModuleTests(unittest.TestCase):
+    def test_command_line_is_quoted_flattened_and_bounded(self):
+        from facegate.requester import MAX_COMMAND_CHARS, command_line
+
+        self.assertEqual(command_line(["/usr/bin/pkexec", "pacman", "-Rns", "apollo"]), "pkexec pacman -Rns apollo")
+        self.assertEqual(command_line(["sudo", "echo", "a b"]), "sudo echo 'a b'")
+        self.assertNotIn("\n", command_line(["sudo", "printf", "x\ny"]))
+        self.assertEqual(len(command_line(["sudo"] + ["x" * 50] * 10)), MAX_COMMAND_CHARS)
+
+    def test_describes_this_process_tree_without_raising(self):
+        import os
+
+        from facegate.requester import describe_app, describe_command
+
+        self.assertIn("command", describe_command(os.getpid()))
+        self.assertIsInstance(describe_app(os.getpid()), dict)
+
+    def test_agent_prefers_the_person_at_the_desk(self):
+        import os
+
+        from facegate.polkit_agent import choose_identity
+
+        chosen = choose_identity([("unix-user", {"uid": 0}), ("unix-user", {"uid": os.getuid()})])
+        self.assertEqual(chosen.get_uid(), os.getuid())
+        self.assertEqual(choose_identity([("unix-user", {"uid": 0})]).get_uid(), 0)
+        self.assertIsNone(choose_identity([("unix-group", {"gid": 10})]))
