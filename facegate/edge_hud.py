@@ -339,7 +339,8 @@ class View:
     command: str = ""
 
 
-APPROVAL = View("approval", "Verify with Face", "", True)
+APPROVAL_HINT = "Approve to verify with your face."
+APPROVAL = View("approval", "Verify with Face", APPROVAL_HINT, True)
 
 
 def _display_text(value: object, limit: int) -> str:
@@ -361,7 +362,8 @@ def approval_view(requester: object) -> View:
     if not app and not command:
         return APPROVAL
     title = "%s wants sudo" % app if app else "Sudo requested"
-    detail = "via %s" % host if host else ""
+    # Apple-style: say who is asking, then how approving allows it.
+    detail = "via %s\n%s" % (host, APPROVAL_HINT) if host else APPROVAL_HINT
     return View("approval", title, detail, True, command)
 SCANNING = View("scanning", "Looking for you", "Hold still for a moment.", False)
 SUCCESS = View("success", "Verified", "Continuing securely.", False)

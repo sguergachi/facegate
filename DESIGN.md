@@ -78,6 +78,7 @@ argv and walks up the process tree, skipping shells and wrappers, to name the
 app that ran it and the app hosting that (for example **Claude Code** via
 **T3 Code**). The approval title becomes "‹app› wants sudo", the command sits
 in a single-line monospace chip (8 pt below the title, middle-ellipsized,
-full content width), and a "via ‹host›" line follows only when there is a host. The text is flattened to
+full content width), then the detail: "via ‹host›" when there is one, above
+"Approve to verify with your face." The text is flattened to
 printable characters and length-limited. It is informative only: a process can
 rename itself, so it never influences authentication.

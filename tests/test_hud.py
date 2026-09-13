@@ -71,8 +71,8 @@ class RequesterTests(unittest.TestCase):
         view = approval_view({"app": "Claude Code", "host": "T3 Code", "command": "sudo pacman -Syu"})
         self.assertEqual(view.title, "Claude Code wants sudo")
         self.assertEqual(view.command, "sudo pacman -Syu")
-        self.assertEqual(view.detail, "via T3 Code")
-        self.assertEqual(approval_view({"app": "Konsole", "command": "sudo -v"}).detail, "")
+        self.assertEqual(view.detail, "via T3 Code\nApprove to verify with your face.")
+        self.assertEqual(approval_view({"app": "Konsole", "command": "sudo -v"}).detail, "Approve to verify with your face.")
         self.assertTrue(view.actions)
 
     def test_missing_or_malformed_requester_keeps_the_generic_prompt(self):
