@@ -31,6 +31,7 @@ AUTHORITY = ("org.freedesktop.PolicyKit1", "/org/freedesktop/PolicyKit1/Authorit
 EXEC_ACTION = "org.freedesktop.policykit.exec"
 MAX_PASSWORD_ATTEMPTS = 3
 RETRY_REGISTER_SECONDS = 5
+LOCKED_PASSWORD = "Password sign-in is temporarily locked. Try again later."
 AGENT_XML = """
 <node>
   <interface name="org.freedesktop.PolicyKit1.AuthenticationAgent">
@@ -81,6 +82,12 @@ def choose_identity(identities: list[tuple[str, dict[str, Any]]]) -> Polkit.Iden
     return Polkit.UnixUser.new(uids[0]) if uids else None
 
 
+def friendly_pam_message(text: object) -> str:
+    """Keep actionable PAM state while hiding low-level helper chatter."""
+    clean = " ".join(str(text or "").split())
+    return LOCKED_PASSWORD if "locked" in clean.lower() else ""
+
+
 @dataclass
 class Authentication:
     cookie: str
@@ -90,6 +97,7 @@ class Authentication:
     session: Any = None
     password_mode: bool = False
     failed_passwords: int = 0
+    pam_message: str = ""
     cancelled: bool = False
     finished: bool = False
 
@@ -186,7 +194,8 @@ class FaceGatePolkitAgent:
     def _begin_session(self, auth: Authentication) -> None:
         session = PolkitAgent.Session.new(auth.identity, auth.cookie)
         session.connect("request", lambda _s, prompt, echo: self._on_request(auth, prompt, echo))
-        session.connect("show-error", lambda _s, text: log("helper error: %s" % text))
+        session.connect("show-info", lambda _s, text: self._on_pam_message(auth, text, False))
+        session.connect("show-error", lambda _s, text: self._on_pam_message(auth, text, True))
         session.connect("completed", lambda _s, gained: self._on_completed(auth, gained))
         auth.session = session
         session.initiate()
@@ -198,12 +207,24 @@ class FaceGatePolkitAgent:
 
         def show() -> bool:
             if auth is self.active and not auth.cancelled:
-                self.hud.present_password(auth.requester, lambda password: self._respond(auth, password), lambda: self._cancel(auth), error)
+                self.hud.present_password(
+                    auth.requester,
+                    lambda password: self._respond(auth, password),
+                    lambda: self._cancel(auth),
+                    error,
+                    auth.pam_message,
+                )
             return False
 
         # Let a "Not recognized" result finish its moment before the field appears.
         view = self.hud.view
         GLib.timeout_add(900 if (view and view.state == "failure") else 0, show)
+
+    def _on_pam_message(self, auth: Authentication, text: object, error: bool) -> None:
+        log("helper %s: %s" % ("error" if error else "info", text))
+        message = friendly_pam_message(text)
+        if message:
+            auth.pam_message = message
 
     def _respond(self, auth: Authentication, password: str) -> None:
         if auth.session and not auth.finished:
@@ -219,6 +240,11 @@ class FaceGatePolkitAgent:
                 self.hud.present_result(True)
             return
         if auth.password_mode:
+            if auth.pam_message:
+                self._finish(auth, "org.freedesktop.PolicyKit1.Error.Failed")
+                if self.hud.view and self.hud.view.state == "password":
+                    self.hud.present_result(False, "Password unavailable", auth.pam_message)
+                return
             auth.failed_passwords += 1
             if auth.failed_passwords < MAX_PASSWORD_ATTEMPTS:
                 # A fresh helper session; PAM will ask again straight away.

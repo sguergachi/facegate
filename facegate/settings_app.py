@@ -117,6 +117,22 @@ ROW_GAP = SPACE_S
 ROW_REVEAL_MS = 260
 CONFIRM_SECONDS = 4
 RESULT_SECONDS = 1.6
+BACK_TARGETS = {"how": "welcome", "privacy": "how", "added": "privacy"}
+
+
+def setup_auth_copy(faces_loaded: bool, has_faces: bool) -> tuple[str, str, str]:
+    """Title, body, and compact status while admin authentication is pending."""
+    if faces_loaded and not has_faces:
+        return (
+            "Enter your sudo password",
+            "Your first face cannot approve itself. Type your sudo password in the island to begin.",
+            "Enter your sudo password in the island to add your first face.",
+        )
+    return (
+        "Authenticate to add a face",
+        "Adding a face needs admin authentication. The island at the top of your screen will ask.",
+        "Approve in the island to add a face.",
+    )
 
 
 def helper_command(args: list[str]) -> list[str]:
@@ -307,6 +323,11 @@ class HelperRun:
             self.send({"cmd": "cancel"})
             self.stdin.close(None)
 
+    def abort(self) -> None:
+        """Stop pkexec while it is still waiting for admin approval."""
+        if self.process:
+            self.process.force_exit()
+
 
 class IslandLink:
     """The stream that shows an enrollment in the island, if the HUD is running."""
@@ -378,6 +399,19 @@ def draw_close_glyph(area: Gtk.DrawingArea, context: Any, width: int, height: in
     context.line_to(width / 2 + half, height / 2 + half)
     context.move_to(width / 2 + half, height / 2 - half)
     context.line_to(width / 2 - half, height / 2 + half)
+    context.stroke()
+
+
+def draw_back_glyph(area: Gtk.DrawingArea, context: Any, width: int, height: int) -> None:
+    """A restrained chevron with the close glyph's exact visual weight."""
+    color = area.get_color()
+    context.set_source_rgba(color.red, color.green, color.blue, color.alpha)
+    context.set_line_width(1.75)
+    context.set_line_cap(cairo.LINE_CAP_ROUND)
+    context.set_line_join(cairo.LINE_JOIN_ROUND)
+    context.move_to(width / 2 + 2.5, height / 2 - 5)
+    context.line_to(width / 2 - 2.5, height / 2)
+    context.line_to(width / 2 + 2.5, height / 2 + 5)
     context.stroke()
 
 
@@ -772,9 +806,9 @@ window.facegate button {
 }
 /* Press feedback: every button gives slightly under the pointer. */
 window.facegate button:active { transform: scale(0.97); }
-button.close { min-width: %(close)dpx; min-height: %(close)dpx; padding: 0; border-radius: %(close_radius)dpx; background-color: #1c1c1e; color: #98989d; }
-button.close:hover { background-color: #2c2c2e; color: #f5f5f7; }
-button.close:active { background-color: #3a3a3c; color: #f5f5f7; }
+button.close, button.back { min-width: %(close)dpx; min-height: %(close)dpx; padding: 0; border-radius: %(close_radius)dpx; background-color: #1c1c1e; color: #98989d; }
+button.close:hover, button.back:hover { background-color: #2c2c2e; color: #f5f5f7; }
+button.close:active, button.back:active { background-color: #3a3a3c; color: #f5f5f7; }
 button.primary { min-height: %(button)dpx; padding: 0 %(space_l)dpx; border-radius: %(button_radius)dpx; font-size: 15px; background-color: #f5f5f7; color: #000000; }
 button.primary:disabled { color: #8e8e93; }
 button.primary.secondary { color: #f5f5f7; }
@@ -1140,6 +1174,22 @@ class FlowView(Gtk.Overlay):
         # dots leaves the buttons exactly where they were.
         self.on_primary: Callable[[], None] = lambda: None
         self.on_secondary: Callable[[], None] = lambda: None
+        self.on_back: Callable[[], None] = lambda: None
+        back_glyph = Gtk.DrawingArea()
+        back_glyph.set_content_width(CLOSE_SIZE)
+        back_glyph.set_content_height(CLOSE_SIZE)
+        back_glyph.set_draw_func(draw_back_glyph)
+        self.back = Gtk.Button(child=back_glyph)
+        self.back.add_css_class("back")
+        self.back.set_focus_on_click(False)
+        self.back.update_property([Gtk.AccessibleProperty.LABEL], ["Back"])
+        self.back.set_halign(Gtk.Align.START)
+        self.back.set_valign(Gtk.Align.START)
+        self.back.set_margin_top(CLOSE_INSET)
+        self.back.set_margin_start(CLOSE_INSET)
+        self.back.connect("clicked", lambda *_: self.on_back())
+        self.back.set_can_target(False)
+        self.back_alpha = Tween(0.0)
         self.row = ActionRow(lambda: self.on_primary(), lambda: self.on_secondary())
         self.row.set_valign(Gtk.Align.END)
         self.row.set_halign(Gtk.Align.CENTER)
@@ -1150,6 +1200,7 @@ class FlowView(Gtk.Overlay):
         self.dots.set_margin_bottom(PAGE_MARGIN + BUTTON_HEIGHT + DOTS_TO_BUTTON)
         self.dots.set_can_target(False)
         self.dots_alpha = Tween(0.0)
+        self.add_overlay(self.back)
         self.add_overlay(self.dots)
         self.add_overlay(self.row)
         self.add_tick_callback(self._tick)
@@ -1279,6 +1330,13 @@ class FlowView(Gtk.Overlay):
         self.on_secondary = on_secondary or (lambda: None)
         self.row.set_paired(bool(secondary), animate and not reduced_motion())
 
+    def set_back(self, on_back: Callable[[], None] | None) -> None:
+        """Show Back in the persistent top-left slot after the first step."""
+        shown = on_back is not None
+        self.on_back = on_back or (lambda: None)
+        self.back.set_can_target(shown)
+        self.back_alpha.to(1.0 if shown else 0.0, self.now, 0.18 if self.get_mapped() else 0.0)
+
     def _tick(self, _widget: Gtk.Widget, clock: Gdk.FrameClock) -> bool:
         frame = clock.get_frame_time()
         elapsed = 0.0 if self.last is None else min((frame - self.last) / 1_000_000, 1 / 30)
@@ -1297,6 +1355,7 @@ class FlowView(Gtk.Overlay):
                 piece.scale.step(elapsed)
             piece.widget.set_opacity(piece.alpha.value(now))
         self.dots.set_opacity(self.dots_alpha.value(now))
+        self.back.set_opacity(self.back_alpha.value(now))
         self.dots.advance(elapsed)
         self.row.advance(elapsed)
         self.canvas.queue_allocate()
@@ -1314,6 +1373,7 @@ class SettingsWindow(Gtk.ApplicationWindow):
 
         self.settings = load_settings()
         self.faces: list[dict[str, Any]] = []
+        self.faces_loaded = False
         self.rows: dict[int, FaceRow] = {}
         self.fresh_id: int | None = None
         self.result_timer: int | None = None
@@ -1430,8 +1490,8 @@ class SettingsWindow(Gtk.ApplicationWindow):
             promises.append(row)
         flow.add_step("privacy", "shield", [label("Private by design", "page-title", wrap=True), promises], dots=2)
 
-        self.setup_title = label("Approve to add a face", "page-title", wrap=True)
-        self.setup_body = label("Adding a face needs admin approval. The island at the top of your screen will ask.", "page-body", wrap=True)
+        self.setup_title = label("Authenticate to add a face", "page-title", wrap=True)
+        self.setup_body = label("Adding a face needs admin authentication. The island at the top of your screen will ask.", "page-body", wrap=True)
         self.setup_pieces = flow.add_step("setup", "mark", [self.setup_title, self.setup_body])
         flow.add_step("added", "mark", [
             label("Face added", "page-title", wrap=True),
@@ -1502,11 +1562,28 @@ class SettingsWindow(Gtk.ApplicationWindow):
 
     # Navigation ------------------------------------------------------------
 
-    def _go(self, page: str) -> None:
+    def _go(self, page: str, direction: int = 1) -> None:
         if page == "how":
             self.story.restart()
-        self.flow.go(page)
+        self.flow.go(page, direction=direction)
         self._render()
+
+    def _back_onboarding(self) -> None:
+        step = self.flow.current
+        if step == "setup":
+            phase = self.enroll_phase
+            self.enroll_phase = None
+            self.enroll_error = ""
+            self.island.close()
+            if self.run:
+                # Once scanning, let the root helper release the camera
+                # cleanly. Before that it is only pkexec waiting on polkit.
+                (self.run.stop if phase == "scanning" else self.run.abort)()
+            self._go("privacy", direction=-1)
+            return
+        target = BACK_TARGETS.get(str(step))
+        if target:
+            self._go(target, direction=-1)
 
     def _highlight_step(self, step: int) -> None:
         for index, row in enumerate(self.steps, start=1):
@@ -1530,9 +1607,10 @@ class SettingsWindow(Gtk.ApplicationWindow):
     def _render(self) -> None:
         phase, has_faces = self.enroll_phase, bool(self.faces)
         from_manage = self.enroll_from == "manage"
+        setup_title, setup_body, setup_detail = setup_auth_copy(self.faces_loaded, has_faces)
         # Manage page.
         if phase == "approving" and from_manage:
-            detail, button, mark = "Approve in the island to add a face.", None, "approval"
+            detail, button, mark = setup_detail, None, "approval"
         elif phase == "scanning" and from_manage:
             detail, button, mark = "Look at the camera and follow the island.", "Cancel", "scanning"
         elif has_faces:
@@ -1550,6 +1628,7 @@ class SettingsWindow(Gtk.ApplicationWindow):
 
         # Onboarding: the persistent mark and buttons follow the current step.
         flow, step = self.flow, self.flow.current
+        flow.set_back(self._back_onboarding if step != "welcome" else None)
         title, body = self.setup_pieces
         if step == "welcome":
             flow.actions("Continue", lambda: self._go("how"))
@@ -1573,8 +1652,8 @@ class SettingsWindow(Gtk.ApplicationWindow):
                 flow.actions("Try Again", lambda: self._enroll("setup"), "Not Now", self._finish_onboarding)
                 self.mark.set_state("failure")
             else:
-                flow.retext(title, self.setup_title, "Approve to add a face")
-                flow.retext(body, self.setup_body, "Adding a face needs admin approval. The island at the top of your screen will ask.")
+                flow.retext(title, self.setup_title, setup_title)
+                flow.retext(body, self.setup_body, setup_body)
                 flow.actions("Waiting for approval…", None)
                 self.mark.set_state("approval")
 
@@ -1610,6 +1689,7 @@ class SettingsWindow(Gtk.ApplicationWindow):
         HelperRun(["list"], on_event, on_exit).start()
 
     def _show_faces(self, faces: list[dict[str, Any]]) -> None:
+        self.faces_loaded = True
         self.faces = [face for face in faces if isinstance(face, dict) and "id" in face]
         current = {int(face["id"]) for face in self.faces}
         for face_id, row in list(self.rows.items()):

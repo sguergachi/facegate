@@ -605,11 +605,11 @@ def _request_copy(requester: object) -> tuple[str, str, list[str]]:
     return title, command, lines
 
 
-def password_view(requester: object, error: bool = False) -> View:
+def password_view(requester: object, error: bool = False, message: str = "") -> View:
     title, command, lines = _request_copy(requester)
     if title == "Verify with Face":
         title = "Password required"
-    detail = "\n".join(lines + [PASSWORD_ERROR if error else PASSWORD_HINT])
+    detail = "\n".join(lines + [_display_text(message, 120) if message else PASSWORD_ERROR if error else PASSWORD_HINT])
     return View("password", title, detail, True, command, password=True, primary="Allow", secondary="Cancel")
 
 
@@ -1150,11 +1150,11 @@ class EdgeHud:
             return
         self.resolve(False)
 
-    def present_password(self, requester: object, on_password: Callable[[str], None], on_cancel: Callable[[], None], error: bool = False) -> None:
+    def present_password(self, requester: object, on_password: Callable[[str], None], on_cancel: Callable[[], None], error: bool = False, message: str = "") -> None:
         """The polkit fallback after Deny, a timeout, or no face match."""
         self.silenced = False
         self.on_password, self.on_password_cancel = on_password, on_cancel
-        self._present(password_view(requester, error))
+        self._present(password_view(requester, error, message))
         self.password_busy(False)
         if error:
             # The mark shakes, then settles back to waiting for the password.

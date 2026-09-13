@@ -540,7 +540,7 @@ Onboarding is one frame, not a stack of pages (see Fluidity):
 
 | Element | Value |
 | --- | ---: |
-| Top bar | 96 (close button centred on y 48); content starts below it |
+| Top bar | 96; matching 32 circles at (32, 32): arrow at top-left after the first step, X at top-right; content starts below it |
 | Art | mark 144, story 376 × 176, shield 64 |
 | Art → title | 24 |
 | Title → body | 8 |
@@ -553,6 +553,8 @@ the top bar and whatever sits above the buttons (see Space and layout). The
 dots and the button row persist across steps. The primary is one button
 throughout: it narrows to share its row when a step has a second choice, and
 widens back when it doesn't. Only the step's title, body and content travel.
+Back reverses that same directional transition. During setup it also ends any
+pending approval or scan before returning to Private by design.
 
 1. **Meet FaceGate:** the 144 pt living mark. "Approve sudo and admin prompts
    with a glance. Your password always works too." → Continue.
@@ -563,7 +565,9 @@ widens back when it doesn't. Only the step's title, body and content travel.
 3. **Private by design:** three cyan-icon promises: camera only when you
    approve, stays on this computer, changes need admin. → Not Now | Set Up
    Face.
-4. **Setup:** the mark follows the flow: "Approve to add a face" (waiting),
+4. **Setup:** with no existing face, "Enter your sudo password" explains that
+   the first face cannot approve itself; otherwise the mark follows the flow:
+   "Authenticate to add a face" (waiting),
    "Look at the camera" (scanning, Cancel), or "Face not added" with the reason
    (Not Now | Try Again).
 5. **Face added:** a green mark. → Add Another Look (for example with

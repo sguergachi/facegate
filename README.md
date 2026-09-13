@@ -36,6 +36,8 @@ sudo / pkexec / KDE admin prompt → FaceGate consent HUD → existing Howdy com
   `plasma-polkit-agent.service`; the uninstaller restores it). The island is the
   only prompt: approve to scan your face; after **Deny**, a timeout, or no face
   match it turns into a password field (**Cancel** / **Allow**, three tries).
+  If no usable face model exists—including while adding the first one—it skips
+  the camera and asks for the typed sudo password immediately.
   `sudo` keeps its terminal password prompt.
 
 SDDM is deliberately untouched. If FaceGate is closed, rejects the request,
@@ -147,6 +149,11 @@ in the user's desktop session so it can render under Wayland. Its response only
 starts Howdy. A successful Howdy comparison remains the sole successful PAM
 result; the HUD cannot grant sudo on its own. FaceGate never stores camera
 frames, passwords, or sudo credentials.
+
+A successful face match also clears the account's consecutive `pam_faillock`
+password failures, just as a successful password does. Earlier dismissed
+prompts therefore cannot leave the typed fallback locked after the last face
+is removed.
 
 FaceGate Settings reads and changes faces through two small root helpers,
 started with `pkexec`, because Howdy's models are root-only:

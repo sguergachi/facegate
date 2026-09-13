@@ -46,6 +46,16 @@ class GeometryTests(unittest.TestCase):
         # Collapsed, the header's content shares the close button's centre line.
         self.assertEqual(settings_app.BAR_HEIGHT / 2, settings_app.CLOSE_INSET + settings_app.CLOSE_SIZE / 2)
 
+    def test_each_later_onboarding_story_step_has_a_back_target(self):
+        self.assertEqual(settings_app.BACK_TARGETS, {"how": "welcome", "privacy": "how", "added": "privacy"})
+
+    def test_first_face_explains_the_password_bootstrap(self):
+        title, body, detail = settings_app.setup_auth_copy(True, False)
+        self.assertEqual(title, "Enter your sudo password")
+        self.assertIn("cannot approve itself", body)
+        self.assertIn("sudo password", detail)
+        self.assertNotIn("password", settings_app.setup_auth_copy(True, True)[0].lower())
+
 
 if __name__ == "__main__":
     unittest.main()

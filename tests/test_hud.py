@@ -137,6 +137,12 @@ class PolkitCopyTests(unittest.TestCase):
         with_command = approval_view({"service": "polkit-1", "app": "Konsole", "command": "pkexec true", "message": "Authentication is needed to run true"})
         self.assertNotIn("Authentication is needed", with_command.detail)
 
+    def test_account_lock_message_is_preserved_without_helper_chatter(self):
+        from facegate.polkit_agent import LOCKED_PASSWORD, friendly_pam_message
+
+        self.assertEqual(friendly_pam_message("The account is locked due to 3 failed logins."), LOCKED_PASSWORD)
+        self.assertEqual(friendly_pam_message("Authentication failure"), "")
+
 
 class RequesterModuleTests(unittest.TestCase):
     def test_command_line_is_quoted_flattened_and_bounded(self):

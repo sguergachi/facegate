@@ -19,7 +19,10 @@ import syslog
 import time
 import uuid
 
-import ConfigParser
+try:
+    import ConfigParser
+except ImportError:  # Python 3, used by the unit tests.
+    import configparser as ConfigParser
 
 # The shared requester module lives in the installed FaceGate package (or the
 # checkout this file sits in, during development).
@@ -31,6 +34,7 @@ from facegate import requester as requesters  # noqa: E402
 HOWDY_DIR = "/usr/lib/security/howdy"
 HOWDY_COMPARE = HOWDY_DIR + "/compare.py"
 HOWDY_CONFIG = HOWDY_DIR + "/config.ini"
+FAILLOCK = "/usr/bin/faillock"
 SOCKET_BASENAME = "facegate.sock"
 CONSENT_TIMEOUT_SECONDS = 12
 
@@ -78,6 +82,41 @@ def should_skip(config):
     return False
 
 
+def has_face_models(username, howdy_dir=HOWDY_DIR):
+    """Return whether Howdy has a usable face model for this user.
+
+    The PAM module runs as root, so it can read Howdy's root-only model store.
+    Missing, empty, or malformed files safely fall through to the password
+    stack instead of presenting an approval that cannot succeed.
+    """
+    path = os.path.join(howdy_dir, "models", username + ".dat")
+    try:
+        with open(path) as model_file:
+            models = json.load(model_file)
+    except (IOError, OSError, ValueError, TypeError):
+        return False
+    return isinstance(models, list) and any(
+        isinstance(model, dict) and isinstance(model.get("data"), list) and model.get("data")
+        for model in models
+    )
+
+
+def reset_password_failures(username):
+    """End a password failure streak after successful face authentication.
+
+    FaceGate's PAM rule is sufficient, so a match returns before the later
+    pam_faillock ``authsucc`` rule in system-auth can clear old failures.
+    Mirror that bookkeeping when faillock is installed.
+    """
+    if not os.path.exists(FAILLOCK):
+        return
+    try:
+        with open(os.devnull, "w") as discard:
+            subprocess.call([FAILLOCK, "--user", username, "--reset"], stdout=discard, stderr=discard)
+    except (IOError, OSError):
+        pass
+
+
 def do_auth(pamh):
     try:
         username = pamh.get_user()
@@ -93,6 +132,10 @@ def do_auth(pamh):
             return pamh.PAM_AUTHINFO_UNAVAIL
     except Exception as error:
         log("Unable to read Howdy configuration: %s" % error)
+        return pamh.PAM_AUTHINFO_UNAVAIL
+
+    if not has_face_models(username):
+        log("No face models for %s; password fallback" % username)
         return pamh.PAM_AUTHINFO_UNAVAIL
 
     service = getattr(pamh, "service", None) or "sudo"
@@ -122,6 +165,7 @@ def do_auth(pamh):
     emit_hud(username, "scanning")
     status = subprocess.call(["/usr/bin/python3", HOWDY_COMPARE, username])
     if status == 0:
+        reset_password_failures(username)
         emit_hud(username, "result", {"result": "success"})
         log("Face verification approved for %s" % username)
         return pamh.PAM_SUCCESS
