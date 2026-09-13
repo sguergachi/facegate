@@ -628,6 +628,11 @@ class EdgeHud:
         if not self.visible:
             self._arrive(view)
             return
+        if view == self.view and not self.departing:
+            # A repeat of the state already showing (Approve switches to
+            # scanning locally, then PAM announces scanning too) must not
+            # cancel the transition that is still settling.
+            return
         previous, self.view = self.view, view
         self.departing = False
         self.scheduled.clear()
@@ -805,6 +810,9 @@ class EdgeHud:
     def reply(connection: socket.socket, payload: dict[str, Any]) -> None:
         try:
             connection.sendall(encode(payload))
+        except OSError:
+            # PAM may already have hung up; the HUD state must still change.
+            pass
         finally:
             connection.close()
 
@@ -934,6 +942,8 @@ class Demo:
             GLib.timeout_add(self.PAUSE_MS, self._request)
             return False
         print("[demo] approved — simulating a scan", flush=True)
+        # Like PAM, announce scanning right after the approval reply.
+        self.hud.handle_request({"phase": "scanning"}, socket.socketpair()[0])
         GLib.timeout_add(self.SCAN_MS, self._finish)
         return False
 
