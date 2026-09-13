@@ -60,6 +60,16 @@ else
   fi
   echo "Updated ${sudo_pam}; backup: ${backup}"
 fi
+# sudo reaches its account rules only after the password was accepted, so an
+# optional (never deciding) account rule lets the island say "Verified" when
+# the password came from the island.
+facegate_account="account    optional    ${facegate_line}"
+if ! grep -Eq "^account[[:space:]]+optional[[:space:]]+${facegate_line}" "${sudo_pam}"; then
+  if updated=$(awk -v rule="${facegate_account}" '!added && $1 == "account" { print rule; added = 1 } { print } END { if (!added) print rule }' "${sudo_pam}"); then
+    printf '%s\n' "${updated}" > "${sudo_pam}"
+    echo "Added FaceGate's account rule to ${sudo_pam}."
+  fi
+fi
 
 # Graphical admin prompts (pkexec, KDE "Authentication Required") use polkit's
 # PAM service. Its rule ships in /usr/lib/pam.d; an /etc/pam.d copy overrides

@@ -637,6 +637,10 @@ def approval_view(requester: object) -> View:
     return View("approval", title, "\n".join(lines + [APPROVAL_HINT]), True, command)
 
 
+# After a sudo password is handed back, how long to wait for sudo's verdict
+# (a success result, or its retry after a wrong password) before retracting.
+SUDO_CHECK_MS = 6_000
+
 # How long "Verified" holds before an approved face change becomes its scan.
 VERIFIED_HOLD_MS = 600
 
@@ -738,6 +742,9 @@ class EdgeHud:
         self.window.connect("map", self._position_on_mapped_monitor)
 
         self.pending: PendingApproval | None = None
+        # sudo waiting for a password typed in the island (no face enrolled).
+        self.sudo_password: socket.socket | None = None
+        self.sudo_password_watch: int | None = None
         self.enrollment: Enrollment | None = None
         # The panel's scan, announced before its admin approval so the island
         # can turn straight into the preview once approval is granted.
@@ -944,7 +951,7 @@ class EdgeHud:
             button.secondary:hover { background-color: #2c2c2e; }
             button.secondary:active { background-color: #3a3a3c; }
             button:focus-visible { outline: 2px solid rgba(255, 255, 255, 0.4); outline-offset: 2px; }
-            passwordentry.password {
+            window entry.password {
                 min-height: 44px;
                 padding: 0 14px;
                 border: none;
@@ -952,16 +959,20 @@ class EdgeHud:
                 outline: none;
                 box-shadow: none;
                 background-color: #1c1c1e;
+                background-image: none;
                 color: #f5f5f7;
                 font-size: 15px;
                 transition: box-shadow 180ms ease;
             }
-            passwordentry.password:focus-within { box-shadow: inset 0 0 0 1.5px rgba(255, 255, 255, 0.28); }
-            passwordentry.password text { color: #f5f5f7; caret-color: #f5f5f7; }
-            passwordentry.password text placeholder { color: #6e6e73; }
-            passwordentry.password image { color: #8e8e93; }
+            window entry.password:focus-within { box-shadow: inset 0 0 0 1.5px rgba(255, 255, 255, 0.28); }
+            /* GtkPasswordEntry's node is "entry", not "passwordentry". */
+            window entry.password text { background: none; color: #f5f5f7; caret-color: #f5f5f7; }
+            window entry.password text placeholder { color: #6e6e73; }
+            window entry.password image { color: #8e8e93; }
         """)
         Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        # Black is the only material: never let a light desktop theme paint fields.
+        Gtk.Settings.get_default().set_property("gtk-application-prefer-dark-theme", True)
 
     # Layout ---------------------------------------------------------------
 
@@ -1262,7 +1273,7 @@ class EdgeHud:
         self.resolve(False)
 
     def present_password(self, requester: object, on_password: Callable[[str], None], on_cancel: Callable[[], None], error: bool = False, message: str = "") -> None:
-        """The polkit fallback after Deny, a timeout, or no face match."""
+        """The password in the island: polkit's fallback, or sudo without a face."""
         self.silenced = False
         self.on_password, self.on_password_cancel = on_password, on_cancel
         self._present(password_view(requester, error, message))
@@ -1313,6 +1324,10 @@ class EdgeHud:
             # Cancelling a polkit request cancels the whole authentication.
             self.polkit.cancel_active()
             return
+        if self.sudo_password:
+            self._answer_sudo_password(None)
+            self.dismiss()
+            return
         if self.pending:
             self.resolve(False)
         elif self.config_active:
@@ -1325,6 +1340,7 @@ class EdgeHud:
     def _config_blocked(self) -> bool:
         return bool(
             self.pending
+            or self.sudo_password
             or self.enrolling
             or (self.polkit and self.polkit.active)
             or (self.visible and not self.config_active)
@@ -1625,6 +1641,40 @@ class EdgeHud:
             self.dismiss()
         return False
 
+    # sudo without a face: the password is typed here and handed back to PAM,
+    # where pam_unix checks it. The island never judges it.
+
+    def ask_sudo_password(self, connection: socket.socket, requester: object, error: bool) -> None:
+        if self.dismiss_timeout:
+            # A retry after a wrong password replaces the checking state.
+            GLib.source_remove(self.dismiss_timeout)
+            self.dismiss_timeout = None
+        self.sudo_password = connection
+        # Ctrl+C in the terminal closes sudo's end; don't keep asking.
+        self.sudo_password_watch = GLib.io_add_watch(connection.fileno(), GLib.PRIORITY_DEFAULT, GLib.IO_IN | GLib.IO_HUP | GLib.IO_ERR, self._sudo_hung_up)
+        self.present_password(requester, self._submit_sudo_password, lambda: self._answer_sudo_password(None), error)
+
+    def _submit_sudo_password(self, password: str) -> None:
+        self._answer_sudo_password(password)
+        # The field keeps spinning until sudo reports success or asks again.
+        self.dismiss_timeout = GLib.timeout_add(SUDO_CHECK_MS, self.dismiss)
+
+    def _answer_sudo_password(self, password: str | None) -> None:
+        connection, self.sudo_password = self.sudo_password, None
+        if self.sudo_password_watch:
+            GLib.source_remove(self.sudo_password_watch)
+            self.sudo_password_watch = None
+        if connection:
+            self.reply(connection, {"password": password})
+
+    def _sudo_hung_up(self, *_args: Any) -> bool:
+        self.sudo_password_watch = None
+        connection, self.sudo_password = self.sudo_password, None
+        if connection:
+            connection.close()
+            self.dismiss()
+        return False
+
     def _approval_timed_out(self) -> bool:
         self.approval_timeout = None
         self.resolve(False)
@@ -1635,8 +1685,13 @@ class EdgeHud:
         if phase == "config":
             self.reply(connection, {"ok": True, "queued": self._config_blocked()})
             self.open_config(message.get("welcome") is True)
+        elif phase == "password":
+            if self.pending or self.enrolling or self.sudo_password or (self.polkit and self.polkit.active):
+                self.reply(connection, {"password": None, "reason": "busy"})
+                return False
+            self.ask_sudo_password(connection, message.get("requester"), message.get("error") is True)
         elif phase == "approval":
-            if self.pending or self.enrolling:
+            if self.pending or self.enrolling or self.sudo_password:
                 self.reply(connection, {"approved": False, "reason": "busy"})
                 return False
             requester = message.get("requester")

@@ -37,6 +37,14 @@ HOWDY_CONFIG = HOWDY_DIR + "/config.ini"
 FAILLOCK = "/usr/bin/faillock"
 SOCKET_BASENAME = "facegate.sock"
 CONSENT_TIMEOUT_SECONDS = 12
+# Typing a password takes longer than a glance; sudo's own limit is 5 minutes.
+PASSWORD_TIMEOUT_SECONDS = 120
+# sudo options that take a value, so the word after them is not the command.
+SUDO_VALUE_OPTIONS = frozenset("CDghpRrTtUu")
+
+# Set once the island supplied this sudo's password, so setcred (which sudo
+# only reaches after the whole stack accepted it) can report success.
+island_password = {"asked": 0, "pending": False}
 
 
 def log(message):
@@ -101,6 +109,50 @@ def has_face_models(username, howdy_dir=HOWDY_DIR):
     )
 
 
+def password_comes_from_elsewhere(argv):
+    """sudo -S, -A and -n get their password another way, or never ask."""
+    for arg in argv[1:]:
+        if arg == "--" or not arg.startswith("-") or arg == "-":
+            return False
+        if arg.startswith("--"):
+            name = arg[2:].split("=", 1)[0]
+            if name in ("stdin", "askpass", "non-interactive"):
+                return True
+            continue
+        for index, flag in enumerate(arg[1:]):
+            if flag in "SAn":
+                return True
+            if flag in SUDO_VALUE_OPTIONS:
+                # The rest of this word (or the next word) is the value.
+                break
+    return False
+
+
+def ask_password_in_island(pamh, username, requester):
+    """Collect the password in the island and leave it for pam_unix to check.
+
+    FaceGate never verifies it: the password becomes PAM_AUTHTOK and the
+    normal stack (pam_unix try_first_pass, faillock) decides. Returns False
+    when the island is unavailable or dismissed, so sudo asks in the terminal.
+    """
+    reply = request_hud(
+        username,
+        "password",
+        {"service": "sudo", "requester": requester, "error": island_password["asked"] > 0},
+        timeout=PASSWORD_TIMEOUT_SECONDS,
+    )
+    password = reply.get("password") if isinstance(reply, dict) else None
+    if not password or not isinstance(password, (type(u""), str)):
+        return False
+    if not isinstance(password, str):
+        # Python 2: PAM wants bytes.
+        password = password.encode("utf-8")
+    pamh.authtok = password
+    island_password["asked"] += 1
+    island_password["pending"] = True
+    return True
+
+
 def reset_password_failures(username):
     """End a password failure streak after successful face authentication.
 
@@ -134,11 +186,14 @@ def do_auth(pamh):
         log("Unable to read Howdy configuration: %s" % error)
         return pamh.PAM_AUTHINFO_UNAVAIL
 
-    if not has_face_models(username):
-        log("No face models for %s; password fallback" % username)
-        return pamh.PAM_AUTHINFO_UNAVAIL
-
     service = getattr(pamh, "service", None) or "sudo"
+    if not has_face_models(username):
+        # polkit's own agent (FaceGate's island) asks for the password itself.
+        if service == "polkit-1":
+            log("No face models for %s; password fallback" % username)
+            return pamh.PAM_AUTHINFO_UNAVAIL
+        return password_fallback(pamh, username)
+
     try:
         if service == "polkit-1":
             # PAM runs in polkit's agent helper, not in the requester. FaceGate's
@@ -175,6 +230,28 @@ def do_auth(pamh):
     return pamh.PAM_AUTH_ERR
 
 
+def password_fallback(pamh, username):
+    """No face to try: ask for sudo's password in the island when possible."""
+    try:
+        argv = requesters.read_process(os.getpid())[2]
+    except Exception:
+        argv = []
+    if password_comes_from_elsewhere(argv):
+        return pamh.PAM_AUTHINFO_UNAVAIL
+    try:
+        requester = requesters.describe_command(os.getpid())
+    except Exception as error:
+        log("Unable to describe the sudo requester: %s" % error)
+        requester = {}
+    requester["service"] = "sudo"
+    if ask_password_in_island(pamh, username, requester):
+        log("Password for %s collected in the island; checked by the PAM stack" % username)
+    else:
+        log("No face models for %s; terminal password fallback" % username)
+    # Not sufficient on its own: pam_unix checks the password next.
+    return pamh.PAM_AUTHINFO_UNAVAIL
+
+
 def pam_sm_authenticate(pamh, flags, args):
     return do_auth(pamh)
 
@@ -185,6 +262,20 @@ def pam_sm_open_session(pamh, flags, args):
 
 def pam_sm_close_session(pamh, flags, args):
     return pamh.PAM_SUCCESS
+
+
+def pam_sm_acct_mgmt(pamh, flags, args):
+    """sudo checks the account only after the stack accepted a password.
+
+    Installed as an optional account rule, so it never affects the decision.
+    """
+    if island_password["pending"]:
+        island_password["pending"] = False
+        try:
+            emit_hud(pamh.get_user(), "result", {"result": "success"})
+        except Exception:
+            pass
+    return pamh.PAM_IGNORE
 
 
 def pam_sm_setcred(pamh, flags, args):

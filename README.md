@@ -29,6 +29,8 @@ sudo / pkexec / KDE admin prompt → FaceGate consent HUD → existing Howdy com
 ```
 
 - `/etc/pam.d/sudo` is edited in place (timestamped backup in `/etc/facegate/`).
+  Besides the auth rule it adds an `optional` account rule, which only tells
+  the island "Verified" after sudo accepted a password typed there.
 - Polkit's rule ships in `/usr/lib/pam.d/polkit-1`, so the installer writes an
   overriding `/etc/pam.d/polkit-1` with the Howdy line gated. It survives package
   updates, and the uninstaller removes it.
@@ -40,7 +42,12 @@ sudo / pkexec / KDE admin prompt → FaceGate consent HUD → existing Howdy com
   match it turns into a password field (**Cancel** / **Allow**, three tries).
   If no usable face model exists—including while adding the first one—it skips
   the camera and asks for the typed sudo password immediately.
-  `sudo` keeps its terminal password prompt.
+- `sudo` without an enrolled face asks for the password in the island too
+  (**Cancel** / **Allow**). The typed password is handed to PAM as the
+  authentication token, and `pam_unix` checks it as usual, so a wrong one reads
+  "Incorrect password. Try again." on the next of sudo's tries. Cancel, a
+  missing island, `sudo -S`, `-A` and `-n` keep the terminal prompt. With a
+  face enrolled, **Deny** still leaves sudo at its terminal prompt.
 
 SDDM is deliberately untouched. If FaceGate is closed, rejects the request,
 times out, or face recognition fails, PAM continues to the normal password
@@ -152,8 +159,10 @@ shellcheck install.sh uninstall.sh scripts/demo.sh
 The Unix socket is mode `0600` in `/run/user/$UID`, and the HUD lives entirely
 in the user's desktop session so it can render under Wayland. Its response only
 starts Howdy. A successful Howdy comparison remains the sole successful PAM
-result; the HUD cannot grant sudo on its own. FaceGate never stores camera
-frames, passwords, or sudo credentials.
+result; the HUD cannot grant sudo on its own. A password typed in the island
+for sudo goes back over that socket to the root PAM module, which only hands it
+to `pam_unix`; it is never logged, stored, or checked by FaceGate. FaceGate
+never stores camera frames, passwords, or sudo credentials.
 
 A successful face match also clears the account's consecutive `pam_faillock`
 password failures, just as a successful password does. Earlier dismissed

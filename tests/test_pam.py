@@ -16,6 +16,7 @@ class FakePam:
     PAM_AUTHINFO_UNAVAIL = 9
     PAM_SUCCESS = 0
     PAM_AUTH_ERR = 7
+    PAM_IGNORE = 25
     service = "sudo"
 
     def get_user(self):
@@ -42,14 +43,58 @@ class FaceModelTests(unittest.TestCase):
             (models / "sammy.dat").write_text(json.dumps([{"id": 0, "data": [[0.1, 0.2]]}]))
             self.assertTrue(pam.has_face_models("sammy", directory))
 
-    def test_no_face_returns_before_the_hud_is_contacted(self):
+    def test_polkit_without_a_face_leaves_the_password_to_the_agent(self):
+        pamh = FakePam()
+        pamh.service = "polkit-1"
         with (
             mock.patch.object(pam, "should_skip", return_value=False),
             mock.patch.object(pam, "has_face_models", return_value=False),
             mock.patch.object(pam, "request_hud") as request_hud,
         ):
-            self.assertEqual(pam.do_auth(FakePam()), FakePam.PAM_AUTHINFO_UNAVAIL)
+            self.assertEqual(pam.do_auth(pamh), FakePam.PAM_AUTHINFO_UNAVAIL)
         request_hud.assert_not_called()
+
+    def test_sudo_without_a_face_takes_the_password_from_the_island_for_pam_unix(self):
+        pam.island_password.update(asked=0, pending=False)
+        pamh = FakePam()
+        with (
+            mock.patch.object(pam, "should_skip", return_value=False),
+            mock.patch.object(pam, "has_face_models", return_value=False),
+            mock.patch.object(pam.requesters, "read_process", return_value=("sudo", 1, ["sudo", "pacman", "-Syu"])),
+            mock.patch.object(pam.requesters, "describe_command", return_value={"command": "sudo pacman -Syu"}),
+            mock.patch.object(pam, "request_hud", return_value={"password": "hunter2"}) as request_hud,
+            mock.patch.object(pam, "emit_hud") as emit_hud,
+        ):
+            # Never sufficient by itself: pam_unix still has to accept it.
+            self.assertEqual(pam.do_auth(pamh), FakePam.PAM_AUTHINFO_UNAVAIL)
+            self.assertEqual(pamh.authtok, "hunter2")
+            self.assertEqual(request_hud.call_args[0][1], "password")
+            self.assertFalse(request_hud.call_args[0][2]["error"])
+            # A retry after a rejected password says so.
+            pam.do_auth(pamh)
+            self.assertTrue(request_hud.call_args[0][2]["error"])
+            self.assertEqual(pam.pam_sm_acct_mgmt(pamh, 0, []), FakePam.PAM_IGNORE)
+            pam.pam_sm_acct_mgmt(pamh, 0, [])
+        emit_hud.assert_called_once_with("sammy", "result", {"result": "success"})
+
+    def test_dismissed_island_leaves_sudo_at_its_terminal_prompt(self):
+        pam.island_password.update(asked=0, pending=False)
+        pamh = FakePam()
+        with (
+            mock.patch.object(pam, "should_skip", return_value=False),
+            mock.patch.object(pam, "has_face_models", return_value=False),
+            mock.patch.object(pam.requesters, "read_process", return_value=("sudo", 1, ["sudo", "true"])),
+            mock.patch.object(pam.requesters, "describe_command", return_value={}),
+            mock.patch.object(pam, "request_hud", return_value={"password": None}),
+        ):
+            self.assertEqual(pam.do_auth(pamh), FakePam.PAM_AUTHINFO_UNAVAIL)
+        self.assertFalse(hasattr(pamh, "authtok"))
+
+    def test_stdin_askpass_and_non_interactive_sudo_never_open_the_island(self):
+        for argv in (["sudo", "-S", "true"], ["sudo", "-kS", "true"], ["sudo", "--stdin", "true"], ["sudo", "-n", "true"], ["sudo", "-A", "true"]):
+            self.assertTrue(pam.password_comes_from_elsewhere(argv), argv)
+        for argv in (["sudo", "true"], ["sudo", "-u", "nobody", "true"], ["sudo", "-uS", "true"], ["sudo", "pacman", "-S", "vim"], ["sudo", "--", "-S"]):
+            self.assertFalse(pam.password_comes_from_elsewhere(argv), argv)
 
     def test_successful_face_match_clears_password_failures(self):
         with (
