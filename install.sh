@@ -15,7 +15,7 @@ if [[ -z ${target_user} || ${target_user} == root ]]; then
 fi
 
 install -d -m 0755 /usr/local/lib/facegate /usr/local/lib/security/facegate /usr/local/lib/systemd/user \
-  /usr/local/share/applications /usr/share/polkit-1/actions
+  /usr/local/share/applications /usr/local/share/icons/hicolor/scalable/apps /usr/share/polkit-1/actions
 install -d -m 0700 /etc/facegate
 # The faces helper runs this package as root, so it must be root's alone:
 # a copy owned by the user would let any of their processes edit root's code.
@@ -26,12 +26,15 @@ chown -R root:root /usr/local/lib/facegate
 chmod -R u=rwX,go=rX /usr/local/lib/facegate
 install -m 0755 "${project_dir}/bin/facegate-hud" /usr/local/bin/facegate-hud
 install -m 0755 "${project_dir}/bin/facegate-settings" /usr/local/bin/facegate-settings
+install -m 0755 "${project_dir}/bin/facegate-tray" /usr/local/bin/facegate-tray
 install -m 0755 "${project_dir}/bin/facegate-faces" /usr/local/lib/facegate/facegate-faces
 install -m 0755 "${project_dir}/bin/facegate-faces-list" /usr/local/lib/facegate/facegate-faces-list
 install -m 0700 "${project_dir}/pam/facegate-pam.py" /usr/local/lib/security/facegate/pam.py
 install -m 0644 "${project_dir}/packaging/facegate.service" /usr/local/lib/systemd/user/facegate.service
+install -m 0644 "${project_dir}/packaging/facegate-tray.service" /usr/local/lib/systemd/user/facegate-tray.service
 install -m 0644 "${project_dir}/packaging/org.facegate.faces.policy" /usr/share/polkit-1/actions/org.facegate.faces.policy
 install -m 0644 "${project_dir}/packaging/org.facegate.Settings.desktop" /usr/local/share/applications/org.facegate.Settings.desktop
+install -m 0644 "${project_dir}/packaging/facegate-symbolic.svg" /usr/local/share/icons/hicolor/scalable/apps/facegate-symbolic.svg
 
 sudo_pam=/etc/pam.d/sudo
 howdy_line='pam_python.so /lib/security/howdy/pam.py'
@@ -104,4 +107,4 @@ runuser -u "${target_user}" -- env \
   systemctl --user restart facegate.service
 
 echo "FaceGate installed. Test with: sudo -k; sudo -v"
-echo "Manage faces with FaceGate in your app menu, or: facegate-settings"
+echo "Manage faces from FaceGate's tray menu, app-menu entry, or: facegate-settings"

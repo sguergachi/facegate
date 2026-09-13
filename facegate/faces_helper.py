@@ -1,4 +1,4 @@
-"""facegate-faces: the root side of FaceGate Settings.
+"""facegate-faces: the root side of FaceGate's in-island face management.
 
 Each run does one thing for the user who ran pkexec, and writes JSON events,
 one per line, to stdout:

@@ -1,5 +1,5 @@
 #!/usr/bin/python3 -I
-"""Lists your faces for FaceGate Settings; started through pkexec, no prompt."""
+"""Lists faces for FaceGate's island; started through pkexec, no prompt."""
 
 import sys
 

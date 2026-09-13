@@ -1,14 +1,12 @@
-"""FaceGate Settings: onboarding, and the faces that can approve for you.
+"""FaceGate's in-island configuration panel.
 
-A small window in the island's design language (see DESIGN.md). The first time
-it opens it explains FaceGate over three pages, then walks you through adding
-a face. Afterwards it lists your faces under a large header that collapses
-into a compact bar as the list scrolls.
+The first time the island opens it explains FaceGate over three pages, then
+walks you through adding a face. Afterwards it lists your faces under a large
+header that collapses into a compact bar as the list scrolls.
 
 Reading the list needs no prompt. Adding or removing a face runs the root
 facegate-faces helper through pkexec, so every change asks for admin approval
-(in the island). Adding one hands the camera preview to the island, which
-shows the scan at the top of the screen.
+in the same island. Adding one hands the camera preview to the island too.
 """
 
 from __future__ import annotations
@@ -16,7 +14,6 @@ from __future__ import annotations
 import json
 import os
 import shlex
-import socket
 import sys
 import time
 from pathlib import Path
@@ -46,7 +43,6 @@ from .edge_hud import (  # noqa: E402
     Spring,
     Tween,
     clamp,
-    default_socket_path,
     island_path,
     mark_values,
     mix,
@@ -54,9 +50,7 @@ from .edge_hud import (  # noqa: E402
     reduced_motion,
     smoothstep,
 )
-from .protocol import encode  # noqa: E402
 
-APP_ID = "org.facegate.Settings"
 LIST_HELPER = "/usr/local/lib/facegate/facegate-faces-list"
 CHANGE_HELPER = "/usr/local/lib/facegate/facegate-faces"
 SETTINGS_FILE = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "facegate" / "settings.json"
@@ -72,17 +66,17 @@ SPACE_L = 16     # parts of one group
 SPACE_XL = 24    # groups: margins, art to title, copy to content
 SPACE_XXL = 32   # the top bar's inset
 
-WINDOW_WIDTH = 424
-WINDOW_HEIGHT = 680
-# Concentric corners: the window's radius is the primary button's radius plus
+PANEL_WIDTH = 424
+PANEL_HEIGHT = 680
+# Concentric corners: the expanded island's lower radius is the primary button's radius plus
 # the margin around it, and the close button sits on the same corner's centre.
 PAGE_MARGIN = SPACE_XL
 BUTTON_HEIGHT = 48
 BUTTON_GAP = SPACE_S
-WINDOW_RADIUS = BUTTON_HEIGHT // 2 + PAGE_MARGIN
+PANEL_RADIUS = BUTTON_HEIGHT // 2 + PAGE_MARGIN
 CLOSE_SIZE = 32
-CLOSE_INSET = WINDOW_RADIUS - CLOSE_SIZE // 2
-CONTENT_WIDTH = WINDOW_WIDTH - 2 * PAGE_MARGIN
+CLOSE_INSET = PANEL_RADIUS - CLOSE_SIZE // 2
+CONTENT_WIDTH = PANEL_WIDTH - 2 * PAGE_MARGIN
 
 # The list page's hero is composed exactly like an onboarding step (the same
 # 144 mark, 24 to a 28 title, 8 to a one-line body), so the hand-over from
@@ -95,7 +89,7 @@ TITLE_TO_DETAIL = SPACE_S
 # under the detail.
 HERO_BOTTOM = SPACE_S
 # Collapsed, the bar's content is centred on the close button's line.
-BAR_HEIGHT = 2 * WINDOW_RADIUS
+BAR_HEIGHT = 2 * PANEL_RADIUS
 BAR_MARK = 32
 BAR_GAP = SPACE_M
 TITLE_PX = 28
@@ -125,13 +119,13 @@ def setup_auth_copy(faces_loaded: bool, has_faces: bool) -> tuple[str, str, str]
     if faces_loaded and not has_faces:
         return (
             "Enter your sudo password",
-            "Your first face cannot approve itself. Type your sudo password in the island to begin.",
-            "Enter your sudo password in the island to add your first face.",
+            "Your first face can’t approve itself, so FaceGate asks for your password first.",
+            "Enter your sudo password to add your first face.",
         )
     return (
         "Authenticate to add a face",
-        "Adding a face needs admin authentication. The island at the top of your screen will ask.",
-        "Approve in the island to add a face.",
+        "Adding a face needs admin approval first.",
+        "Approve to add a face.",
     )
 
 
@@ -329,64 +323,35 @@ class HelperRun:
             self.process.force_exit()
 
 
-class IslandLink:
-    """The stream that shows an enrollment in the island, if the HUD is running."""
+class IslandBridge:
+    """Hands the panel's scan to the island it lives in.
 
-    def __init__(self, on_cancel: Callable[[], None]) -> None:
+    Panel and island share one GTK main loop, so this is a direct call, never
+    a socket round-trip: a blocking handshake would wait for a reply that
+    this same loop has to dispatch. The scan is announced before admin
+    approval, so the approval itself turns into the preview.
+    """
+
+    def __init__(self, hud: Any, on_cancel: Callable[[], None]) -> None:
+        self.hud = hud
         self.on_cancel = on_cancel
-        self.connection: socket.socket | None = None
-        self.watch: int | None = None
+        self.token: object | None = None
+
+    def expect(self) -> None:
+        self.close()
+        self.token = self.hud.expect_enrollment(self.on_cancel)
 
     def open(self) -> bool:
-        connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        try:
-            connection.settimeout(2)
-            connection.connect(str(default_socket_path()))
-            connection.sendall(encode({"phase": "enroll"}))
-            reply = json.loads(connection.recv(4_096).split(b"\n", 1)[0] or b"{}")
-        except (OSError, ValueError):
-            connection.close()
-            return False
-        if not isinstance(reply, dict) or not reply.get("ok"):
-            connection.close()
-            return False
-        connection.settimeout(1)
-        self.connection = connection
-        self.watch = GLib.io_add_watch(connection.fileno(), GLib.PRIORITY_DEFAULT, GLib.IO_IN | GLib.IO_HUP | GLib.IO_ERR, self._readable)
-        return True
-
-    def _readable(self, *_args: Any) -> bool:
-        try:
-            data = self.connection.recv(4_096) if self.connection else b""
-        except OSError:
-            data = b""
-        if not data:
-            self.watch = None
-            self.close()
-            return False
-        if b'"cancel"' in data:
-            self.on_cancel()
-        return True
+        return self.token is not None and self.hud.begin_embedded_enrollment(self.token)
 
     def send(self, message: dict[str, Any]) -> None:
-        if not self.connection:
-            return
-        try:
-            self.connection.sendall(encode(message))
-        except OSError:
-            self.close()
+        if self.token is not None:
+            self.hud.enrollment_message(self.token, message)
 
     def close(self) -> None:
-        if self.watch:
-            GLib.source_remove(self.watch)
-            self.watch = None
-        if self.connection:
-            self.connection.close()
-            self.connection = None
-
-    @property
-    def is_open(self) -> bool:
-        return self.connection is not None
+        token, self.token = self.token, None
+        if token is not None:
+            self.hud.end_enrollment(token)
 
 
 def draw_close_glyph(area: Gtk.DrawingArea, context: Any, width: int, height: int) -> None:
@@ -507,7 +472,7 @@ class FaceRow(Gtk.Revealer):
 
 # Onboarding illustration ------------------------------------------------------
 
-STORY_WIDTH = WINDOW_WIDTH - 2 * PAGE_MARGIN
+STORY_WIDTH = PANEL_WIDTH - 2 * PAGE_MARGIN
 STORY_HEIGHT = 176
 STORY_SCALE = 0.6
 # When each phase starts in the loop, the island height it springs to, and the
@@ -637,8 +602,8 @@ class IslandStory(Gtk.DrawingArea):
 class CollapsingHeader:
     """A large mark and title that shrink into a compact bar as content scrolls.
 
-    The visual layer never takes input, so the list scrolls beneath it; a drag
-    handle the size of the header's current height sits above it.
+    The visual layer never takes input, so the list scrolls beneath it; a
+    transparent scroll target the size of the header sits above it.
     """
 
     def __init__(self, scroller: Gtk.ScrolledWindow) -> None:
@@ -653,7 +618,7 @@ class CollapsingHeader:
         # One line, always: the header's height never changes with its copy.
         self.detail = label("", "hero-detail")
         self.detail.set_ellipsize(Pango.EllipsizeMode.END)
-        self.detail.set_size_request(WINDOW_WIDTH - 2 * PAGE_MARGIN, -1)
+        self.detail.set_size_request(PANEL_WIDTH - 2 * PAGE_MARGIN, -1)
         self.detail_fade = Fade(self.detail)
         for widget in (self.backdrop, self.mark, self.title, self.detail):
             self.visual.put(widget, 0, 0)
@@ -665,15 +630,16 @@ class CollapsingHeader:
         self.title_top = HERO_TOP + HERO_SIZE + MARK_TO_TITLE
         self.detail_top = self.title_top + self.title_height + TITLE_TO_DETAIL
         self.full = self.detail_top + detail_height + HERO_BOTTOM
-        self.backdrop.set_size_request(WINDOW_WIDTH, self.full + HEADER_FEATHER)
+        self.backdrop.set_size_request(PANEL_WIDTH, self.full + HEADER_FEATHER)
         self.progress = 0.0
         self.height = float(self.full)
 
-        self.handle = Gtk.WindowHandle()
-        self.handle.set_valign(Gtk.Align.START)
+        # The visual layer ignores input; this forwards scrolling over it.
+        self.scroll_target = Gtk.Box()
+        self.scroll_target.set_valign(Gtk.Align.START)
         scroll = Gtk.EventControllerScroll.new(Gtk.EventControllerScrollFlags.VERTICAL)
         scroll.connect("scroll", self._forward_scroll)
-        self.handle.add_controller(scroll)
+        self.scroll_target.add_controller(scroll)
 
         scroller.get_vadjustment().connect("value-changed", lambda adjustment: self.update(adjustment.get_value()))
         self.update(0.0)
@@ -687,7 +653,7 @@ class CollapsingHeader:
     def update(self, offset: float) -> None:
         t = clamp(offset / max(1.0, self.full - BAR_HEIGHT))
         self.progress = t
-        width = WINDOW_WIDTH
+        width = PANEL_WIDTH
         bar_scale = BAR_TITLE_PX / TITLE_PX
         group = BAR_MARK + BAR_GAP + self.title_width * bar_scale
         bar_mark_x = width / 2 - group / 2 + BAR_MARK / 2
@@ -708,7 +674,7 @@ class CollapsingHeader:
         self.detail.set_opacity(clamp(1 - t / 0.45))
 
         self.height = mix(self.full, BAR_HEIGHT, t)
-        self.handle.set_size_request(width, round(self.height))
+        self.scroll_target.set_size_request(width, round(self.height))
         self.backdrop.queue_draw()
 
     def _place(self, widget: Gtk.Widget, x: float, y: float, scale: float) -> None:
@@ -734,19 +700,11 @@ class CollapsingHeader:
             context.fill()
 
 
-# Window ------------------------------------------------------------------------
+# Styles ------------------------------------------------------------------------
 
 CSS = """
-window.facegate {
-    background: transparent;
-    color: #f5f5f7;
-}
-.surface {
-    background-color: #000000;
-    border-radius: %(radius)dpx;
-    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
-}
-window.facegate label { font-family: "Inter", "SF Pro Text", sans-serif; }
+.settings-panel { color: #f5f5f7; }
+.settings-panel label { font-family: "Inter", "SF Pro Text", sans-serif; }
 /* Line heights are set on the 4-point grid, so every text box is too. */
 .hero-title { font-size: %(title)dpx; line-height: 32px; font-weight: 700; letter-spacing: -0.5px; color: #f5f5f7; }
 .hero-detail { font-size: 15px; line-height: 20px; color: #98989d; }
@@ -795,7 +753,7 @@ window.facegate label { font-family: "Inter", "SF Pro Text", sans-serif; }
 .promise-icon { color: #64d2ff; }
 .promise-title { font-size: 15px; line-height: 20px; font-weight: 600; color: #f5f5f7; }
 .promise-text { font-size: 13px; line-height: 20px; color: #98989d; }
-window.facegate button {
+.settings-panel button {
     border: none;
     outline: none;
     box-shadow: none;
@@ -805,37 +763,53 @@ window.facegate button {
     transition: background-color 180ms ease, color 180ms ease, opacity 180ms ease, transform 160ms %(ease_out)s;
 }
 /* Press feedback: every button gives slightly under the pointer. */
-window.facegate button:active { transform: scale(0.97); }
-button.close, button.back { min-width: %(close)dpx; min-height: %(close)dpx; padding: 0; border-radius: %(close_radius)dpx; background-color: #1c1c1e; color: #98989d; }
-button.close:hover, button.back:hover { background-color: #2c2c2e; color: #f5f5f7; }
-button.close:active, button.back:active { background-color: #3a3a3c; color: #f5f5f7; }
-button.primary { min-height: %(button)dpx; padding: 0 %(space_l)dpx; border-radius: %(button_radius)dpx; font-size: 15px; background-color: #f5f5f7; color: #000000; }
-button.primary:disabled { color: #8e8e93; }
-button.primary.secondary { color: #f5f5f7; }
-button.primary label { color: #000000; }
-button.primary:hover { background-color: #ffffff; }
-button.primary:active { background-color: #d1d1d6; }
-button.primary:disabled { background-color: #1c1c1e; }
-button.primary:disabled label { color: #8e8e93; }
-button.primary.secondary { background-color: #1c1c1e; }
-button.primary.secondary label { color: #f5f5f7; }
-button.primary.secondary:hover { background-color: #2c2c2e; }
-button.primary.secondary:active { background-color: #3a3a3c; }
-button.icon { min-width: %(avatar)dpx; min-height: %(avatar)dpx; padding: 0; border-radius: %(avatar_radius)dpx; background-color: transparent; color: #8e8e93; }
-button.icon:hover { background-color: #2c2c2e; color: #ff453a; }
-button.destructive { min-height: %(avatar)dpx; padding: 0 16px; border-radius: %(avatar_radius)dpx; background-color: #ff453a; color: #ffffff; font-size: 14px; }
-button.destructive label { color: #ffffff; }
-button.destructive:hover { background-color: #ff5e55; }
+.settings-panel button:active { transform: scale(0.97); }
+.settings-panel button.close, .settings-panel button.back { min-width: %(close)dpx; min-height: %(close)dpx; padding: 0; border-radius: %(close_radius)dpx; background-color: #1c1c1e; color: #98989d; }
+.settings-panel button.close:hover, .settings-panel button.back:hover { background-color: #2c2c2e; color: #f5f5f7; }
+.settings-panel button.close:active, .settings-panel button.back:active { background-color: #3a3a3c; color: #f5f5f7; }
+.settings-panel button.primary { min-height: %(button)dpx; padding: 0 %(space_l)dpx; border-radius: %(button_radius)dpx; font-size: 15px; background-color: #f5f5f7; color: #000000; }
+.settings-panel button.primary:disabled { color: #8e8e93; }
+.settings-panel button.primary.secondary { color: #f5f5f7; }
+.settings-panel button.primary label { color: #000000; }
+.settings-panel button.primary:hover { background-color: #ffffff; }
+.settings-panel button.primary:active { background-color: #d1d1d6; }
+.settings-panel button.primary:disabled { background-color: #1c1c1e; }
+.settings-panel button.primary:disabled label { color: #8e8e93; }
+.settings-panel button.primary.secondary { background-color: #1c1c1e; }
+.settings-panel button.primary.secondary label { color: #f5f5f7; }
+.settings-panel button.primary.secondary:hover { background-color: #2c2c2e; }
+.settings-panel button.primary.secondary:active { background-color: #3a3a3c; }
+.settings-panel button.icon { min-width: %(avatar)dpx; min-height: %(avatar)dpx; padding: 0; border-radius: %(avatar_radius)dpx; background-color: transparent; color: #8e8e93; }
+.settings-panel button.icon:hover { background-color: #2c2c2e; color: #ff453a; }
+.settings-panel button.destructive { min-height: %(avatar)dpx; padding: 0 16px; border-radius: %(avatar_radius)dpx; background-color: #ff453a; color: #ffffff; font-size: 14px; }
+.settings-panel button.destructive label { color: #ffffff; }
+.settings-panel button.destructive:hover { background-color: #ff5e55; }
 """ % {
-    "radius": WINDOW_RADIUS, "title": TITLE_PX, "close": CLOSE_SIZE, "close_radius": CLOSE_SIZE // 2,
+    "title": TITLE_PX, "close": CLOSE_SIZE, "close_radius": CLOSE_SIZE // 2,
     "button": BUTTON_HEIGHT, "button_radius": BUTTON_HEIGHT // 2, "bottom_feather": BOTTOM_FEATHER,
     "ease_out": EASE_OUT_CSS,
     "space_l": SPACE_L,
     "row": ROW_HEIGHT, "row_radius": ROW_RADIUS, "row_padding": ROW_PADDING,
     "avatar": AVATAR_SIZE, "avatar_radius": AVATAR_SIZE // 2,
-    # Centred in the gap between the rows' right edge and the window's.
+    # Centred in the gap between the rows' right edge and the island's.
     "gutter": (PAGE_MARGIN - 4) // 2,
 }
+
+_css_installed = False
+
+
+def install_settings_css() -> None:
+    """Install the panel's scoped styles once in the island process."""
+    global _css_installed
+    if _css_installed:
+        return
+    provider = Gtk.CssProvider()
+    provider.load_from_string(CSS)
+    Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+    settings = Gtk.Settings.get_default()
+    settings.set_property("gtk-application-prefer-dark-theme", True)
+    settings.set_property("gtk-overlay-scrolling", True)
+    _css_installed = True
 
 ONBOARDING = ("welcome", "how", "privacy")
 
@@ -1024,7 +998,7 @@ class FlowCanvas(Gtk.Widget):
         return piece
 
     def do_measure(self, orientation: Gtk.Orientation, _for_size: int) -> tuple[int, int, int, int]:
-        return 0, WINDOW_WIDTH if orientation == Gtk.Orientation.HORIZONTAL else WINDOW_HEIGHT, -1, -1
+        return 0, PANEL_WIDTH if orientation == Gtk.Orientation.HORIZONTAL else PANEL_HEIGHT, -1, -1
 
     def do_size_allocate(self, width: int, _height: int, _baseline: int) -> None:
         for piece in self.pieces:
@@ -1160,9 +1134,7 @@ class FlowView(Gtk.Overlay):
     def __init__(self) -> None:
         super().__init__()
         self.canvas = FlowCanvas()
-        handle = Gtk.WindowHandle()
-        handle.set_child(self.canvas)
-        self.set_child(handle)
+        self.set_child(self.canvas)
         self.arts: dict[str, Piece] = {}
         self.steps: dict[str, Step] = {}
         self.current: str | None = None
@@ -1232,7 +1204,7 @@ class FlowView(Gtk.Overlay):
         gaps = [TITLE_TO_BODY if following.widget.has_css_class("page-body") else COPY_TO_EXTRA for following in pieces[1:]]
         copy_height = sum(piece.measure() for piece in pieces) + sum(gaps)
         above_buttons = DOTS_TO_BUTTON + PageDots.DOT if step.dots >= 0 else 0
-        bottom = WINDOW_HEIGHT - PAGE_MARGIN - BUTTON_HEIGHT - above_buttons - SPACE_XL
+        bottom = PANEL_HEIGHT - PAGE_MARGIN - BUTTON_HEIGHT - above_buttons - SPACE_XL
         # Spacing is measured from the art's visible edge, never from a slot
         # around it: a 144 mark and a 64 shield both sit 24 above the title.
         art = self.arts[step.art]
@@ -1362,14 +1334,17 @@ class FlowView(Gtk.Overlay):
         return GLib.SOURCE_CONTINUE
 
 
-class SettingsWindow(Gtk.ApplicationWindow):
-    def __init__(self, app: Gtk.Application, welcome: bool) -> None:
-        super().__init__(application=app, title="FaceGate")
-        self.add_css_class("facegate")
-        self.set_default_size(WINDOW_WIDTH, WINDOW_HEIGHT)
-        self.set_resizable(False)
-        # The window draws its own rounded surface; no title bar.
-        self.set_decorated(False)
+class SettingsPanel(Gtk.Overlay):
+    """The complete configuration journey, embedded in the layer-shell island."""
+
+    def __init__(self, hud: Any, on_close: Callable[[], None], welcome: bool = False) -> None:
+        super().__init__()
+        install_settings_css()
+        self.add_css_class("settings-panel")
+        self.set_size_request(PANEL_WIDTH, PANEL_HEIGHT)
+        self.set_overflow(Gtk.Overflow.HIDDEN)
+        self.on_close = on_close
+        self.closed = False
 
         self.settings = load_settings()
         self.faces: list[dict[str, Any]] = []
@@ -1377,7 +1352,7 @@ class SettingsWindow(Gtk.ApplicationWindow):
         self.rows: dict[int, FaceRow] = {}
         self.fresh_id: int | None = None
         self.result_timer: int | None = None
-        self.island = IslandLink(self._cancel_enroll)
+        self.island = IslandBridge(hud, self._cancel_enroll)
         # One change at a time: an enrollment or a removal.
         self.run: HelperRun | None = None
         # None, "approving" (polkit is asking), "scanning", or "failed".
@@ -1402,20 +1377,14 @@ class SettingsWindow(Gtk.ApplicationWindow):
         close.set_valign(Gtk.Align.START)
         close.set_margin_top(CLOSE_INSET)
         close.set_margin_end(CLOSE_INSET)
-        close.connect("clicked", lambda *_: self.close())
+        close.connect("clicked", lambda *_: self.request_close())
 
-        surface = Gtk.Overlay()
-        surface.add_css_class("surface")
-        surface.set_overflow(Gtk.Overflow.HIDDEN)
-        surface.set_child(self.stack)
-        surface.add_overlay(close)
-        self.set_child(surface)
+        self.set_child(self.stack)
+        self.add_overlay(close)
 
         keys = Gtk.EventControllerKey()
         keys.connect("key-pressed", self._on_key)
         self.add_controller(keys)
-        self.connect("close-request", self._on_close)
-
         onboarded = self.settings.get("onboarded") and not welcome
         self.flow.go("welcome", animate=False)
         self.stack.set_visible_child_name("manage" if onboarded else "flow")
@@ -1491,7 +1460,7 @@ class SettingsWindow(Gtk.ApplicationWindow):
         flow.add_step("privacy", "shield", [label("Private by design", "page-title", wrap=True), promises], dots=2)
 
         self.setup_title = label("Authenticate to add a face", "page-title", wrap=True)
-        self.setup_body = label("Adding a face needs admin authentication. The island at the top of your screen will ask.", "page-body", wrap=True)
+        self.setup_body = label("Adding a face needs admin approval first.", "page-body", wrap=True)
         self.setup_pieces = flow.add_step("setup", "mark", [self.setup_title, self.setup_body])
         flow.add_step("added", "mark", [
             label("Face added", "page-title", wrap=True),
@@ -1536,7 +1505,7 @@ class SettingsWindow(Gtk.ApplicationWindow):
 
         overlay.set_child(scroller)
         overlay.add_overlay(self.header.visual)
-        overlay.add_overlay(self.header.handle)
+        overlay.add_overlay(self.header.scroll_target)
 
         bar = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         bar.add_css_class("bottom-bar")
@@ -1598,7 +1567,7 @@ class SettingsWindow(Gtk.ApplicationWindow):
 
     def _on_key(self, _controller: Any, keyval: int, _keycode: int, _state: Any) -> bool:
         if keyval == Gdk.KEY_Escape:
-            self.close()
+            self.request_close()
             return True
         return False
 
@@ -1612,7 +1581,7 @@ class SettingsWindow(Gtk.ApplicationWindow):
         if phase == "approving" and from_manage:
             detail, button, mark = setup_detail, None, "approval"
         elif phase == "scanning" and from_manage:
-            detail, button, mark = "Look at the camera and follow the island.", "Cancel", "scanning"
+            detail, button, mark = "Keep your face in view.", "Cancel", "scanning"
         elif has_faces:
             detail, button, mark = "Your face approves sudo and admin prompts.", "Add a Face", "approval"
         else:
@@ -1643,7 +1612,7 @@ class SettingsWindow(Gtk.ApplicationWindow):
         elif step == "setup":
             if phase == "scanning":
                 flow.retext(title, self.setup_title, "Look at the camera")
-                flow.retext(body, self.setup_body, "Keep your face in view. The island at the top of your screen shows what FaceGate sees.")
+                flow.retext(body, self.setup_body, "Keep your face in view while FaceGate learns it.")
                 flow.actions("Cancel", self._cancel_enroll, muted=True)
                 self.mark.set_state("scanning")
             elif phase == "failed":
@@ -1760,6 +1729,7 @@ class SettingsWindow(Gtk.ApplicationWindow):
         self._say("")
         if origin == "setup":
             self.flow.go("setup")
+        self.island.expect()
         self.run = HelperRun(["enroll"], self._on_enroll_event, self._on_enroll_exit)
         self.run.start()
         self._render()
@@ -1767,26 +1737,23 @@ class SettingsWindow(Gtk.ApplicationWindow):
     def _cancel_enroll(self) -> None:
         if self.run and self.enroll_phase == "scanning":
             self.run.send({"cmd": "cancel"})
+        elif self.run and self.enroll_phase == "approving":
+            # Approved, but the helper is still opening the camera: closing
+            # its input stops the scan before the first frame.
+            self.run.stop()
 
     def _on_enroll_event(self, event: dict[str, Any]) -> None:
         kind = event.get("event")
         if kind in ("frame", "hint", "progress"):
             if self.enroll_phase == "approving":
-                # Approved: the scan has begun. Hand its preview to the island.
+                # The scan has begun; the island is already showing its preview.
                 self.enroll_phase = "scanning"
-                if not self.island.open():
-                    print("[facegate-settings] island unavailable; scanning without preview", file=sys.stderr)
+                self.island.open()
                 self._render()
             if kind == "frame":
                 self.island.send({"frame": event.get("data"), "w": event.get("w"), "h": event.get("h")})
             elif kind == "hint":
                 self.island.send({"hint": event.get("text")})
-                if not self.island.is_open:
-                    text = str(event.get("text") or "")
-                    if self.enroll_from == "setup":
-                        self.flow.retext(self.setup_pieces[1], self.setup_body, text)
-                    else:
-                        self.header.detail_fade.to(text)
             else:
                 self.island.send({"progress": event.get("value")})
             return
@@ -1828,49 +1795,26 @@ class SettingsWindow(Gtk.ApplicationWindow):
                 self._say(message)
         self._render()
 
-    def _on_close(self, *_args: Any) -> bool:
+    def request_close(self) -> None:
+        if not self.closed:
+            self.on_close()
+
+    def shutdown(self) -> None:
+        """Release camera/helper work before the panel is detached."""
+        if self.closed:
+            return
+        self.closed = True
         self.island.close()
         if self.run:
-            self.run.stop()
-        return False
-
-
-class SettingsApp(Gtk.Application):
-    def __init__(self, welcome: bool = False) -> None:
-        super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.DEFAULT_FLAGS)
-        self.welcome = welcome
-        self.window: SettingsWindow | None = None
-
-    def do_startup(self) -> None:
-        Gtk.Application.do_startup(self)
-        provider = Gtk.CssProvider()
-        provider.load_from_string(CSS)
-        Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
-        settings = Gtk.Settings.get_default()
-        settings.set_property("gtk-application-prefer-dark-theme", True)
-        # Plasma's GTK settings turn overlay scrolling off; this window wants the
-        # slim indicator that only appears while scrolling.
-        settings.set_property("gtk-overlay-scrolling", True)
-        # `gapplication action org.facegate.Settings add-face` starts a scan.
-        add_face = Gio.SimpleAction.new("add-face", None)
-        add_face.connect("activate", lambda *_: self._add_face())
-        self.add_action(add_face)
-
-    def do_activate(self) -> None:
-        if not self.window:
-            self.window = SettingsWindow(self, self.welcome)
-        self.window.present()
-
-    def _add_face(self) -> None:
-        self.do_activate()
-        if self.window:
-            self.window._enroll("manage")
+            (self.run.stop if self.enroll_phase == "scanning" else self.run.abort)()
 
 
 def main() -> int:
-    # --welcome replays onboarding even after it has been completed.
-    welcome = "--welcome" in sys.argv
-    return SettingsApp(welcome).run([arg for arg in sys.argv if arg != "--welcome"])
+    # Kept for source-tree callers; the installed launcher imports control
+    # directly so opening FaceGate never constructs another GTK window.
+    from .control import main as control_main
+
+    return control_main()
 
 
 if __name__ == "__main__":

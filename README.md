@@ -9,7 +9,9 @@ FaceGate is a Face ID-style interface for
 project that does the real work: it drives the IR webcam and performs the face
 comparison. FaceGate doesn't replace any of that; it adds an explicit consent
 screen before Howdy uses the camera for `sudo`, and shows the scan and its
-result. It uses a true layer-shell surface, so the black island
+result. Onboarding and face management live in that island too. FaceGate runs
+in the tray, where **Open FaceGate** expands it into configuration. It uses a
+true layer-shell surface, so the black island
 is anchored to the monitor's physical top edge rather than placed as an
 ordinary desktop window. The visual HUD runs in your normal desktop
 session, while a tiny PAM adapter stays root-owned.
@@ -60,14 +62,17 @@ including the grid, concentric radii, and spring-based motion choreography.
 
 ## Managing faces
 
-Open **FaceGate** from the app menu (or run `facegate-settings`). The first
-time, it shows how FaceGate works over three short pages (replay them with
+Choose **Open FaceGate** from its tray menu, open **FaceGate** from the app
+menu, or run `facegate-settings`. Every route expands the top-edge island;
+there is no separate settings window. The first time, it shows how FaceGate
+works over three short pages (replay them with
 `facegate-settings --welcome`), then helps you add your face. After that it
 lists the faces Howdy knows for your account, under a large header that
 collapses into a compact bar as you scroll.
 
-- **Add a Face** first asks for admin approval in the island. The island then
-  shows a live, face-following IR preview feathered into its rounded
+- **Add a Face** reshapes the same island into admin approval. Once approved,
+  that same surface transitions directly into a live, face-following IR preview
+  feathered into its rounded
   rectangle. A trace fills its rim clockwise as samples are captured, while the
   island says what it needs ("Move a little closer"), then closes green.
   Cancel or Escape stops the scan and saves nothing.
@@ -91,8 +96,8 @@ cd facegate
 
 Run it as yourself, not with `sudo`. Setup walks through:
 
-1. Installing FaceGate's packages (GTK 4, `gtk4-layer-shell`, PyGObject, pycairo,
-   `v4l-utils`).
+1. Installing FaceGate's packages (GTK 4, `gtk4-layer-shell`, AppIndicator,
+   PyGObject, pycairo, `v4l-utils`).
 2. Installing [Howdy](https://github.com/boltgolt/howdy) and `pam-python` from
    the AUR with `paru` or `yay`, offering to install `paru` if neither exists.
    Building dlib can take 10 minutes or more.
@@ -155,7 +160,7 @@ password failures, just as a successful password does. Earlier dismissed
 prompts therefore cannot leave the typed fallback locked after the last face
 is removed.
 
-FaceGate Settings reads and changes faces through two small root helpers,
+FaceGate's in-island configuration reads and changes faces through two small root helpers,
 started with `pkexec`, because Howdy's models are root-only:
 
 - `facegate-faces-list` (polkit action `org.facegate.list-faces`) only returns
@@ -166,7 +171,8 @@ started with `pkexec`, because Howdy's models are root-only:
 Both only ever touch the models of the user who ran them, and each run does
 one thing and exits. Face templates are written to Howdy's store
 (`/usr/lib/security/howdy/models`) and never leave the machine. Preview frames
-stream only to the island over its `0600` socket and are not saved. The
+go from the helper's pipe straight to the island in the same process and are
+not saved. The
 installed package is root-owned so no user process can change the helpers'
 code.
 

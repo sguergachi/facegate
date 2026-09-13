@@ -37,7 +37,7 @@ done_ "Arch-based KDE Plasma Wayland session"
 
 step "Installing FaceGate's dependencies"
 sudo pacman -S --needed --noconfirm \
-  base-devel git python python-gobject python-cairo gtk4 gtk4-layer-shell polkit v4l-utils
+  base-devel git python python-gobject python-cairo gtk4 gtk4-layer-shell libappindicator polkit v4l-utils
 done_ "Packages from the official repositories"
 
 step "Installing Howdy (face recognition)"
@@ -98,7 +98,9 @@ else
     for i in "${!cameras[@]}"; do printf '   %d) %s\n' "$((i + 1))" "${labels[i]}"; done
     read -r -p "   Which camera should recognise you? [1] " choice
     choice=${choice:-1}
-    [[ ${choice} =~ ^[0-9]+$ ]] && ((choice >= 1 && choice <= ${#cameras[@]})) || fail "No camera ${choice}."
+    if [[ ! ${choice} =~ ^[0-9]+$ ]] || ((choice < 1 || choice > ${#cameras[@]})); then
+      fail "No camera ${choice}."
+    fi
     camera=${cameras[choice - 1]}
   fi
   sudo sed -i "s#^device_path *=.*#device_path = ${camera}#" "${howdy_config}"
@@ -110,10 +112,10 @@ sudo "${project_dir}/install.sh"
 done_ "FaceGate is active"
 
 step "Meeting FaceGate"
-info "FaceGate opens to show how it works and add your face."
-# Onboarding asks for admin approval in the island before it adds a face.
+info "The FaceGate island opens to show how it works and add your face."
+# Onboarding asks for admin approval in the same island before it adds a face.
 setsid facegate-settings --welcome >/dev/null 2>&1 < /dev/null &
 done_ "Opened FaceGate"
 
-printf '\n%sAll set.%s Finish in the FaceGate window. You can reopen it any time\n' "${bold}" "${reset}"
-printf 'from your app menu to add or remove faces. Your password always works too.\n'
+printf '\n%sAll set.%s Finish in the FaceGate island. You can reopen it any time\n' "${bold}" "${reset}"
+printf 'from its tray icon or your app menu. Your password always works too.\n'

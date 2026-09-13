@@ -29,6 +29,8 @@ from . import requester as requesters
 OBJECT_PATH = "/org/facegate/PolkitAgent"
 AUTHORITY = ("org.freedesktop.PolicyKit1", "/org/freedesktop/PolicyKit1/Authority", "org.freedesktop.PolicyKit1.Authority")
 EXEC_ACTION = "org.freedesktop.policykit.exec"
+# Adding or removing a face; FaceGate's own panel asks for it.
+MANAGE_FACES_ACTION = "org.facegate.manage-faces"
 MAX_PASSWORD_ATTEMPTS = 3
 RETRY_REGISTER_SECONDS = 5
 LOCKED_PASSWORD = "Password sign-in is temporarily locked. Try again later."
@@ -94,6 +96,7 @@ class Authentication:
     identity: Polkit.Identity
     invocation: Gio.DBusMethodInvocation
     requester: dict[str, Any]
+    action_id: str = ""
     session: Any = None
     password_mode: bool = False
     failed_passwords: int = 0
@@ -174,7 +177,7 @@ class FaceGatePolkitAgent:
                 invocation.return_dbus_error("org.freedesktop.PolicyKit1.Error.Failed", "No identity to authenticate as")
                 return
             log("begin %s" % action_id)
-            self.queue.append(Authentication(cookie, identity, invocation, requester_for(action_id, message, details)))
+            self.queue.append(Authentication(cookie, identity, invocation, requester_for(action_id, message, details), action_id))
             if not self.active:
                 self._next()
         elif method == "CancelAuthentication":
@@ -236,6 +239,9 @@ class FaceGatePolkitAgent:
             return
         if gained:
             self._finish(auth, None)
+            # An approved Add Face turns straight into its scan.
+            if auth.action_id == MANAGE_FACES_ACTION and self.hud.enrollment_authorized():
+                return
             if self.hud.view and self.hud.view.state == "password":
                 self.hud.present_result(True)
             return

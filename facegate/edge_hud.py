@@ -34,9 +34,8 @@ gi.require_version("Gtk4LayerShell", "1.0")
 gi.require_version("Pango", "1.0")
 from gi.repository import Gdk, Gio, GLib, Graphene, Gsk, Gtk, Gtk4LayerShell, Pango  # noqa: E402
 
-from .protocol import MAX_MESSAGE_BYTES, MAX_STREAM_BYTES, PREVIEW_HEIGHT, PREVIEW_WIDTH, decode, encode
+from .protocol import MAX_MESSAGE_BYTES, MAX_STREAM_BYTES, PREVIEW_HEIGHT, PREVIEW_WIDTH, decode, default_socket_path, encode
 
-SOCKET_NAME = "facegate.sock"
 SCAN_WATCHDOG_MS = 20_000
 
 # Layout contract (see DESIGN.md).  Everything lives on a 4/8-point grid and
@@ -61,18 +60,18 @@ COLLAPSED_WIDTH = 124
 CONTENT_WIDTH = ISLAND_WIDTH - 2 * INSET
 TEXT_WIDTH = ISLAND_WIDTH - 2 * 32
 
+# Configuration is the same 424 × 680 composition previously used by the
+# settings surface, but the layer-shell notch itself grows around it. Its
+# 48px lower corners remain concentric with a 48px button inside a 24px inset.
+CONFIG_WIDTH = 424
+CONFIG_HEIGHT = 680
+CONFIG_RADIUS = 48
+
 # The surface leaves room for the concave shoulders and spring overshoot.
-SURFACE_WIDTH = ISLAND_WIDTH + 2 * SHOULDER + 24
-SURFACE_HEIGHT = 440
+SURFACE_WIDTH = CONFIG_WIDTH + 2 * SHOULDER + 24
+SURFACE_HEIGHT = CONFIG_HEIGHT + 40
 
 WHITE = (0.96, 0.96, 0.97)
-
-
-def default_socket_path() -> Path:
-    if os.environ.get("FACEGATE_SOCKET"):
-        # Lets a checkout's HUD and Settings talk without touching the installed one.
-        return Path(os.environ["FACEGATE_SOCKET"])
-    return Path(os.environ.get("XDG_RUNTIME_DIR", "/run/user/%d" % os.getuid())) / SOCKET_NAME
 
 
 def clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:
@@ -177,13 +176,13 @@ class Tween:
         return self.duration <= 0 or now >= self.start + self.duration
 
 
-def island_path(context: Any, center: float, width: float, height: float) -> None:
+def island_path(context: Any, center: float, width: float, height: float, bottom_radius: float = ISLAND_RADIUS) -> None:
     """A notch flush with the top edge: concave shoulders, round lower corners."""
     if height <= 0.01 or width <= 0.01:
         return
     half = width / 2
     shoulder = min(SHOULDER, height / 3)
-    radius = min(ISLAND_RADIUS, half, max(0.0, height - shoulder))
+    radius = min(bottom_radius, half, max(0.0, height - shoulder))
     left, right = center - half, center + half
     context.new_path()
     context.move_to(left - shoulder, 0)
@@ -512,7 +511,7 @@ class PreviewArea(Gtk.DrawingArea):
         self.model = PreviewModel()
         self.progress = Spring(0.0)
         self.progress.configure(0.45, 0.9)
-        # Written by the socket thread, picked up on the frame clock.
+        # Written by the socket thread or the panel, picked up on the frame clock.
         self.latest: cairo.ImageSurface | None = None
         self.shown: cairo.ImageSurface | None = None
         self.previous: cairo.ImageSurface | None = None
@@ -521,6 +520,16 @@ class PreviewArea(Gtk.DrawingArea):
     def _draw(self, _area: Gtk.DrawingArea, context: Any, _width: int, _height: int) -> None:
         context.translate(PREVIEW_BLEED, PREVIEW_BLEED)
         paint_preview(context, PREVIEW_WIDTH, PREVIEW_HEIGHT, self.shown, self.model, self.previous)
+
+    def take_frame(self, message: dict[str, Any]) -> None:
+        """Keep the newest greyscale preview frame; bad frames are ignored."""
+        try:
+            width, height = int(message["w"]), int(message["h"])
+            if (width, height) != (PREVIEW_WIDTH, PREVIEW_HEIGHT):
+                return
+            self.latest = grey_surface(base64.b64decode(message["frame"]), width, height)
+        except (KeyError, TypeError, ValueError):
+            pass
 
     def reset(self) -> None:
         self.model = PreviewModel()
@@ -628,6 +637,9 @@ def approval_view(requester: object) -> View:
     return View("approval", title, "\n".join(lines + [APPROVAL_HINT]), True, command)
 
 
+# How long "Verified" holds before an approved face change becomes its scan.
+VERIFIED_HOLD_MS = 600
+
 SCANNING = View("scanning", "Looking for you", "Hold still for a moment.", False)
 SUCCESS = View("success", "Verified", "Continuing securely.", False)
 FAILURE = View("failure", "Not recognized", "Use your password instead.", False)
@@ -641,8 +653,56 @@ def enroll_failed(detail: object) -> View:
 
 @dataclass
 class Enrollment:
-    connection: socket.socket
+    connection: Any
     finished: bool = False
+    on_cancel: Callable[[], None] | None = None
+
+
+class ConfigHost(Gtk.Widget):
+    """Holds the configuration panel, clipped to the island's current shape.
+
+    The panel is laid out at its full 424 × 680 at all times; the island
+    uncovers it as it grows and covers it as it shrinks, so its content is
+    never drawn over the desktop and never waits for the island to settle.
+    """
+
+    def __init__(self, reveal: Callable[[], tuple[float, float, float]]) -> None:
+        super().__init__()
+        self.reveal = reveal
+        self.child: Gtk.Widget | None = None
+        self.set_overflow(Gtk.Overflow.HIDDEN)
+
+    def set_child(self, child: Gtk.Widget | None) -> None:
+        if self.child:
+            self.child.unparent()
+        self.child = child
+        if child:
+            child.set_parent(self)
+
+    def do_measure(self, orientation: Gtk.Orientation, _for_size: int) -> tuple[int, int, int, int]:
+        size = CONFIG_WIDTH if orientation == Gtk.Orientation.HORIZONTAL else CONFIG_HEIGHT
+        return size, size, -1, -1
+
+    def do_size_allocate(self, width: int, height: int, _baseline: int) -> None:
+        if self.child:
+            self.child.allocate(width, height, -1, None)
+
+    def do_snapshot(self, snapshot: Gtk.Snapshot) -> None:
+        if not self.child:
+            return
+        width, height, radius = self.reveal()
+        width, height = clamp(width, 0, CONFIG_WIDTH), clamp(height, 0, CONFIG_HEIGHT)
+        if width < 1 or height < 1:
+            return
+        bounds = Graphene.Rect().init((CONFIG_WIDTH - width) / 2, 0, width, height)
+        square, corner = Graphene.Size().init(0, 0), max(0.0, min(radius, width / 2, height / 2))
+        round_ = Graphene.Size().init(corner, corner)
+        # Keep the struct referenced: a chained init() result points at freed memory.
+        shape = Gsk.RoundedRect()
+        shape.init(bounds, square, square, round_, round_)
+        snapshot.push_rounded_clip(shape)
+        self.snapshot_child(self.child, snapshot)
+        snapshot.pop()
 
 
 class Item:
@@ -679,6 +739,14 @@ class EdgeHud:
 
         self.pending: PendingApproval | None = None
         self.enrollment: Enrollment | None = None
+        # The panel's scan, announced before its admin approval so the island
+        # can turn straight into the preview once approval is granted.
+        self.expected_enrollment: Enrollment | None = None
+        self.enrollment_start: int | None = None
+        self.config_panel: Any = None
+        self.config_active = False
+        self.config_suspended = False
+        self.config_requested: bool | None = None
         self.approval_timeout: int | None = None
         self.dismiss_timeout: int | None = None
         self.silenced = False
@@ -691,6 +759,7 @@ class EdgeHud:
         self.input_rect: tuple[int, int] | None = None
         self.width = Spring(COLLAPSED_WIDTH)
         self.height = Spring(0.0)
+        self.radius = Spring(ISLAND_RADIUS)
 
         self._install_css()
         overlay = Gtk.Overlay()
@@ -753,7 +822,21 @@ class EdgeHud:
         self.actions_item.height = BUTTON_HEIGHT
         self.entry_item = Item(self.entry, CONTENT_WIDTH)
         self.entry_item.height = BUTTON_HEIGHT
-        self.items = (self.mark_item, self.preview_item, self.title_item, self.command_item, self.detail_item, self.entry_item, self.actions_item)
+        self.config_host = ConfigHost(lambda: (self.width.value, self.height.value, self.radius.value))
+        self.config_host.set_can_target(False)
+        self.config_item = Item(self.config_host, CONFIG_WIDTH)
+        self.config_item.height = CONFIG_HEIGHT
+        self.config_item.y = 0
+        self.items = (
+            self.mark_item,
+            self.preview_item,
+            self.title_item,
+            self.command_item,
+            self.detail_item,
+            self.entry_item,
+            self.actions_item,
+            self.config_item,
+        )
         for item in self.items:
             self.layer.put(item.widget, 0, 0)
             item.widget.set_opacity(0)
@@ -925,6 +1008,11 @@ class EdgeHud:
             .translate(Graphene.Point().init(-item.width / 2, -item.height / 2))
         )
         self.layer.set_child_transform(item.widget, transform)
+        if item is self.config_item:
+            # The host clips the panel to the island itself.
+            item.widget.set_opacity(alpha)
+            item.widget.queue_draw()
+            return
         # Content is revealed by the island, never drawn over the desktop.
         covered_down = clamp((self.height.value - item.y - item.height) / 12 + 1)
         covered_across = clamp((self.width.value - item.width) / 32 + 1)
@@ -958,6 +1046,9 @@ class EdgeHud:
             # cancel the transition that is still settling.
             return
         previous, self.view = self.view, view
+        if self.config_active:
+            self.config_suspended = True
+            self.config_host.set_can_target(False)
         self.departing = False
         self.scheduled.clear()
         self.mark.set_state(view.state)
@@ -967,6 +1058,8 @@ class EdgeHud:
         other.alpha.to(0, self.now, 0.14)
         self.width.configure(0.5, 0.86)
         self.width.target = ISLAND_WIDTH
+        self.radius.configure(0.5, 0.9)
+        self.radius.target = ISLAND_RADIUS
         copy = lambda shown: (shown.title, shown.command, shown.detail, shown.actions, shown.password, shown.primary, shown.secondary, shown.preview)
         if previous and copy(previous) == copy(view):
             # Only the mark changes (for example success after a password check).
@@ -975,6 +1068,7 @@ class EdgeHud:
         # incoming copy while it settles in.
         for item in (self.title_item, self.command_item, self.detail_item, self.entry_item, self.actions_item):
             item.alpha.to(0, self.now, 0.14)
+        self.config_item.alpha.to(0, self.now, 0.14)
 
         def swap(now: float) -> None:
             self.height.configure(0.5, 0.86)
@@ -1020,10 +1114,12 @@ class EdgeHud:
             item.alpha = Tween()
         self.width.value, self.width.velocity = COLLAPSED_WIDTH, 0.0
         self.height.value, self.height.velocity = 0.0, 0.0
+        self.radius.value, self.radius.velocity = ISLAND_RADIUS, 0.0
         self.width.configure(0.5, 0.8)
         self.height.configure(0.56, 0.8)
         self.width.target = ISLAND_WIDTH
         self.height.target = self._layout(view)
+        self.radius.target = ISLAND_RADIUS
         stagger = [self._top_items(view)[0], self.title_item] + ([self.command_item] if view.command else [])
         stagger += ([self.detail_item] if view.detail else []) + ([self.entry_item] if view.password else [])
         stagger += [self.actions_item] if view.actions else []
@@ -1044,6 +1140,8 @@ class EdgeHud:
         self.dismiss_timeout = None
         if not self.visible or self.departing:
             return False
+        if self.config_active and self.config_suspended:
+            return self._restore_config()
         self.departing = True
         self.scheduled.clear()
         self.approve.set_sensitive(False)
@@ -1058,8 +1156,10 @@ class EdgeHud:
         def collapse(_now: float) -> None:
             self.width.configure(0.42, 1.0)
             self.height.configure(0.4, 1.0)
+            self.radius.configure(0.42, 1.0)
             self.width.target = COLLAPSED_WIDTH
             self.height.target = 0.0
+            self.radius.target = ISLAND_RADIUS
 
         self._at(0.08, collapse)
         return False
@@ -1083,6 +1183,7 @@ class EdgeHud:
 
         self.width.step(elapsed)
         self.height.step(elapsed)
+        self.radius.step(elapsed)
         self.mark.advance(elapsed)
         if self.view and self.view.preview:
             self.preview.advance(elapsed)
@@ -1103,6 +1204,10 @@ class EdgeHud:
             self.departing = False
             self.view = None
             self.input_rect = None
+            if not self.config_active:
+                self._detach_config_panel()
+            if self.config_requested is not None:
+                GLib.idle_add(self._open_requested_config)
             return GLib.SOURCE_REMOVE
         return GLib.SOURCE_CONTINUE
 
@@ -1122,7 +1227,13 @@ class EdgeHud:
             pass
 
     def _draw_island(self, _area: Gtk.DrawingArea, context: Any, width: int, _height: int) -> None:
-        island_path(context, width / 2, max(0.0, self.width.value), clamp(self.height.value, 0, SURFACE_HEIGHT))
+        island_path(
+            context,
+            width / 2,
+            max(0.0, self.width.value),
+            clamp(self.height.value, 0, SURFACE_HEIGHT),
+            max(0.0, self.radius.value),
+        )
         context.set_source_rgb(0.0, 0.0, 0.0)
         context.fill()
 
@@ -1178,11 +1289,24 @@ class EdgeHud:
         if self.dismiss_timeout:
             GLib.source_remove(self.dismiss_timeout)
             self.dismiss_timeout = None
+        if self.enrollment_start:
+            # Escape while "Verified" holds: stop the scan before it shows.
+            GLib.source_remove(self.enrollment_start)
+            self.enrollment_start = None
+            expected, self.expected_enrollment = self.expected_enrollment, None
+            if expected and expected.on_cancel:
+                expected.on_cancel()
+            self.dismiss()
+            return
         if self.enrollment:
-            # Settings stops the scan; its closing the stream ends the session.
+            # Tell either the embedded panel or an external stream to stop the
+            # root helper; closing the link then ends the session.
             enrollment, self.enrollment = self.enrollment, None
             if not enrollment.finished:
-                self._send(enrollment.connection, {"cancel": True})
+                if enrollment.on_cancel:
+                    enrollment.on_cancel()
+                else:
+                    self._send(enrollment.connection, {"cancel": True})
             self.dismiss()
             return
         if self.polkit and self.polkit.active:
@@ -1191,8 +1315,140 @@ class EdgeHud:
             return
         if self.pending:
             self.resolve(False)
+        elif self.config_active:
+            self.close_config()
         else:
             self.dismiss()
+
+    # Configuration ---------------------------------------------------------
+
+    def _config_blocked(self) -> bool:
+        return bool(
+            self.pending
+            or self.enrolling
+            or (self.polkit and self.polkit.active)
+            or (self.visible and not self.config_active)
+        )
+
+    def open_config(self, welcome: bool = False) -> None:
+        """Expand the resident notch around onboarding and face management."""
+        if self._config_blocked():
+            # Security prompts win. Open configuration as soon as this attempt
+            # has fully left, rather than covering or cancelling it.
+            self.config_requested = welcome
+            return
+        self.config_requested = None
+        if self.dismiss_timeout:
+            GLib.source_remove(self.dismiss_timeout)
+            self.dismiss_timeout = None
+        if self.config_panel and welcome:
+            self._detach_config_panel()
+        if not self.config_panel:
+            from .settings_app import SettingsPanel
+
+            self.config_panel = SettingsPanel(self, self.close_config, welcome)
+            self.config_host.set_child(self.config_panel)
+        self.config_active = True
+        self.config_suspended = False
+        self.config_host.set_can_target(True)
+        self.silenced = False
+        self.departing = False
+        self.view = None
+        Gtk4LayerShell.set_keyboard_mode(self.window, Gtk4LayerShell.KeyboardMode.ON_DEMAND)
+        if not self.visible:
+            self.visible = True
+            self.scheduled.clear()
+            self.last_frame = None
+            for item in self.items:
+                item.alpha = Tween()
+            self.width.value, self.width.velocity = COLLAPSED_WIDTH, 0.0
+            self.height.value, self.height.velocity = 0.0, 0.0
+            self.radius.value, self.radius.velocity = ISLAND_RADIUS, 0.0
+            self.width.configure(0.54, 0.82)
+            self.height.configure(0.58, 0.84)
+            self.radius.configure(0.54, 0.9)
+            self.width.target = CONFIG_WIDTH
+            self.height.target = CONFIG_HEIGHT
+            self.radius.target = CONFIG_RADIUS
+            self.config_item.alpha.to(1, self.now, 0.3, 0.12)
+            monitor = self._monitor_under_pointer()
+            if monitor:
+                self._pin_to(monitor)
+            else:
+                self.positioned = False
+            self.window.present()
+            self.window.add_tick_callback(self._on_frame)
+            return
+        self.scheduled.clear()
+        for item in self.items:
+            if item is not self.config_item:
+                item.alpha.to(0, self.now, 0.14)
+
+        def expand(now: float) -> None:
+            self.width.configure(0.54, 0.86)
+            self.height.configure(0.58, 0.86)
+            self.radius.configure(0.54, 0.92)
+            self.width.target = CONFIG_WIDTH
+            self.height.target = CONFIG_HEIGHT
+            self.radius.target = CONFIG_RADIUS
+            self.config_item.alpha.to(1, now, 0.28)
+
+        self._at(0.14, expand)
+
+    def _restore_config(self) -> bool:
+        """Return from an auth/scan interlude to the panel underneath."""
+        self.departing = False
+        self.scheduled.clear()
+        self.on_password = self.on_password_cancel = None
+        self.entry.set_text("")
+        Gtk4LayerShell.set_keyboard_mode(self.window, Gtk4LayerShell.KeyboardMode.ON_DEMAND)
+        for item in self.items:
+            if item is not self.config_item:
+                item.alpha.to(0, self.now, 0.14)
+
+        def swap(now: float) -> None:
+            self.view = None
+            self.config_suspended = False
+            self.config_host.set_can_target(True)
+            self.width.configure(0.54, 0.9)
+            self.height.configure(0.58, 0.9)
+            self.radius.configure(0.54, 0.92)
+            self.width.target = CONFIG_WIDTH
+            self.height.target = CONFIG_HEIGHT
+            self.radius.target = CONFIG_RADIUS
+            self.config_item.alpha.to(1, now, 0.28)
+
+        self._at(0.14, swap)
+        return False
+
+    def close_config(self) -> None:
+        if not self.config_active:
+            return
+        self.config_active = False
+        self.config_suspended = False
+        self.config_host.set_can_target(False)
+        if self.config_panel:
+            self.config_panel.shutdown()
+        self.dismiss()
+
+    def _detach_config_panel(self) -> None:
+        panel, self.config_panel = self.config_panel, None
+        if not panel:
+            return
+        panel.shutdown()
+        if self.config_host.child is panel:
+            self.config_host.set_child(None)
+
+    def _open_requested_config(self) -> bool:
+        welcome, self.config_requested = bool(self.config_requested), None
+        self.open_config(welcome)
+        return False
+
+    def shutdown(self) -> None:
+        """Release panel-owned helper work when the resident service stops."""
+        self.config_active = False
+        self.config_requested = None
+        self._detach_config_panel()
 
     # Protocol ---------------------------------------------------------------
 
@@ -1203,13 +1459,15 @@ class EdgeHud:
     def present_scanning(self) -> None:
         # Howdy cannot be interrupted once running, so no action is offered.
         # If sudo is cancelled mid-scan no result ever arrives; never linger.
-        if self.silenced:
+        if self.silenced or self.enrolling:
             return
         self._present(SCANNING)
         self.dismiss_timeout = GLib.timeout_add(SCAN_WATCHDOG_MS, self.dismiss)
 
     def present_result(self, success: bool, title: str | None = None, detail: str | None = None) -> None:
-        if self.silenced:
+        # A late PAM result for the approval that started a scan must not
+        # replace the preview that has already taken over.
+        if self.silenced or self.enrolling:
             return
         view = SUCCESS if success else FAILURE
         if title or detail:
@@ -1251,7 +1509,8 @@ class EdgeHud:
         except OSError:
             pass
 
-    # Enrollment: FaceGate Settings streams the scan while it adds a face.
+    # Enrollment: the configuration panel streams its scan here directly, and
+    # external tools (the enrollment demo) stream it over the socket.
 
     @property
     def enrolling(self) -> bool:
@@ -1262,17 +1521,75 @@ class EdgeHud:
             self.reply(connection, {"ok": False, "reason": "busy"})
             return False
         self._send(connection, {"ok": True})
+        self._start_enrollment(Enrollment(connection))
+        return False
+
+    def expect_enrollment(self, on_cancel: Callable[[], None]) -> object:
+        """Announce the panel's scan while its admin approval is still pending.
+
+        The panel and the island share one GTK main loop, so the handoff is a
+        token rather than a socket: a blocking handshake would wait on a reply
+        this same loop has to produce.
+        """
+        self.expected_enrollment = Enrollment(object(), on_cancel=on_cancel)
+        return self.expected_enrollment.connection
+
+    def enrollment_authorized(self) -> bool:
+        """Admin approval for a face change was granted (called by the agent).
+
+        If the panel is waiting to scan, the approval turns straight into the
+        preview while the root helper opens the camera, so configuration never
+        shows through in between. A face approval lets "Verified" land first.
+        Returns whether a scan was waiting.
+        """
+        expected = self.expected_enrollment
+        if not expected:
+            return False
+        if self.dismiss_timeout:
+            GLib.source_remove(self.dismiss_timeout)
+            self.dismiss_timeout = None
+
+        def start() -> bool:
+            self.enrollment_start = None
+            self.begin_embedded_enrollment(expected.connection)
+            return False
+
+        if self.view and self.view.state == "success":
+            self.enrollment_start = GLib.timeout_add(VERIFIED_HOLD_MS, start)
+        else:
+            start()
+        return True
+
+    def begin_embedded_enrollment(self, token: object) -> bool:
+        """Show the panel's scan; True once the island is showing it."""
+        if self.enrollment and self.enrollment.connection is token:
+            return True
+        expected = self.expected_enrollment
+        if not expected or expected.connection is not token:
+            return False
+        if self.pending or self.enrolling or (self.polkit and self.polkit.active):
+            return False
+        if self.enrollment_start:
+            # The first frame arrived before "Verified" finished holding.
+            GLib.source_remove(self.enrollment_start)
+            self.enrollment_start = None
+        self.expected_enrollment = None
+        self._start_enrollment(expected)
+        return True
+
+    def _start_enrollment(self, enrollment: Enrollment) -> None:
         # A retry may start while the last result is still showing.
-        self.enrollment = Enrollment(connection)
+        self.enrollment = enrollment
         self.silenced = False
         self.preview.reset()
         self._present(ENROLLING)
-        return False
 
-    def enrollment_message(self, connection: socket.socket, message: dict[str, Any]) -> bool:
+    def enrollment_message(self, connection: Any, message: dict[str, Any]) -> bool:
         enrollment = self.enrollment
         if not enrollment or enrollment.connection is not connection or enrollment.finished:
             return False
+        if "frame" in message:
+            self.preview.take_frame(message)
         if "progress" in message:
             try:
                 self.preview.set_progress(float(message["progress"]))
@@ -1292,10 +1609,17 @@ class EdgeHud:
             self.enrollment = None
         return self.dismiss()
 
-    def end_enrollment(self, connection: socket.socket) -> bool:
-        """The stream closed. Without a result, Settings went away mid-scan."""
+    def end_enrollment(self, connection: Any) -> bool:
+        """The link closed. Without a result, the scan stopped midway."""
         enrollment = self.enrollment
-        connection.close()
+        if isinstance(connection, socket.socket):
+            connection.close()
+        if self.expected_enrollment and self.expected_enrollment.connection is connection:
+            self.expected_enrollment = None
+            if self.enrollment_start:
+                GLib.source_remove(self.enrollment_start)
+                self.enrollment_start = None
+                self.dismiss()
         if enrollment and enrollment.connection is connection and not enrollment.finished:
             self.enrollment = None
             self.dismiss()
@@ -1308,7 +1632,10 @@ class EdgeHud:
 
     def handle_request(self, message: dict[str, Any], connection: socket.socket) -> bool:
         phase = message.get("phase")
-        if phase == "approval":
+        if phase == "config":
+            self.reply(connection, {"ok": True, "queued": self._config_blocked()})
+            self.open_config(message.get("welcome") is True)
+        elif phase == "approval":
             if self.pending or self.enrolling:
                 self.reply(connection, {"approved": False, "reason": "busy"})
                 return False
@@ -1408,7 +1735,7 @@ class HudServer:
                     line, buffer = buffer.split(b"\n", 1)
                     message = decode(line, MAX_STREAM_BYTES)
                     if "frame" in message:
-                        self._take_frame(message)
+                        self.hud.preview.take_frame(message)
                     else:
                         GLib.idle_add(self.hud.enrollment_message, connection, message)
                 if len(buffer) > MAX_STREAM_BYTES:
@@ -1420,15 +1747,6 @@ class HudServer:
         except (OSError, ValueError):
             pass
         GLib.idle_add(self.hud.end_enrollment, connection)
-
-    def _take_frame(self, message: dict[str, Any]) -> None:
-        try:
-            width, height = int(message["w"]), int(message["h"])
-            if (width, height) != (PREVIEW_WIDTH, PREVIEW_HEIGHT):
-                return
-            self.hud.preview.latest = grey_surface(base64.b64decode(message["frame"]), width, height)
-        except (KeyError, TypeError, ValueError):
-            pass
 
 
 class Demo:
@@ -1528,6 +1846,7 @@ def main() -> int:
     try:
         return GLib.MainLoop().run() or 0
     finally:
+        hud.shutdown()
         if agent:
             agent.stop()
         server.close()

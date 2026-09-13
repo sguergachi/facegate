@@ -1,5 +1,5 @@
 #!/usr/bin/python3 -I
-"""The root helper behind FaceGate Settings, started through pkexec."""
+"""The root helper behind FaceGate's island, started through pkexec."""
 
 import sys
 

@@ -2,10 +2,10 @@
 Type=Application
 Name=FaceGate
 GenericName=Face Approval
-Comment=Add or remove the faces that approve sudo and admin prompts
+Comment=Open the island to add or remove faces
 Exec=/usr/local/bin/facegate-settings
-Icon=user-identity
+Icon=facegate-symbolic
 Terminal=false
 Categories=Settings;Security;
 Keywords=face;howdy;sudo;biometric;camera;
-StartupNotify=true
+StartupNotify=false

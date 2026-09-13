@@ -2,6 +2,8 @@
 Description=FaceGate approval HUD for Howdy authentication
 After=graphical-session.target
 PartOf=graphical-session.target
+Wants=facegate-tray.service
+Before=facegate-tray.service
 
 [Service]
 Type=simple

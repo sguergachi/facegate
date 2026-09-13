@@ -1,6 +1,6 @@
 """Loops the island's Add Face flow against the real camera, without root.
 
-It streams through the same socket protocol as FaceGate Settings, and uses
+It streams through the same socket protocol as in-island configuration, and uses
 Howdy-style face detection, but never loads Howdy's recognition models or
 writes a face: samples are counted, not encoded. Escape or Cancel stops a
 scan; a new one starts a few seconds after each ending.
