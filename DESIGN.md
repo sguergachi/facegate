@@ -540,9 +540,13 @@ width and hugs the enrollment content.
   island. While scanning, a soft cyan band of light sweeps down through the
   dots every 2.4 s (linear); each captured sample brightens them briefly.
 - **Fluidity:** IR emitters often light only every other frame, so unlit
-  frames are skipped and every dot eases toward each lit frame (90 ms time
-  constant). The dots are redrawn at most 30 times a second; each display
-  frame only tints and composites them (under half a millisecond).
+  frames are skipped. The dots are drawn on the GPU by one fragment shader in
+  a GL area (OpenGL 3.2 or GL ES 3.0): a camera frame is one small texture
+  upload, and the shader blends from the previous frame to the newest over
+  the measured time between frames, so the dots move continuously. The
+  per-dot work (softening, levels, curve, anti-aliased circles, feather,
+  tint, sweep) never touches Python; a display frame costs it well under a
+  tenth of a millisecond. Without GL the same look is drawn on the CPU.
 - **Progress:** a trace on the preview's rim, clockwise from top center. A
   short comet circles until the first sample. Each of the five samples springs
   the trace forward with a brief glow. Success closes it green and tints the

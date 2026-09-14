@@ -483,13 +483,17 @@ class DotField:
         self.width, self.height = width, height
         rows = int((height - DOT_PITCH) // DOT_ROW) + 1
         top = (height - (rows - 1) * DOT_ROW) / 2
-        self.centres: list[tuple[float, float]] = []
-        for row in range(rows):
-            # Every other row shifts half a pitch; each row is centred on its own.
-            columns = int((width - DOT_PITCH - (DOT_PITCH / 2 if row % 2 else 0)) // DOT_PITCH) + 1
-            left = (width - (columns - 1) * DOT_PITCH) / 2
-            y = top + row * DOT_ROW
-            self.centres.extend((left + column * DOT_PITCH, y) for column in range(columns))
+        # Every other row shifts half a pitch; each row is centred on its own.
+        columns = [int((width - DOT_PITCH - (DOT_PITCH / 2 if parity else 0)) // DOT_PITCH) + 1 for parity in (0, 1)]
+        lefts = [(width - (count - 1) * DOT_PITCH) / 2 for count in columns]
+        # The same grid, as the GPU draws it.
+        self.grid = {
+            "pitch": DOT_PITCH, "row_height": DOT_ROW, "top": top, "rows": rows,
+            "left_even": lefts[0], "left_odd": lefts[1], "columns_even": columns[0], "columns_odd": columns[1],
+        }
+        self.centres: list[tuple[float, float]] = [
+            (lefts[row % 2] + column * DOT_PITCH, top + row * DOT_ROW) for row in range(rows) for column in range(columns[row % 2])
+        ]
         self.levels = [0.0] * len(self.centres)
         self.targets = [0.0] * len(self.centres)
         self.has_frame = False
@@ -580,27 +584,35 @@ class PreviewModel:
     state_elapsed: float = 0.0
 
 
-def paint_preview(context: Any, width: float, height: float, field: DotField | None, model: PreviewModel) -> None:
-    """The camera as a feathered field of dots, and the progress trace."""
+def preview_look(model: PreviewModel, height: float) -> tuple[tuple[float, float, float], tuple[float, float, float], float, float, float]:
+    """The dots' tint, the band's colour, middle and strength, and the shake."""
     color = PREVIEW_COLORS.get(model.state, PREVIEW_COLORS["scanning"])
+    # Cool white while looking, taking on the result's colour at the end;
+    # each captured sample brightens the dots for a moment.
+    dim = 0.82 + 0.18 * model.pulse
+    tint = tuple(mix(IR_TINT[index], color[index], 0.6 * model.result) * dim for index in range(3))
+    # Constant motion, so linear: the band enters above and leaves below.
+    middle = (((model.elapsed / SWEEP_SECONDS) % 1.0) * 1.4 - 0.2) * height
+    strength = 0.75 * (1 - model.progress * 0.5) if model.state == "scanning" else 0.0
+    shake = 6 * math.sin(model.state_elapsed * math.tau * 5.5) * math.exp(-model.state_elapsed * 6.5) if model.state == "failure" else 0.0
+    return tint, color, middle, strength, shake
+
+
+def paint_preview(context: Any, width: float, height: float, field: DotField | None, model: PreviewModel) -> None:
+    """The progress trace, over the dots when they are drawn on the CPU."""
+    tint, color, middle, strength, shake = preview_look(model, height)
     context.save()
-    if model.state == "failure":
-        context.translate(6 * math.sin(model.state_elapsed * math.tau * 5.5) * math.exp(-model.state_elapsed * 6.5), 0)
+    context.translate(shake, 0)
     if field is not None and field.has_frame:
         layer = field.surface(model.elapsed)
         context.save()
         context.scale(width / field.width, height / field.height)
-        # Cool white while looking, taking on the result's colour at the end;
-        # each captured sample brightens the dots for a moment.
-        dim = 0.82 + 0.18 * model.pulse
-        context.set_source_rgb(*(mix(IR_TINT[index], color[index], 0.6 * model.result) * dim for index in range(3)))
+        context.set_source_rgb(*tint)
         context.mask_surface(layer, 0, 0)
-        if model.state == "scanning":
-            # Constant motion, so linear: the band enters above and leaves below.
-            middle = (((model.elapsed / SWEEP_SECONDS) % 1.0) * 1.4 - 0.2) * field.height
+        if strength > 0:
             band = cairo.LinearGradient(0, middle - 36, 0, middle + 36)
             band.add_color_stop_rgba(0, *color, 0)
-            band.add_color_stop_rgba(0.5, *color, 0.75 * (1 - model.progress * 0.5))
+            band.add_color_stop_rgba(0.5, *color, strength)
             band.add_color_stop_rgba(1, *color, 0)
             context.set_source(band)
             context.mask_surface(layer, 0, 0)
@@ -628,22 +640,45 @@ def paint_preview(context: Any, width: float, height: float, field: DotField | N
     context.restore()
 
 
-class PreviewArea(Gtk.DrawingArea):
+class PreviewArea(Gtk.Overlay):
+    """The camera preview: dots drawn on the GPU, the progress trace above them.
+
+    Without OpenGL 3.3 the dots are drawn on the CPU instead, in the trace's
+    own drawing area.
+    """
+
     def __init__(self) -> None:
         super().__init__()
-        self.set_content_width(PREVIEW_WIDTH + 2 * PREVIEW_BLEED)
-        self.set_content_height(PREVIEW_HEIGHT + 2 * PREVIEW_BLEED)
+        from .halftone import HalftoneArea
+
+        self.set_size_request(PREVIEW_WIDTH + 2 * PREVIEW_BLEED, PREVIEW_HEIGHT + 2 * PREVIEW_BLEED)
         self.model = PreviewModel()
         self.progress = Spring(0.0)
         self.progress.configure(0.45, 0.9)
         # Written by the socket thread or the panel, picked up on the frame clock.
         self.latest: bytes | None = None
         self.field = DotField()
-        self.set_draw_func(self._draw)
+        style = {
+            "max_radius": DOT_MAX_RADIUS, "corner": PREVIEW_RADIUS, "feather": PREVIEW_FEATHER,
+            "floor": DOT_FLOOR, "gamma": DOT_GAMMA,
+            "low_share": DOT_LEVELS[0], "high_share": DOT_LEVELS[1],
+        }
+        self.dots = HalftoneArea(PREVIEW_WIDTH, PREVIEW_HEIGHT, self.field.grid, style)
+        self.dots.set_margin_start(PREVIEW_BLEED)
+        self.dots.set_margin_top(PREVIEW_BLEED)
+        self.dots.set_halign(Gtk.Align.START)
+        self.dots.set_valign(Gtk.Align.START)
+        self.set_child(self.dots)
+        self.trace = Gtk.DrawingArea()
+        self.trace.set_content_width(PREVIEW_WIDTH + 2 * PREVIEW_BLEED)
+        self.trace.set_content_height(PREVIEW_HEIGHT + 2 * PREVIEW_BLEED)
+        self.trace.set_can_target(False)
+        self.trace.set_draw_func(self._draw)
+        self.add_overlay(self.trace)
 
     def _draw(self, _area: Gtk.DrawingArea, context: Any, _width: int, _height: int) -> None:
         context.translate(PREVIEW_BLEED, PREVIEW_BLEED)
-        paint_preview(context, PREVIEW_WIDTH, PREVIEW_HEIGHT, self.field, self.model)
+        paint_preview(context, PREVIEW_WIDTH, PREVIEW_HEIGHT, self.field if self.dots.failed else None, self.model)
 
     def take_frame(self, message: dict[str, Any]) -> None:
         """Keep the newest greyscale preview frame; bad frames are ignored."""
@@ -661,6 +696,7 @@ class PreviewArea(Gtk.DrawingArea):
         self.progress.value = self.progress.target = self.progress.velocity = 0.0
         self.latest = None
         self.field = DotField()
+        self.dots.reset()
 
     def set_progress(self, value: float) -> None:
         value = clamp(value)
@@ -679,9 +715,12 @@ class PreviewArea(Gtk.DrawingArea):
     def advance(self, elapsed: float) -> None:
         model = self.model
         latest, self.latest = self.latest, None
-        if latest is not None:
-            self.field.sample(latest)
-        self.field.advance(elapsed)
+        if self.dots.failed:
+            if latest is not None:
+                self.field.sample(latest)
+            self.field.advance(elapsed)
+        elif latest is not None:
+            self.dots.submit(latest)
         model.elapsed += elapsed
         model.state_elapsed += elapsed
         self.progress.step(elapsed)
@@ -689,7 +728,11 @@ class PreviewArea(Gtk.DrawingArea):
         model.pulse = max(0.0, model.pulse - elapsed / 0.45)
         target = 0.0 if model.state == "scanning" else 1.0
         model.result += (target - model.result) * (1 - math.exp(-elapsed * 8))
-        self.queue_draw()
+        if not self.dots.failed:
+            look = self.dots.look
+            look.tint, look.band_color, look.band_middle, look.band_alpha, look.shake = preview_look(model, PREVIEW_HEIGHT)
+            self.dots.queue_render()
+        self.trace.queue_draw()
 
 
 @dataclass(frozen=True)

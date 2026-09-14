@@ -189,6 +189,27 @@ class PreviewTests(unittest.TestCase):
         self.assertGreater(sum(field.levels), before)
         self.assertLess(sum(field.levels), sum(field.targets))
 
+    def test_the_gpu_grid_describes_the_same_dots(self):
+        field = DotField()
+        grid = field.grid
+        rebuilt = [
+            (grid["left_odd" if row % 2 else "left_even"] + column * grid["pitch"], grid["top"] + row * grid["row_height"])
+            for row in range(grid["rows"])
+            for column in range(grid["columns_odd" if row % 2 else "columns_even"])
+        ]
+        self.assertEqual(rebuilt, field.centres)
+
+    def test_frame_levels_find_the_exposure_range(self):
+        from facegate.halftone import frame_levels
+
+        dim = bytes([20] * 5000 + [60] * 5000)
+        low, high = frame_levels(dim, 0.04, 0.97)
+        self.assertAlmostEqual(low, 20 / 255)
+        self.assertAlmostEqual(high, 60 / 255)
+        # A flat frame keeps a minimum span rather than dividing by nothing.
+        low, high = frame_levels(bytes([90] * 9000), 0.04, 0.97)
+        self.assertGreater(high, low)
+
     def test_every_state_paints_with_and_without_frames(self):
         field = DotField()
         field.sample(bytes(range(256)) * (PREVIEW_WIDTH * PREVIEW_HEIGHT // 256) + bytes(PREVIEW_WIDTH * PREVIEW_HEIGHT % 256))
