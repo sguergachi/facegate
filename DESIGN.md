@@ -196,12 +196,12 @@ Nested rounded shapes share a centre, as on Apple hardware:
 | Secondary button | Same pill, `#1c1c1e` fill, white label. The second choice beside a primary (Deny, Not Now, Add Another Look), or a lone Cancel while a scan runs |
 | Close | 32 circle, `#1c1c1e`, 1.75 pt ✕ glyph drawn at 9 pt, top-right on the corner centre |
 | Icon button | 40 circle, transparent until hover. Destructive icons turn red on hover |
-| Destructive | Red pill (40 high). Only reachable as a second step: trash, then **Remove** (reverts after 4 s) |
+| Destructive | Red pill (40 high). Only reachable as a second step: the 40 trash circle **grows leftward into** the **Remove** pill (right end fixed on the end cap, spring 0.40/0.90; the icon fades out first, the word in once there's room). It narrows back after 4 s (0.30/1.0), or into a spinner while admin approval is asked. Its layout width is always the pill's, so the row never reflows |
 | Password field | 44 high, radius 12, `#1c1c1e` fill, 1.5 pt inner ring on focus |
 | Switch | Drawn, 52 × 32 with a 28 thumb. The thumb travels on a spring (0.35/1.0) while the track blends `#3a3a3c` → success green |
 | Navigation row | The pill row with a 40 icon, title and detail, and a chevron |
 | Choice row | The pill row with text only and a paint-only 16 pt radio ring |
-| Scroll indicator | Overlay only: 4 pt slider at 24% white in the right gutter, centred between the rows and the island edge. 6 pt at 42% on hover. Never drawn over content, hidden when idle |
+| Scroll indicator | Overlay only: 4 pt slider at 24% white in the right gutter, centred between the rows and the island edge. 6 pt at 42% on hover. Its track spans only the visible content, from below the header's fade to above the bottom fade (the button bar, or the 48 corner), so a fade never draws over it. Hidden when idle |
 | Page dots | 6 pt dots, `#3a3a3c`. The current page is an 18 pt white capsule, which grows as paint (a spring on the frame clock), never by animating layout |
 
 Rules:

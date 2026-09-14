@@ -670,6 +670,172 @@ class DisplayGlyph(Gtk.DrawingArea):
 # Face rows -----------------------------------------------------------------
 
 
+class RemoveControl(Gtk.Widget):
+    """Trash, then Remove, as one control that grows instead of swapping.
+
+    The 40 trash circle widens leftward into the red Remove pill while its
+    right end stays on the row's end cap, then narrows back when the choice
+    lapses, or into a spinner while admin approval is asked. Its layout width
+    is always the pill's, so nothing else in the row moves.
+    """
+
+    def __init__(self, on_ask: Callable[[], None], on_confirm: Callable[[], None]) -> None:
+        super().__init__(accessible_role=Gtk.AccessibleRole.BUTTON)
+        self.set_focusable(True)
+        self.update_property([Gtk.AccessibleProperty.LABEL], ["Remove this face"])
+        self.on_ask, self.on_confirm = on_ask, on_confirm
+        self.mode = "trash"
+        self.trash = Gtk.Image.new_from_icon_name("user-trash-symbolic")
+        self.trash.add_css_class("remove-trash")
+        self.text = label("Remove", "remove-label")
+        self.spinner = Gtk.Spinner()
+        for child in (self.trash, self.text, self.spinner):
+            child.set_parent(self)
+        text_width = self.text.measure(Gtk.Orientation.HORIZONTAL, -1)[1]
+        self.pill_width = max(AVATAR_SIZE, SPACE_S * math.ceil((text_width + 2 * SPACE_L) / SPACE_S))
+        # open: circle → pill; busy: the spinner; hover and press: feedback.
+        self.open = Spring(0.0)
+        self.busy = Spring(0.0)
+        self.hover = Spring(0.0)
+        self.press = Spring(1.0)
+        self.hover.configure(0.2, 1.0)
+        self.press.configure(0.16, 1.0)
+        self.busy.configure(0.3, 1.0)
+        self.last: int | None = None
+        self.ticking = False
+
+        click = Gtk.GestureClick()
+        click.connect("pressed", lambda _gesture, _n, x, y: self._press(self._hit(x, y)))
+        click.connect("released", lambda _gesture, _n, x, y: self._release(self._hit(x, y)))
+        click.connect("stopped", lambda *_: self._press(False))
+        self.add_controller(click)
+        motion = Gtk.EventControllerMotion()
+        motion.connect("motion", lambda _motion, x, y: self._set_hover(self._hit(x, y)))
+        motion.connect("leave", lambda *_: self._set_hover(False))
+        self.add_controller(motion)
+        keys = Gtk.EventControllerKey()
+        keys.connect("key-pressed", lambda _keys, keyval, *_: keyval in (Gdk.KEY_Return, Gdk.KEY_space, Gdk.KEY_KP_Enter) and self._activate())
+        self.add_controller(keys)
+
+    def set_mode(self, mode: str) -> None:
+        self.mode = mode
+        # Opening settles with a trace of life; closing is quicker, without bounce.
+        self.open.configure(*((0.4, 0.9) if mode == "confirm" else (0.3, 1.0)))
+        self.open.target = 1.0 if mode == "confirm" else 0.0
+        self.busy.target = 1.0 if mode == "busy" else 0.0
+        self.spinner.set_spinning(mode == "busy")
+        if reduced_motion():
+            for spring in (self.open, self.busy):
+                spring.value, spring.velocity = spring.target, 0.0
+        self._animate()
+
+    def _width(self) -> float:
+        return mix(AVATAR_SIZE, self.pill_width, clamp(self.open.value))
+
+    def _hit(self, x: float, y: float) -> bool:
+        return self.mode != "busy" and x >= self.get_width() - self._width() and 0 <= y <= self.get_height()
+
+    def do_contains(self, x: float, y: float) -> bool:
+        return self._hit(x, y)
+
+    def _press(self, pressed: bool) -> None:
+        self.press.target = 0.97 if pressed and not reduced_motion() else 1.0
+        self._animate()
+
+    def _release(self, inside: bool) -> None:
+        self._press(False)
+        if inside:
+            self._activate()
+
+    def _set_hover(self, hovered: bool) -> None:
+        self.hover.target = 1.0 if hovered else 0.0
+        (self.trash.add_css_class if hovered else self.trash.remove_css_class)("hover")
+        self._animate()
+
+    def _activate(self) -> bool:
+        if self.mode == "trash":
+            self.on_ask()
+        elif self.mode == "confirm":
+            self.on_confirm()
+        return True
+
+    def _animate(self) -> None:
+        if not self.ticking:
+            self.ticking = True
+            self.last = None
+            self.add_tick_callback(self._tick)
+
+    def _tick(self, _widget: Gtk.Widget, clock: Gdk.FrameClock) -> bool:
+        frame = clock.get_frame_time()
+        elapsed = min((frame - self.last) / 1_000_000, 1 / 30) if self.last else 0.0
+        self.last = frame
+        springs = (self.open, self.busy, self.hover, self.press)
+        for spring in springs:
+            spring.step(elapsed)
+        self.queue_allocate()
+        self.queue_draw()
+        if all(abs(spring.value - spring.target) < 0.001 and abs(spring.velocity) < 0.01 for spring in springs):
+            for spring in springs:
+                spring.value, spring.velocity = spring.target, 0.0
+            self.ticking = False
+            return GLib.SOURCE_REMOVE
+        return GLib.SOURCE_CONTINUE
+
+    def do_measure(self, orientation: Gtk.Orientation, _for_size: int) -> tuple[int, int, int, int]:
+        size = self.pill_width if orientation == Gtk.Orientation.HORIZONTAL else AVATAR_SIZE
+        return size, size, -1, -1
+
+    def _centre(self, child: Gtk.Widget, x: float, y: float) -> None:
+        width = child.measure(Gtk.Orientation.HORIZONTAL, -1)[1]
+        height = child.measure(Gtk.Orientation.VERTICAL, width)[1]
+        child.allocate(width, height, -1, Gsk.Transform().translate(Graphene.Point().init(x - width / 2, y - height / 2)))
+
+    def do_size_allocate(self, width: int, height: int, _baseline: int) -> None:
+        circle_x = width - AVATAR_SIZE / 2
+        self._centre(self.trash, circle_x, height / 2)
+        self._centre(self.spinner, circle_x, height / 2)
+        # The word rides with the pill's centre as it opens.
+        self._centre(self.text, width - self._width() / 2, height / 2)
+
+    def _child(self, snapshot: Gtk.Snapshot, child: Gtk.Widget, opacity: float) -> None:
+        if opacity <= 0.002:
+            return
+        blur = TRANSITION_BLUR * (1 - opacity)
+        snapshot.push_opacity(opacity)
+        if blur > 0.05:
+            snapshot.push_blur(blur)
+        self.snapshot_child(child, snapshot)
+        if blur > 0.05:
+            snapshot.pop()
+        snapshot.pop()
+
+    def do_snapshot(self, snapshot: Gtk.Snapshot) -> None:
+        width, height = self.get_width(), self.get_height()
+        open_amount = clamp(self.open.value)
+        pill = self._width()
+        scale = self.press.value
+        snapshot.save()
+        snapshot.translate(Graphene.Point().init(width - pill / 2, height / 2))
+        snapshot.scale(scale, scale)
+        snapshot.translate(Graphene.Point().init(-(width - pill / 2), -height / 2))
+        shape = Gsk.RoundedRect()
+        shape.init_from_rect(Graphene.Rect().init(width - pill, 0, pill, height), height / 2)
+        snapshot.push_rounded_clip(shape)
+        bounds = Graphene.Rect().init(width - pill, 0, pill, height)
+        # A hover fill while it's still the trash; red as it becomes Remove.
+        hover = clamp(self.hover.value) * (1 - open_amount) * (1 - clamp(self.busy.value))
+        if hover > 0.002:
+            snapshot.append_color(Gdk.RGBA(red=0.17, green=0.17, blue=0.18, alpha=hover), bounds)
+        if open_amount > 0.002:
+            snapshot.append_color(Gdk.RGBA(red=1.0, green=0.27, blue=0.23, alpha=open_amount), bounds)
+        snapshot.pop()
+        # The trash leaves first and the word arrives once there is room for it.
+        self._child(snapshot, self.trash, clamp(1 - open_amount / 0.4) * (1 - clamp(self.busy.value)))
+        self._child(snapshot, self.text, clamp((open_amount - 0.45) / 0.55))
+        self._child(snapshot, self.spinner, clamp(self.busy.value))
+        snapshot.restore()
+
+
 class FaceRow(Gtk.Revealer):
     def __init__(self, face: dict[str, Any], on_remove: Callable[["FaceRow"], None]) -> None:
         super().__init__()
@@ -679,31 +845,13 @@ class FaceRow(Gtk.Revealer):
         self.set_transition_type(Gtk.RevealerTransitionType.SLIDE_DOWN)
         self.set_transition_duration(ROW_REVEAL_MS)
 
-        self.actions = Gtk.Stack()
-        self.actions.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
-        self.actions.set_transition_duration(180)
-        self.actions.set_hhomogeneous(False)
-        self.actions.set_interpolate_size(True)
-        self.actions.set_valign(Gtk.Align.CENTER)
-        trash = Gtk.Button.new_from_icon_name("user-trash-symbolic")
-        trash.add_css_class("icon")
-        trash.set_tooltip_text("Remove this face")
-        trash.connect("clicked", lambda *_: self._ask())
-        confirm = Gtk.Button(label="Remove")
-        confirm.add_css_class("destructive")
-        confirm.connect("clicked", lambda *_: self._confirm())
-        spinner = Gtk.Spinner()
-        spinner.set_size_request(AVATAR_SIZE, AVATAR_SIZE)
-        spinner.start()
-        self.actions.add_named(trash, "trash")
-        self.actions.add_named(confirm, "confirm")
-        self.actions.add_named(spinner, "busy")
+        self.remove = RemoveControl(self._ask, self._confirm)
         added = face.get("time") or 0
         row, _detail = pill_layout(
             face.get("label") or "Face",
             time.strftime("Added %b %-d, %Y", time.localtime(added)) if added else "Added with Howdy",
             Mark(AVATAR_SIZE, animated=False),
-            self.actions,
+            self.remove,
             AVATAR_SIZE / 2,
         )
         row.add_css_class("face-row")
@@ -716,12 +864,12 @@ class FaceRow(Gtk.Revealer):
         self.set_child(holder)
 
     def _ask(self) -> None:
-        self.actions.set_visible_child_name("confirm")
+        self.remove.set_mode("confirm")
         self.revert = GLib.timeout_add_seconds(CONFIRM_SECONDS, self._settle)
 
     def _settle(self) -> bool:
         self.revert = None
-        self.actions.set_visible_child_name("trash")
+        self.remove.set_mode("trash")
         return False
 
     def _confirm(self) -> None:
@@ -731,7 +879,7 @@ class FaceRow(Gtk.Revealer):
         self.on_remove(self)
 
     def set_busy(self, busy: bool) -> None:
-        self.actions.set_visible_child_name("busy" if busy else "trash")
+        self.remove.set_mode("busy" if busy else "trash")
         self.row.set_sensitive(not busy)
 
     def celebrate(self) -> None:
@@ -1034,6 +1182,8 @@ class CollapsingHeader:
 
         self.height = mix(self.full, BAR_HEIGHT, t)
         self.scroll_target.set_size_request(width, round(self.height))
+        # The scroll indicator lives only beside visible content, never under a fade.
+        self.scroller.get_vscrollbar().set_margin_top(round(self.height + HEADER_FEATHER))
         self.backdrop.queue_draw()
 
     def _place(self, widget: Gtk.Widget, x: float, y: float, scale: float) -> None:
@@ -1150,11 +1300,9 @@ CSS = """
 .settings-panel button.primary.secondary label { color: #f5f5f7; }
 .settings-panel button.primary.secondary:hover { background-color: #2c2c2e; }
 .settings-panel button.primary.secondary:active { background-color: #3a3a3c; }
-.settings-panel button.icon { min-width: %(avatar)dpx; min-height: %(avatar)dpx; padding: 0; border-radius: %(avatar_radius)dpx; background-color: transparent; color: #8e8e93; }
-.settings-panel button.icon:hover { background-color: #2c2c2e; color: #ff453a; }
-.settings-panel button.destructive { min-height: %(avatar)dpx; padding: 0 16px; border-radius: %(avatar_radius)dpx; background-color: #ff453a; color: #ffffff; font-size: 14px; }
-.settings-panel button.destructive label { color: #ffffff; }
-.settings-panel button.destructive:hover { background-color: #ff5e55; }
+.remove-trash { color: #8e8e93; transition: color 180ms ease; }
+.remove-trash.hover { color: #ff453a; }
+.remove-label { font-size: 14px; line-height: 20px; font-weight: 600; color: #ffffff; }
 """ % {
     "title": TITLE_PX, "close": CLOSE_SIZE, "close_radius": CLOSE_SIZE // 2,
     "button": BUTTON_HEIGHT, "button_radius": BUTTON_HEIGHT // 2, "bottom_feather": BOTTOM_FEATHER,
@@ -1162,7 +1310,6 @@ CSS = """
     "space_l": SPACE_L,
     "row": ROW_HEIGHT, "row_radius": ROW_RADIUS, "row_padding": ROW_PADDING,
     "switch_radius": SWITCH_HEIGHT // 2,
-    "avatar": AVATAR_SIZE, "avatar_radius": AVATAR_SIZE // 2,
     # Centred in the gap between the rows' right edge and the island's.
     "gutter": (PAGE_MARGIN - 4) // 2,
 }
@@ -1981,7 +2128,7 @@ class SettingsPanel(Gtk.Overlay):
             section.append(row)
         return section
 
-    def _scroll_page(self, name: str, title: str, detail: str, art: Gtk.Widget | None = None) -> tuple[Gtk.Overlay, CollapsingHeader, Gtk.Box]:
+    def _scroll_page(self, name: str, title: str, detail: str, art: Gtk.Widget | None = None, bottom_fade: int = PANEL_RADIUS) -> tuple[Gtk.Overlay, CollapsingHeader, Gtk.Box]:
         """A settings page: a hero that collapses over a scrolling body.
 
         Returns the page, its header and the body, which already starts
@@ -1993,6 +2140,8 @@ class SettingsPanel(Gtk.Overlay):
         scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         scroller.set_overlay_scrolling(True)
         header = CollapsingHeader(scroller, title, art)
+        # Nor under whatever fades out the bottom (a button bar, or the rounded corner).
+        scroller.get_vscrollbar().set_margin_bottom(bottom_fade)
         header.detail.set_text(detail)
         header.detail_fade.target = detail
 
@@ -2025,7 +2174,7 @@ class SettingsPanel(Gtk.Overlay):
         body.set_margin_bottom(PAGE_MARGIN)
 
     def _build_manage(self) -> None:
-        overlay, self.header, body = self._scroll_page("manage", "Face Approval", "")
+        overlay, self.header, body = self._scroll_page("manage", "Face Approval", "", bottom_fade=BOTTOM_BAR)
         section = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=SECTION_TO_ROWS)
         heading = label("Faces", "section", xalign=0)
         # Headings share the text inset of rows, clear of their rounded ends.
