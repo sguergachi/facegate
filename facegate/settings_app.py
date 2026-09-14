@@ -1125,14 +1125,16 @@ class ShieldGlyph(Gtk.DrawingArea):
         context.close_path()
         context.set_source_rgba(0.96, 0.96, 0.97, 0.4)
         context.stroke()
-        # The padlock, as the password mark draws it.
+        # The padlock. Its ink (mostly the body) centres on the shield's area,
+        # which sits above the outline's middle because the shield narrows to
+        # a point: centre y 35.5 against the area's 35.0.
         context.set_source_rgb(0.96, 0.96, 0.97)
-        context.arc(36, 34, 5, math.pi, 2 * math.pi)
-        context.line_to(41, 38)
-        context.move_to(31, 38)
-        context.line_to(31, 34)
+        context.arc(36, 27, 5, math.pi, 2 * math.pi)
+        context.line_to(41, 31)
+        context.move_to(31, 31)
+        context.line_to(31, 27)
         context.stroke()
-        rounded_rect(context, 27, 37, 18, 14, 3)
+        rounded_rect(context, 27, 30, 18, 14, 3)
         context.fill()
 
 
