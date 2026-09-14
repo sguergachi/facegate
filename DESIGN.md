@@ -132,8 +132,10 @@ move to the next step on the scale instead of nudging by pixels.
 #### Rules
 
 - **Measure from what you see.** Spacing is the distance between visible
-  edges, never between invisible slots or containers. A 144 mark and a 64
-  shield both sit exactly 24 above their title.
+  edges, never between invisible slots or containers. Hero art (the mark,
+  the display, the shield) is drawn in one 72-unit square whose lowest
+  visible edge is 10 from its bottom, so every piece sits the same distance
+  above its title.
 - **Margins:** configuration's page margin is 24 on every side; compact island
   states use a 16 inset. Content never touches an edge.
 - **Hug or commit.** Compact island states are exactly as tall as their
@@ -661,7 +663,7 @@ Onboarding is one frame, not a stack of pages (see Fluidity):
 | Element | Value |
 | --- | ---: |
 | Top bar | 96; matching 32 circles at (32, 32): arrow at top-left after the first step, X at top-right; content starts below it |
-| Art | mark 144, story 376 × 176, shield 64 |
+| Art | mark 144, story 376 × 176, shield 144 |
 | Art → title | 24 |
 | Title → body | 8 |
 | Copy → content | 24 (lists inside use 16 between items, icon → text 12) |
@@ -679,12 +681,17 @@ pending approval or scan before returning to Private by design.
 1. **Meet FaceGate:** the 144 pt living mark. "Approve sudo and admin prompts
    with a glance. Your password always works too." → Continue.
 2. **How it works:** a miniature desktop (376 × 176, radius 22) whose island
-   loops through approval → scanning → verified → retract (7 s), using the
-   real island path and mark at 0.6 scale. Three numbered steps below light up
-   in sync with it (others dim to 38%). → Continue.
-3. **Private by design:** three cyan-icon promises: camera only when you
-   approve, stays on this computer, changes need admin. → Not Now | Set Up
-   Face.
+   loops through approval → scanning → verified → retract, using the real
+   island path and mark at 0.6 scale. Its heights hug its content with the
+   real island's 16 inset (approval 220, scanning and verified 152). Three
+   numbered steps below light up in sync with it (others dim to 38%), each for
+   as long as it takes to read: its words at 3 per second, plus 1.2 s to find
+   the line (about 17 s a loop). → Continue.
+3. **Private by design:** a shield holding a padlock, drawn in the mark's
+   language, over three promises: camera only when you approve, stays on this
+   computer, changes need admin. Their cyan icons are drawn at one 1.5 weight
+   in a 24 column, level with each title line, and the list sits as one
+   block centred under the title. → Not Now | Set Up Face.
 4. **Setup:** with no existing face, "Enter your sudo password" explains that
    the first face cannot approve itself; otherwise the mark follows the flow:
    "Authenticate to add a face" (waiting),

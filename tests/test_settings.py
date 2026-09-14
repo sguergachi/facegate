@@ -169,6 +169,22 @@ class GeometryTests(unittest.TestCase):
         self.assertNotIn("password", settings_app.setup_auth_copy(True, True)[0].lower())
 
 
+class StoryTests(unittest.TestCase):
+    def test_each_step_stays_lit_long_enough_to_read(self):
+        story, seconds = settings_app.story_timeline()
+        lit = [phase for phase in story if phase[1] in ("approval", "scanning", "success")]
+        ends = [phase[0] for phase in story[2:]]
+        for (start, _state, _height, step), end in zip(lit, ends):
+            words = len(settings_app.STORY_STEPS[step - 1].split())
+            self.assertGreaterEqual(end - start, words / settings_app.READING_WORDS_PER_SECOND)
+        self.assertGreater(seconds, story[-1][0])
+
+    def test_the_miniature_island_hugs_its_content(self):
+        heights = {state: height for _start, state, height, _step in settings_app.STORY}
+        self.assertEqual(heights["approval"], 204 + 16)
+        self.assertLess(heights["scanning"], heights["approval"])
+
+
 class ViewOptionsTests(unittest.TestCase):
     @staticmethod
     def monitor(connector="DP-1", description="Studio Display", width=2560, height=1440):

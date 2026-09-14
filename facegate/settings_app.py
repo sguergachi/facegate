@@ -1064,16 +1064,121 @@ class FaceRow(Gtk.Revealer):
 STORY_WIDTH = PANEL_WIDTH - 2 * PAGE_MARGIN
 STORY_HEIGHT = 176
 STORY_SCALE = 0.6
-# When each phase starts in the loop, the island height it springs to, and the
-# step it illustrates (1-based, 0 for none).
-STORY = (
-    (0.0, "hidden", 0, 0),
-    (0.4, "approval", 286, 1),
-    (2.8, "scanning", 168, 2),
-    (4.3, "success", 168, 3),
-    (5.8, "hidden", 0, 3),
+# The steps the story illustrates, in order.
+STORY_STEPS = (
+    "When something asks for admin access, the island drops down and says who's asking.",
+    "Approve, and your camera looks for you. It stays off until you do.",
+    "Recognized, it continues. If not, just use your password.",
 )
-STORY_SECONDS = 7.0
+# Each step is lit long enough to read while the island acts it out: a
+# relaxed reading pace, plus a moment to find the line and glance up.
+READING_WORDS_PER_SECOND = 3.0
+READING_SETTLE_SECONDS = 1.2
+
+
+def reading_seconds(text: str) -> float:
+    return round(len(text.split()) / READING_WORDS_PER_SECOND + READING_SETTLE_SECONDS, 1)
+
+
+def story_timeline(steps: tuple[str, ...] = STORY_STEPS) -> tuple[tuple[tuple[float, str, int, int], ...], float]:
+    """When each phase starts, its island state and height, and the step it lights.
+
+    Heights hug the miniature island's content with the real island's 16
+    inset: the Deny/Approve pair ends at 204, a title and detail at 136.
+    """
+    phases: list[tuple[float, str, int, int]] = [(0.0, "hidden", 0, 0)]
+    start = 0.4
+    for number, (state, height) in enumerate((("approval", 220), ("scanning", 152), ("success", 152)), start=1):
+        phases.append((start, state, height, number))
+        start = round(start + reading_seconds(steps[number - 1]), 1)
+    # The island leaves before the loop begins again; the last step stays lit.
+    phases.append((start, "hidden", 0, len(steps)))
+    return tuple(phases), round(start + 1.0, 1)
+
+
+STORY, STORY_SECONDS = story_timeline()
+
+
+class ShieldGlyph(Gtk.DrawingArea):
+    """A shield holding a padlock, in the mark's language (see DisplayGlyph)."""
+
+    def __init__(self, size: int) -> None:
+        super().__init__()
+        self.set_content_width(size)
+        self.set_content_height(size)
+        self.set_draw_func(self._draw)
+
+    @staticmethod
+    def _draw(_area: Gtk.DrawingArea, context: Any, width: int, _height: int) -> None:
+        context.scale(width / 72, width / 72)
+        context.set_line_width(1.5)
+        context.set_line_cap(cairo.LINE_CAP_ROUND)
+        context.set_line_join(cairo.LINE_JOIN_ROUND)
+        # Its point lands where the mark's ring does, 10 from the bottom.
+        context.move_to(36, 10)
+        context.curve_to(44, 15, 52, 17, 58, 17)
+        context.line_to(58, 36)
+        context.curve_to(58, 49, 49, 57, 36, 62)
+        context.curve_to(23, 57, 14, 49, 14, 36)
+        context.line_to(14, 17)
+        context.curve_to(20, 17, 28, 15, 36, 10)
+        context.close_path()
+        context.set_source_rgba(0.96, 0.96, 0.97, 0.4)
+        context.stroke()
+        # The padlock, as the password mark draws it.
+        context.set_source_rgb(0.96, 0.96, 0.97)
+        context.arc(36, 34, 5, math.pi, 2 * math.pi)
+        context.line_to(41, 38)
+        context.move_to(31, 38)
+        context.line_to(31, 34)
+        context.stroke()
+        rounded_rect(context, 27, 37, 18, 14, 3)
+        context.fill()
+
+
+class PromiseGlyph(Gtk.DrawingArea):
+    """A 24 × 20 cyan line icon for an onboarding promise, drawn to one weight."""
+
+    def __init__(self, kind: str) -> None:
+        super().__init__()
+        self.kind = kind
+        self.set_content_width(ICON_SIZE)
+        self.set_content_height(20)
+        self.add_css_class("promise-icon")
+        self.set_draw_func(self._draw)
+
+    def _draw(self, area: Gtk.DrawingArea, context: Any, width: int, height: int) -> None:
+        color = area.get_color()
+        context.set_source_rgba(color.red, color.green, color.blue, color.alpha)
+        context.set_line_width(1.5)
+        context.set_line_cap(cairo.LINE_CAP_ROUND)
+        context.set_line_join(cairo.LINE_JOIN_ROUND)
+        middle = width / 2
+        if self.kind == "camera":
+            context.arc(middle, 8, 6.25, 0, math.tau)
+            context.new_sub_path()
+            context.arc(middle, 8, 2, 0, math.tau)
+            context.stroke()
+            context.move_to(middle - 5, 18.25)
+            context.line_to(middle + 5, 18.25)
+            context.move_to(middle, 14.25)
+            context.line_to(middle, 18.25)
+            context.stroke()
+        elif self.kind == "computer":
+            rounded_rect(context, middle - 9, 1.75, 18, 12.5, 2.5)
+            context.move_to(middle, 14.25)
+            context.line_to(middle, 18.25)
+            context.move_to(middle - 4.5, 18.25)
+            context.line_to(middle + 4.5, 18.25)
+            context.stroke()
+        else:
+            context.arc(middle, 7.5, 4, math.pi, 2 * math.pi)
+            context.line_to(middle + 4, 9.5)
+            context.move_to(middle - 4, 9.5)
+            context.line_to(middle - 4, 7.5)
+            context.stroke()
+            rounded_rect(context, middle - 6.5, 9.25, 13, 9.5, 2)
+            context.fill()
 
 
 class IslandStory(Gtk.DrawingArea):
@@ -2238,10 +2343,7 @@ class SettingsPanel(Gtk.Overlay):
         flow.add_art("mark", self.mark)
         self.story = IslandStory(self._highlight_step)
         flow.add_art("story", self.story)
-        shield = Gtk.Image.new_from_icon_name("security-high-symbolic")
-        shield.set_pixel_size(64)
-        shield.add_css_class("promise-icon")
-        flow.add_art("shield", shield)
+        flow.add_art("shield", ShieldGlyph(ART_MARK))
 
         flow.add_step("welcome", "mark", [
             label("Meet FaceGate", "page-title", wrap=True),
@@ -2250,14 +2352,10 @@ class SettingsPanel(Gtk.Overlay):
 
         self.steps: list[Gtk.Box] = []
         steps = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=LIST_GAP)
-        for number, text in (
-            ("1", "When something asks for admin access, the island drops down and says who's asking."),
-            ("2", "Approve, and your camera looks for you. It stays off until you do."),
-            ("3", "Recognized, it continues. If not, just use your password."),
-        ):
+        for number, text in enumerate(STORY_STEPS, start=1):
             step = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=ICON_TO_TEXT)
             step.add_css_class("step")
-            badge = label(number, "step-number")
+            badge = label(str(number), "step-number")
             badge.set_valign(Gtk.Align.START)
             step.append(badge)
             copy = label(text, "step-text", wrap=True, xalign=0)
@@ -2267,24 +2365,22 @@ class SettingsPanel(Gtk.Overlay):
             self.steps.append(step)
         flow.add_step("how", "story", [label("How it works", "page-title", wrap=True), steps], dots=1)
 
+        # Short promises sit as one block centred under the title, their icons
+        # in a column like the steps' numbers, each level with its title line.
         promises = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=LIST_GAP)
+        promises.set_halign(Gtk.Align.CENTER)
         for icon, title, text in (
-            ("camera-web-symbolic", "Camera only when you approve", "Nothing looks at you until you say so."),
-            ("computer-symbolic", "Stays on this computer", "Your face data is never uploaded."),
-            ("dialog-password-symbolic", "Changes need admin", "Adding or removing a face asks first."),
+            ("camera", "Camera only when you approve", "Nothing looks at you until you say so."),
+            ("computer", "Stays on this computer", "Your face data is never uploaded."),
+            ("lock", "Changes need admin", "Adding, renaming or removing a face asks first."),
         ):
             row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=ICON_TO_TEXT)
-            image = Gtk.Image.new_from_icon_name(icon)
-            # Icons are 20 on a 24 line box, level with the 20-high title line.
-            image.set_pixel_size(20)
-            image.set_size_request(ICON_SIZE, 20)
-            image.add_css_class("promise-icon")
-            image.set_valign(Gtk.Align.START)
-            row.append(image)
+            glyph = PromiseGlyph(icon)
+            glyph.set_valign(Gtk.Align.START)
+            row.append(glyph)
             copy = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-            copy.set_hexpand(True)
             copy.append(label(title, "promise-title", xalign=0))
-            copy.append(label(text, "promise-text", wrap=True, xalign=0))
+            copy.append(label(text, "promise-text", xalign=0))
             row.append(copy)
             promises.append(row)
         flow.add_step("privacy", "shield", [label("Private by design", "page-title", wrap=True), promises], dots=2)
