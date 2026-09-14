@@ -342,6 +342,12 @@ friendly and sensing, and never a literal or mask-like face.
 - **Scanning:** a cyan comet spins clockwise around the ring.
 - **Success:** the comet grows forward into a closed green ring, then pulses.
 - **Failure:** red, a frown, a decaying shake.
+- **Password:** the face belongs to the camera, so whenever a password is being
+  typed or checked the mark is a **lock** instead. The face leaves in the first
+  half of the blend and the lock arrives in the second, never overlapping.
+  Checking spins a white comet (cyan means the camera is looking). A wrong
+  password shakes the lock red; an accepted one closes the ring green while the
+  shackle lifts open.
 - The same mark scales from 32 (collapsed header) to 148 (onboarding). Draw
   it as vectors at its displayed size where possible. Row avatars are a
   still 36 pt mark.
@@ -462,7 +468,8 @@ turns the island into a password view rather than handing off to another
 dialog. `sudo` uses the same view when no face is enrolled: the password goes
 back to PAM for `pam_unix` to check, a rejected one returns as "Incorrect
 password. Try again." on sudo's next try, and the account rule reports
-"Verified". If no verdict arrives within 6 s the island retracts. It keeps the requester title and command, replaces the hint with
+"Verified". If no verdict arrives within 15 s the island retracts; every attempt starts
+with an empty field. It keeps the requester title and command, replaces the hint with
 "Enter your password to allow this.", and adds a 44 pt password field 16 pt
 below the copy, with **Cancel** / **Allow** 16 pt below that. The island takes
 exclusive keyboard focus only while this field is shown. While PAM checks the

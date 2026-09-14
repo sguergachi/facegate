@@ -202,12 +202,19 @@ RING_SECTORS = 72
 
 # r, g, b, idle ring alpha, arc length (turns), arc alpha, solidity (0 = comet
 # tail, 1 = even ring), smile, eye openness, spin (turns/s)
+# r, g, b, ring alpha, arc length, arc alpha, solidity, smile, eyes, lock,
+# shackle open, spin. The face belongs to the camera; whenever a password is
+# being typed or checked, the same mark becomes a lock instead.
 MARK_PROFILES = {
-    "approval": (*WHITE, 0.16, 0.0, 0.0, 0.0, 0.55, 1.0, 0.0),
-    "password": (*WHITE, 0.16, 0.0, 0.0, 0.0, 0.3, 1.0, 0.0),
-    "scanning": (0.39, 0.82, 1.00, 0.08, 0.28, 1.0, 0.0, 0.2, 0.92, 0.85),
-    "success": (0.19, 0.82, 0.35, 0.0, 1.0, 1.0, 1.0, 1.0, 0.9, 0.0),
-    "failure": (1.00, 0.27, 0.23, 0.0, 1.0, 0.9, 1.0, -0.3, 0.85, 0.0),
+    "approval": (*WHITE, 0.16, 0.0, 0.0, 0.0, 0.55, 1.0, 0.0, 0.0, 0.0),
+    "password": (*WHITE, 0.16, 0.0, 0.0, 0.0, 0.3, 1.0, 1.0, 0.0, 0.0),
+    # Checking a password spins white: cyan means the camera is looking.
+    "checking": (*WHITE, 0.08, 0.28, 0.9, 0.0, 0.3, 1.0, 1.0, 0.0, 0.92),
+    "scanning": (0.39, 0.82, 1.00, 0.08, 0.28, 1.0, 0.0, 0.2, 0.92, 0.0, 0.0, 0.85),
+    "success": (0.19, 0.82, 0.35, 0.0, 1.0, 1.0, 1.0, 1.0, 0.9, 0.0, 0.0, 0.0),
+    "unlocked": (0.19, 0.82, 0.35, 0.0, 1.0, 1.0, 1.0, 1.0, 0.9, 1.0, 1.0, 0.0),
+    "failure": (1.00, 0.27, 0.23, 0.0, 1.0, 0.9, 1.0, -0.3, 0.85, 0.0, 0.0, 0.0),
+    "denied": (1.00, 0.27, 0.23, 0.0, 1.0, 0.9, 1.0, -0.3, 0.85, 1.0, 0.0, 0.0),
 }
 
 
@@ -277,7 +284,7 @@ def ring_pattern(color: tuple[float, float, float], head: float, length: float, 
 
 def paint_mark(context: Any, size: float, model: MarkModel) -> None:
     """Paint a friendly abstract sensing mark: a lens ring with two lights."""
-    r, g, b, ring_alpha, arc_length, arc_alpha, solidity, smile, eyes, _spin = mark_values(model)
+    r, g, b, ring_alpha, arc_length, arc_alpha, solidity, smile, eyes, lock, shackle, _spin = mark_values(model)
     color = (r, g, b)
     face = tuple(mix(WHITE[index], color[index], 0.3) for index in range(3))
     unit = MARK_SIZE + 2 * MARK_BLEED
@@ -286,9 +293,9 @@ def paint_mark(context: Any, size: float, model: MarkModel) -> None:
 
     shake = 0.0
     scale = 1.0 + 0.012 * math.sin(model.elapsed * math.tau / 3.4)
-    if model.state == "failure":
+    if model.state in ("failure", "denied"):
         shake = 4.0 * math.sin(model.state_elapsed * math.tau * 5.5) * math.exp(-model.state_elapsed * 6.5)
-    elif model.state == "success":
+    elif model.state in ("success", "unlocked"):
         # The pulse lands as the ring closes, not before.
         scale += 0.04 * math.sin(math.pi * clamp((model.state_elapsed - 0.32) / 0.45))
     context.translate(unit / 2 + shake, unit / 2)
@@ -313,6 +320,19 @@ def paint_mark(context: Any, size: float, model: MarkModel) -> None:
             context.set_source_rgba(*color, cap)
             context.fill()
 
+    # Sequenced, never overlapping: the face leaves in the first half of the
+    # blend and the lock arrives in the second (and the reverse).
+    if lock < 0.5:
+        paint_face(context, model, face, clamp(1 - 2 * lock), smile, eyes, solidity, arc_alpha, arc_length)
+    if lock > 0.5:
+        paint_lock(context, face, clamp(2 * lock - 1), shackle)
+    context.restore()
+
+
+def paint_face(context: Any, model: MarkModel, face: tuple[float, float, float], alpha: float, smile: float, eyes: float, solidity: float, arc_alpha: float, arc_length: float) -> None:
+    context.save()
+    # The face shrinks slightly as it gives way to the lock.
+    context.scale(0.85 + 0.15 * alpha, 0.85 + 0.15 * alpha)
     blink = 1.0
     phase = (model.elapsed % 4.6) / 4.6
     if 0.9 < phase < 0.95:
@@ -324,15 +344,44 @@ def paint_mark(context: Any, size: float, model: MarkModel) -> None:
         context.translate(eye_x + look, -4)
         context.scale(1.0, max(0.12, eyes * blink))
         context.arc(0, 0, 2.6, 0, math.tau)
-        context.set_source_rgba(*face, 1.0)
+        context.set_source_rgba(*face, alpha)
         context.fill()
         context.restore()
     context.set_line_cap(cairo.LINE_CAP_ROUND)
     context.move_to(-7 + look * 0.5, 6)
     context.curve_to(-3.5 + look * 0.5, 6 + smile * 5, 3.5 + look * 0.5, 6 + smile * 5, 7 + look * 0.5, 6)
     context.set_line_width(2.0)
-    context.set_source_rgba(*face, 1.0)
+    context.set_source_rgba(*face, alpha)
     context.stroke()
+    context.restore()
+
+
+def paint_lock(context: Any, color: tuple[float, float, float], alpha: float, opened: float) -> None:
+    """A padlock centred in the ring; opened lifts the shackle out of its body."""
+    context.save()
+    context.scale(0.85 + 0.15 * alpha, 0.85 + 0.15 * alpha)
+    context.translate(0, 1.5)
+    body_top = -1.0
+    # Shackle: its right leg stays seated while the whole loop lifts, so the
+    # left leg visibly leaves the body as it opens.
+    lift = 4.5 * opened
+    context.set_line_cap(cairo.LINE_CAP_ROUND)
+    context.set_line_width(2.4)
+    context.move_to(-5.5, body_top + 1 - lift)
+    context.line_to(-5.5, -5.5 - lift)
+    context.arc(0, -5.5 - lift, 5.5, math.pi, 0)
+    context.line_to(5.5, body_top + 1)
+    context.set_source_rgba(*color, alpha)
+    context.stroke()
+    rounded_rect_path(context, -9.0, body_top, 18.0, 13.0, 3.5)
+    context.close_path()
+    context.set_source_rgba(*color, alpha)
+    context.fill()
+    # Keyhole, cut from the body.
+    context.arc(0, body_top + 5.6, 1.7, 0, math.tau)
+    context.rectangle(-0.75, body_top + 5.6, 1.5, 3.6)
+    context.set_source_rgba(0, 0, 0, alpha)
+    context.fill()
     context.restore()
 
 
@@ -638,8 +687,10 @@ def approval_view(requester: object) -> View:
 
 
 # After a sudo password is handed back, how long to wait for sudo's verdict
-# (a success result, or its retry after a wrong password) before retracting.
-SUDO_CHECK_MS = 6_000
+# before retracting. A rejection comes back only after PAM's failure delay
+# (and faillock's), so this must comfortably outlast it: the island has to
+# still be there, spinning, when sudo asks again.
+SUDO_CHECK_MS = 15_000
 
 # How long "Verified" holds before an approved face change becomes its scan.
 VERIFIED_HOLD_MS = 600
@@ -1276,11 +1327,14 @@ class EdgeHud:
         """The password in the island: polkit's fallback, or sudo without a face."""
         self.silenced = False
         self.on_password, self.on_password_cancel = on_password, on_cancel
+        # Every request is a fresh attempt: never resubmit what was just rejected,
+        # even when the view looks the same as the last one.
+        self.entry.set_text("")
         self._present(password_view(requester, error, message))
         self.password_busy(False)
         if error:
-            # The mark shakes, then settles back to waiting for the password.
-            self.mark.set_state("failure")
+            # The lock shakes, then settles back to waiting for the password.
+            self.mark.set_state("denied")
             GLib.timeout_add(700, lambda: (self.view and self.view.password and self.mark.set_state("password"), False)[1])
 
     def password_busy(self, busy: bool) -> None:
@@ -1289,7 +1343,7 @@ class EdgeHud:
         self.entry.set_editable(not busy)
         self.approve.set_sensitive(not busy)
         self.deny.set_sensitive(True)
-        self.mark.set_state("scanning" if busy else "password")
+        self.mark.set_state("checking" if busy else "password")
         if not busy:
             self.entry.grab_focus()
 
@@ -1488,6 +1542,9 @@ class EdgeHud:
         view = SUCCESS if success else FAILURE
         if title or detail:
             view = View(view.state, title or view.title, detail or view.detail, False)
+        if self.view and self.view.password:
+            # A typed password resolves on the lock, never on the face.
+            view = replace(view, state="unlocked" if success else "denied")
         self._present(view)
         self.dismiss_timeout = GLib.timeout_add(1100 if success else 1600, self.dismiss)
 

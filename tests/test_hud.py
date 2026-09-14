@@ -16,7 +16,7 @@ class HudRequestTests(unittest.TestCase):
 
     def test_presence_mark_draws_all_interaction_states_and_blends(self):
         """The animated mark must never disappear because one state raises."""
-        states = ("approval", "scanning", "success", "failure")
+        states = tuple(MARK_PROFILES)
         for previous in states:
             for state in states:
                 for transition in (0.0, 0.5, 1.0):
@@ -172,3 +172,51 @@ class RequesterModuleTests(unittest.TestCase):
         self.assertEqual(chosen.get_uid(), os.getuid())
         self.assertEqual(choose_identity([("unix-user", {"uid": 0})]).get_uid(), 0)
         self.assertIsNone(choose_identity([("unix-group", {"gid": 10})]))
+
+
+class SudoPasswordTests(unittest.TestCase):
+    def setUp(self):
+        from facegate import edge_hud
+
+        self.edge_hud = edge_hud
+        hud = edge_hud.EdgeHud.__new__(edge_hud.EdgeHud)
+        hud.pending = hud.enrollment = hud.expected_enrollment = hud.polkit = hud.view = None
+        hud.sudo_password = hud.sudo_password_watch = hud.dismiss_timeout = hud.enrollment_start = None
+        hud.silenced = False
+        hud.config_active = False
+        hud.present_password = mock.Mock()
+        hud.dismiss = mock.Mock(return_value=False)
+        self.hud = hud
+        self.pam_side, self.hud_side = socket.socketpair()
+
+    def tearDown(self):
+        if self.hud.sudo_password_watch:
+            self.edge_hud.GLib.source_remove(self.hud.sudo_password_watch)
+        self.pam_side.close()
+        self.hud_side.close()
+
+    def test_typed_password_goes_back_to_pam_and_waits_for_its_verdict(self):
+        self.hud.handle_request({"phase": "password", "requester": {"app": "Konsole"}}, self.hud_side)
+        on_password = self.hud.present_password.call_args[0][1]
+        on_password("hunter2")
+        self.assertEqual(self.pam_side.recv(4096), b'{"password":"hunter2"}\n')
+        self.assertIsNone(self.hud.sudo_password)
+        self.edge_hud.GLib.source_remove(self.hud.dismiss_timeout)
+
+    def test_escape_hands_sudo_back_to_its_own_prompt(self):
+        self.hud.handle_request({"phase": "password"}, self.hud_side)
+        self.edge_hud.EdgeHud.cancel(self.hud)
+        self.assertEqual(self.pam_side.recv(4096), b'{"password":null}\n')
+        self.hud.dismiss.assert_called_once()
+
+    def test_a_retry_always_starts_with_an_empty_field(self):
+        hud = self.edge_hud.EdgeHud.__new__(self.edge_hud.EdgeHud)
+        hud.silenced = False
+        hud.entry = mock.Mock()
+        hud.mark = mock.Mock()
+        hud._present = mock.Mock()
+        hud.password_busy = mock.Mock()
+        with mock.patch.object(self.edge_hud.GLib, "timeout_add"):
+            self.edge_hud.EdgeHud.present_password(hud, {"app": "paru"}, lambda _p: None, lambda: None, error=True)
+        hud.entry.set_text.assert_called_once_with("")
+        hud.mark.set_state.assert_called_once_with("denied")
