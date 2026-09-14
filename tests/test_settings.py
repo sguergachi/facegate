@@ -1,5 +1,6 @@
 import unittest
 from unittest import mock
+from types import SimpleNamespace
 
 from facegate import settings_app
 from facegate import edge_hud
@@ -133,6 +134,7 @@ class GeometryTests(unittest.TestCase):
             "ROW_PADDING", "AVATAR_SIZE", "ROW_HEIGHT", "ROW_RADIUS", "ROW_GAP",
             "FLOW_TOP", "ART_HEIGHT", "ART_TO_TITLE", "TITLE_TO_BODY", "COPY_TO_EXTRA", "LIST_GAP", "ICON_SIZE",
             "ICON_TO_TEXT", "DOTS_TO_BUTTON", "ART_MARK", "PANEL_WIDTH", "PANEL_HEIGHT", "STORY_WIDTH", "STORY_HEIGHT",
+            "PREFERENCE_GROUP_GAP", "PREFERENCE_ICON_SIZE", "ROW_TEXT_INSET", "CHEVRON_SIZE", "RADIO_SIZE", "SWITCH_WIDTH", "SWITCH_HEIGHT", "SWITCH_THUMB",
         ]
         for name in grid:
             self.assertEqual(getattr(settings_app, name) % 4, 0, name)
@@ -165,6 +167,36 @@ class GeometryTests(unittest.TestCase):
         self.assertIn("approve itself", body)
         self.assertIn("sudo password", detail)
         self.assertNotIn("password", settings_app.setup_auth_copy(True, True)[0].lower())
+
+
+class ViewOptionsTests(unittest.TestCase):
+    @staticmethod
+    def monitor(connector="DP-1", description="Studio Display", width=2560, height=1440):
+        return SimpleNamespace(
+            get_connector=lambda: connector,
+            get_description=lambda: description,
+            get_model=lambda: "Fallback Model",
+            get_geometry=lambda: SimpleNamespace(width=width, height=height),
+        )
+
+    def test_monitor_copy_uses_a_stable_connector_and_human_name(self):
+        info = settings_app.monitor_info(self.monitor())
+        self.assertEqual(info.connector, "DP-1")
+        self.assertEqual(info.title, "Studio Display")
+        self.assertEqual(info.detail, "2560 × 1440 · DP-1")
+
+    def test_an_output_without_a_connector_is_not_offered_as_a_lock_target(self):
+        self.assertIsNone(settings_app.monitor_info(self.monitor(connector="")))
+
+    def test_summary_names_follow_mode_connected_and_disconnected_choices(self):
+        monitors = [settings_app.monitor_info(self.monitor())]
+        self.assertEqual(settings_app.placement_summary({}, monitors), "Follows the pointer")
+        fixed = {"placement": "fixed", "monitor": "DP-1"}
+        self.assertEqual(settings_app.placement_summary(fixed, monitors), "Locked to Studio Display")
+        self.assertEqual(
+            settings_app.placement_summary({"placement": "fixed", "monitor": "HDMI-A-1"}, monitors),
+            "Locked to HDMI-A-1 · not connected",
+        )
 
 
 if __name__ == "__main__":

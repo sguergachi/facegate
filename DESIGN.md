@@ -167,6 +167,15 @@ Nested rounded shapes share a centre, as on Apple hardware:
   sits on that same centre line (y = 48), in a 96 bar.
 - Face rows: a 40 avatar and a 40 row button inside 12 padding make a 64 row
   with radius `40 / 2 + 12 = 32`, so rows are pills concentric with both.
+- **Every row is one pill layout** (64 high, radius 32, 12 padding):
+  - A leading 40 icon sits in the padding, concentric with the rounded end,
+    and its text follows 12 later (x 64).
+  - Text with nothing before it starts **24** in. At the title's height the end
+    cap curves ~6 pt inward, so 12 would look cramped against it.
+  - Whatever trails the row (trash button, chevron, radio ring, switch thumb)
+    is centred on the far end cap's centre, 32 from the right edge.
+  - Title and detail (20 + 16) are centred vertically, 14 from top and bottom.
+  - Section headings sit 24 in, level with text-only rows.
 - Pills are fully rounded (radius = height / 2). Chips use 8.
 - The island's top meets the bezel with concave 10 pt shoulders, so it looks
   machined into the edge rather than stuck on.
@@ -189,6 +198,9 @@ Nested rounded shapes share a centre, as on Apple hardware:
 | Icon button | 40 circle, transparent until hover. Destructive icons turn red on hover |
 | Destructive | Red pill (40 high). Only reachable as a second step: trash, then **Remove** (reverts after 4 s) |
 | Password field | 44 high, radius 12, `#1c1c1e` fill, 1.5 pt inner ring on focus |
+| Switch | Drawn, 52 × 32 with a 28 thumb. The thumb travels on a spring (0.35/1.0) while the track blends `#3a3a3c` → success green |
+| Navigation row | The pill row with a 40 icon, title and detail, and a chevron |
+| Choice row | The pill row with text only and a paint-only 16 pt radio ring |
 | Scroll indicator | Overlay only: 4 pt slider at 24% white in the right gutter, centred between the rows and the island edge. 6 pt at 42% on hover. Never drawn over content, hidden when idle |
 | Page dots | 6 pt dots, `#3a3a3c`. The current page is an 18 pt white capsule, which grows as paint (a spring on the frame clock), never by animating layout |
 
@@ -325,9 +337,10 @@ Rules for moving between steps, pages and states:
   transition at all; only its state changes.
 - **Copy changes within a step** fade out (100 ms), swap, then settle 6 pt up
   into place (220 ms), while anything below springs to its new position.
-- **Surfaces hand over in place.** Onboarding becomes the face list with a
-  250 ms crossfade, because both share the same surface, corners and button
-  position.
+- **Surfaces hand over in place.** Onboarding becomes the settings home with
+  a 250 ms crossfade, because both share the same surface and corners.
+  Settings destinations enter from the right and Back returns them to the
+  left; the close button stays fixed throughout.
 - **Motion responds to state.** Colour and fill changes (a button becoming
   secondary or disabled) use the 180 ms `ease` transition and are never
   instant.
@@ -444,10 +457,12 @@ or scan it started returns to it.)
 
 #### Placement
 
-Each time the island appears it asks KWin for the active output
-(`org.kde.KWin.activeOutputName`, which follows the mouse by default) and pins
-itself to the top center of that monitor. Without KWin it falls back to the
-output the compositor chooses.
+By default, each time the island appears it asks KWin for the active output
+(`org.kde.KWin.activeOutputName`, which follows the pointer) and pins itself to
+the top center of that monitor. View Options can instead persist one output's
+connector and pin every appearance there. If that output is disconnected,
+FaceGate follows the pointer until it returns. Without KWin it falls back to
+the output the compositor chooses.
 
 #### Requester
 
@@ -516,14 +531,16 @@ width and hugs the enrollment content.
   The hint cross-fades (100 ms out, 240 ms in) while the island eases to the
   new height. A single full-width **Cancel** replaces the Deny/Approve pair.
   Results read "Face added" or "Couldn't add your face" with the reason, then
-  the island returns to the onboarding or face-list state beneath it.
+  the island returns to the onboarding or Face Approval state beneath it.
 
 ### Expanded configuration island
 
 The top-edge island expands to a fixed 424 × 680 composition. It never creates
 an xdg-shell window: its black material remains attached to the bezel, growing
-from the same notch with concave shoulders. The round close button and Escape
-retract it.
+from the same notch with concave shoulders. The round close button retracts
+it. The main screen is the front door; setting screens add a matching Back
+circle at the top-left, and Escape returns there before a second Escape closes
+the surface.
 
 The panel is always laid out at full size and clipped to the island's current
 shape, so the growing island uncovers it (and a shrinking one covers it)
@@ -531,11 +548,37 @@ while it fades in or out. Content never waits for the island to settle, and
 is never drawn over the desktop. Width, height and lower radius (38 ↔ 48)
 share the island's springs.
 
-#### Manage page
+#### Main screen
+
+Every page after onboarding shares one hero (144 art, 24, 28 pt title, 8, one
+line of detail, 292 high, collapsing to a 96 bar) and places its groups 16
+below it, so moving between pages never changes proportion. The main screen's
+hero is the living mark, **FaceGate**, and **Version ‹number›**: the only
+version label in the interface, quiet in secondary text.
+
+| Element | Value |
+| --- | ---: |
+| "General" heading | y 308; heading → row 8 |
+| Use FaceGate row | y 332, 64 high |
+| "Settings" heading | 24 below the switch row (y 420) |
+| Face Approval / View Options rows | y 444 / 516, 8 apart |
+
+- **Use FaceGate** reads "Approves sudo and admin prompts" when on and
+  "Prompts ask for your password" when off, and the hero mark rests with its
+  eyes closed. Off, FaceGate never shows for sudo or polkit: PAM falls
+  through to the usual password prompt and KDE's own agent takes polkit
+  back. Faces and placement are kept.
+- **Face Approval** shows the face count; **View Options** shows "Follows the
+  pointer" or "Locked to ‹monitor›".
+- Pages travel like onboarding copy (forward leaves 16 left, enters 24 from
+  the right; Back mirrors it). Back appears top-left, mirroring the close
+  button, and Escape goes back one level before it closes.
+
+#### Face Approval page
 
 The hero is composed exactly like an onboarding step (144 mark, 24, 28 pt
-title, 8, one line of 15 pt body), so onboarding hands over to the list
-without the mark or title changing proportion.
+title, 8, one line of 15 pt body), so onboarding and the main screen hand over
+to it without the mark or title changing proportion.
 
 | Element | Value |
 | --- | ---: |
@@ -545,7 +588,7 @@ without the mark or title changing proportion.
 | Mark → large title | 24 |
 | Large title → detail | 8; the detail is one 20-high line, ellipsized, so the header never changes height with its copy |
 | Header (expanded / collapsed) | 292 / 96 |
-| Detail → "Faces" heading | 24 (header bottom 8 + 16 below it); heading inset 12, level with row content |
+| Detail → "Faces" heading | 24 (header bottom 8 + 16 below it); heading inset 24, level with text-only rows |
 | Heading → rows | 8 |
 | Rows | 64 high, radius 32, padding 12, 8 apart; 40 avatar, 40 row button |
 | Bottom bar | 32 fade + 16 clearance + 48 button + 24 margin (button at y 608) |
@@ -567,6 +610,27 @@ without the mark or title changing proportion.
   disabled "Waiting for approval…" until the island takes over for approval
   and the scan. The status line (red, or green for
   success) fades in place in the clearance above it.
+
+#### View Options page
+
+The hero art is a display with the island at its top edge, drawn in the
+mark's language (the same 72-unit square, a faint 1.5 outline, white
+features) so it replaces the mark without changing weight, and shrinks into
+the collapsed bar the same way. The same drawing at 40 is the View Options
+row icon. It is not cyan: nothing is scanning.
+
+Choices apply immediately; there is no Save:
+
+- **Automatic:** Follow Pointer, "Shows on the monitor you're using."
+- **Lock to a monitor:** every connected output by its description, then
+  `width × height · connector`. Choosing one stores its connector and moves the
+  open island there at once. The list updates as monitors are plugged in or
+  out.
+
+A locked monitor that is unplugged stays listed and selected as "Not connected
+· following the pointer", so the stored choice and what actually happens are
+both visible. Selection only repaints the radio rings; rows never rebuild or
+move.
 
 #### Onboarding
 

@@ -35,6 +35,7 @@ gi.require_version("Gtk4LayerShell", "1.0")
 gi.require_version("Pango", "1.0")
 from gi.repository import Gdk, Gio, GLib, Graphene, Gsk, Gtk, Gtk4LayerShell, Pango  # noqa: E402
 
+from . import preferences
 from .protocol import MAX_MESSAGE_BYTES, MAX_STREAM_BYTES, PREVIEW_HEIGHT, PREVIEW_WIDTH, decode, default_socket_path, encode
 
 SCAN_WATCHDOG_MS = 20_000
@@ -216,6 +217,8 @@ MARK_PROFILES = {
     "unlocked": (0.19, 0.82, 0.35, 0.0, 1.0, 1.0, 1.0, 1.0, 0.9, 1.0, 1.0, 0.0),
     "failure": (1.00, 0.27, 0.23, 0.0, 1.0, 0.9, 1.0, -0.3, 0.85, 0.0, 0.0, 0.0),
     "denied": (1.00, 0.27, 0.23, 0.0, 1.0, 0.9, 1.0, -0.3, 0.85, 1.0, 0.0, 0.0),
+    # FaceGate turned off: resting, eyes closed, no smile.
+    "off": (*WHITE, 0.10, 0.0, 0.0, 0.0, 0.0, 0.12, 0.0, 0.0, 0.0),
 }
 
 
@@ -779,6 +782,30 @@ class PendingApproval:
     polkit: bool = False
 
 
+def run_quietly(command: str) -> None:
+    """Run a short shell command without blocking the island."""
+    try:
+        Gio.Subprocess.new(["sh", "-c", command], Gio.SubprocessFlags.STDOUT_SILENCE | Gio.SubprocessFlags.STDERR_SILENCE)
+    except GLib.Error as error:
+        print("[facegate] could not run %r: %s" % (command, error.message), flush=True)
+
+
+def monitor_by_connector(connector: str) -> Gdk.Monitor | None:
+    display = Gdk.Display.get_default()
+    monitors = display.get_monitors() if display else None
+    for index in range(monitors.get_n_items() if monitors else 0):
+        monitor = monitors.get_item(index)
+        if monitor.get_connector() == connector:
+            return monitor
+    return None
+
+
+# KDE's own polkit agent, which takes the session back while FaceGate is off.
+DESKTOP_POLKIT_AGENT = "plasma-polkit-agent.service"
+# While off, PAM hears these instead, and falls through to its usual prompt.
+DISABLED_REPLIES = {"approval": {"approved": False}, "password": {"password": None}, "scanning": {"ok": True}, "result": {"ok": True}}
+
+
 class EdgeHud:
     def __init__(self) -> None:
         self.window = Gtk.Window()
@@ -794,6 +821,8 @@ class EdgeHud:
         self.window.connect("map", self._position_on_mapped_monitor)
 
         self.pending: PendingApproval | None = None
+        # Off: prompts fall back to their usual password dialogs, unseen.
+        self.enabled = preferences.enabled(preferences.load())
         # sudo waiting for a password typed in the island (no face enrolled).
         self.sudo_password: socket.socket | None = None
         self.sudo_password_watch: int | None = None
@@ -916,6 +945,27 @@ class EdgeHud:
         label.set_xalign(0.5)
         return label
 
+    def _monitor_for_island(self) -> Gdk.Monitor | None:
+        """The monitor chosen in View Options, or the one under the pointer.
+
+        A chosen monitor that is unplugged falls back to following the
+        pointer until it returns.
+        """
+        mode, connector = preferences.placement(preferences.load())
+        if mode == preferences.FIXED_MONITOR:
+            monitor = monitor_by_connector(connector)
+            if monitor:
+                return monitor
+        return self._monitor_under_pointer()
+
+    def apply_monitor_placement(self) -> bool:
+        """Apply View Options now, including while configuration is open."""
+        monitor = self._monitor_for_island()
+        if not monitor:
+            return False
+        self._pin_to(monitor)
+        return True
+
     @staticmethod
     def _monitor_under_pointer() -> Gdk.Monitor | None:
         """Wayland hides the global pointer from clients, so ask KWin which
@@ -928,13 +978,7 @@ class EdgeHud:
             )
         except GLib.Error:
             return None
-        connector = reply.unpack()[0]
-        monitors = Gdk.Display.get_default().get_monitors()
-        for index in range(monitors.get_n_items()):
-            monitor = monitors.get_item(index)
-            if monitor.get_connector() == connector:
-                return monitor
-        return None
+        return monitor_by_connector(reply.unpack()[0])
 
     def _pin_to(self, monitor: Gdk.Monitor) -> None:
         """Pin the layer surface to the true center of the monitor's top edge."""
@@ -1197,10 +1241,7 @@ class EdgeHud:
         if view.password:
             GLib.idle_add(lambda: (self.entry.grab_focus(), False)[1])
         # Follow the pointer: choose the output afresh every time we appear.
-        monitor = self._monitor_under_pointer()
-        if monitor:
-            self._pin_to(monitor)
-        else:
+        if not self.apply_monitor_placement():
             self.positioned = False
         self.window.present()
         self.window.add_tick_callback(self._on_frame)
@@ -1396,6 +1437,29 @@ class EdgeHud:
         else:
             self.dismiss()
 
+    # On / off -----------------------------------------------------------------
+
+    def set_enabled(self, enabled: bool) -> None:
+        """Turn FaceGate on or off for sudo and admin prompts, and remember it."""
+        if enabled == self.enabled:
+            return
+        self.enabled = enabled
+        preferences.update(enabled=enabled)
+        print("[facegate] %s" % ("enabled" if enabled else "disabled: prompts use their usual password dialogs"), flush=True)
+        self.apply_polkit_owner()
+
+    def apply_polkit_owner(self) -> None:
+        """Only one polkit agent can hold the session: FaceGate's island while
+        on, KDE's own dialog while off."""
+        if not self.polkit:
+            return
+        if self.enabled:
+            run_quietly("systemctl --user stop %s; systemctl --user mask %s" % (DESKTOP_POLKIT_AGENT, DESKTOP_POLKIT_AGENT))
+            self.polkit.start()
+        else:
+            self.polkit.release()
+            run_quietly("systemctl --user unmask %s && systemctl --user start %s" % (DESKTOP_POLKIT_AGENT, DESKTOP_POLKIT_AGENT))
+
     # Configuration ---------------------------------------------------------
 
     def _config_blocked(self) -> bool:
@@ -1448,10 +1512,7 @@ class EdgeHud:
             self.height.target = CONFIG_HEIGHT
             self.radius.target = CONFIG_RADIUS
             self.config_item.alpha.to(1, self.now, 0.3, 0.12)
-            monitor = self._monitor_under_pointer()
-            if monitor:
-                self._pin_to(monitor)
-            else:
+            if not self.apply_monitor_placement():
                 self.positioned = False
             self.window.present()
             self.window.add_tick_callback(self._on_frame)
@@ -1778,6 +1839,10 @@ class EdgeHud:
 
     def handle_request(self, message: dict[str, Any], connection: socket.socket) -> bool:
         phase = message.get("phase")
+        if not self.enabled and phase in DISABLED_REPLIES:
+            # Turned off: never show; PAM falls through to the usual prompt.
+            self.reply(connection, {**DISABLED_REPLIES[phase], "reason": "disabled"})
+            return False
         if phase == "config":
             self.reply(connection, {"ok": True, "queued": self._config_blocked()})
             self.open_config(message.get("welcome") is True)
@@ -1994,7 +2059,9 @@ def main() -> int:
             from .polkit_agent import FaceGatePolkitAgent
 
             agent = FaceGatePolkitAgent(hud)
-            agent.start()
+            # On: register (KDE's agent was masked at install). Off: make sure
+            # KDE's agent holds the session instead.
+            hud.apply_polkit_owner()
         except (ImportError, ValueError, GLib.Error) as error:
             # Without the agent, sudo still works; polkit keeps the desktop's own dialog.
             print("[facegate] polkit agent unavailable: %s" % error, flush=True)

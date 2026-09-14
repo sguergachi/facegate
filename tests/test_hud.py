@@ -184,6 +184,7 @@ class SudoPasswordTests(unittest.TestCase):
         hud.sudo_password = hud.sudo_password_watch = hud.sudo_lock_timer = hud.dismiss_timeout = hud.enrollment_start = None
         hud.silenced = False
         hud.config_active = False
+        hud.enabled = True
         hud.present_password = mock.Mock()
         hud.dismiss = mock.Mock(return_value=False)
         self.hud = hud
@@ -234,3 +235,36 @@ class SudoPasswordTests(unittest.TestCase):
             self.edge_hud.EdgeHud.present_password(hud, {"app": "paru"}, lambda _p: None, lambda: None, error=True)
         hud.entry.set_text.assert_called_once_with("")
         hud.mark.set_state.assert_called_once_with("denied")
+
+    def test_turned_off_never_shows_and_lets_pam_use_the_usual_prompt(self):
+        self.hud.enabled = False
+        self.hud.present_approval = mock.Mock()
+        self.hud.handle_request({"phase": "password"}, self.hud_side)
+        self.assertEqual(self.pam_side.recv(4096), b'{"password":null,"reason":"disabled"}\n')
+        pam_side, hud_side = socket.socketpair()
+        self.hud.handle_request({"phase": "approval"}, hud_side)
+        self.assertEqual(pam_side.recv(4096), b'{"approved":false,"reason":"disabled"}\n')
+        pam_side.close()
+        self.hud.present_password.assert_not_called()
+        self.hud.present_approval.assert_not_called()
+
+
+class PreferencesTests(unittest.TestCase):
+    def test_placement_and_enabled_defaults_and_updates_keep_other_keys(self):
+        import tempfile
+        from pathlib import Path
+
+        from facegate import preferences
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.json"
+            self.assertTrue(preferences.enabled(preferences.load(path)))
+            self.assertEqual(preferences.placement({}), ("follow", ""))
+            preferences.save({"onboarded": True}, path)
+            preferences.update(path, enabled=False, placement="fixed", monitor="DP-1")
+            settings = preferences.load(path)
+            self.assertTrue(settings["onboarded"])
+            self.assertFalse(preferences.enabled(settings))
+            self.assertEqual(preferences.placement(settings), ("fixed", "DP-1"))
+            # A fixed choice without a monitor still follows the pointer.
+            self.assertEqual(preferences.placement({"placement": "fixed"}), ("follow", ""))

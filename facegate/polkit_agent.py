@@ -113,14 +113,38 @@ class FaceGatePolkitAgent:
         self.queue: list[Authentication] = []
         self.bus = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
         self.subject: tuple[str, dict[str, GLib.Variant]] | None = None
+        self.registered = False
+        # Retries registration while KDE's agent still holds the session.
+        self.retry: int | None = None
         interface = Gio.DBusNodeInfo.new_for_xml(AGENT_XML).interfaces[0]
         self.registration = self.bus.register_object_with_closures2(OBJECT_PATH, interface, self._on_call, None, None)
 
     # Registration ---------------------------------------------------------
 
     def start(self) -> None:
+        if not (self.registered or self.retry) and self._register():
+            self.retry = GLib.timeout_add_seconds(RETRY_REGISTER_SECONDS, self._retry)
+
+    def _retry(self) -> bool:
         if self._register():
-            GLib.timeout_add_seconds(RETRY_REGISTER_SECONDS, self._register)
+            return True
+        self.retry = None
+        return False
+
+    def release(self) -> None:
+        """Give the session back while FaceGate is off, so KDE's agent can register."""
+        if self.retry:
+            GLib.source_remove(self.retry)
+            self.retry = None
+        # Detach the whole queue first. _cancel normally advances to the next
+        # request, which is exactly what must not happen while turning off.
+        pending = ([self.active] if self.active else []) + list(self.queue)
+        self.active = None
+        self.queue.clear()
+        for auth in pending:
+            self._cancel(auth)
+        self._unregister()
+        log("released the session to the desktop's agent")
 
     def _session_subject(self) -> tuple[str, dict[str, GLib.Variant]]:
         """The user's graphical login session; this service runs outside it."""
@@ -152,11 +176,12 @@ class FaceGatePolkitAgent:
             # Usually another agent (KDE's) still holds the session.
             log("not registered yet (%s); retrying" % error.message)
             return True
+        self.registered = True
         log("registered as the authentication agent for %s %s" % (self.subject[0], {k: v.unpack() for k, v in self.subject[1].items()}))
         return False
 
-    def stop(self) -> None:
-        if self.subject:
+    def _unregister(self) -> None:
+        if self.registered and self.subject:
             try:
                 self.bus.call_sync(
                     *AUTHORITY, "UnregisterAuthenticationAgent",
@@ -165,6 +190,10 @@ class FaceGatePolkitAgent:
                 )
             except GLib.Error:
                 pass
+        self.registered = False
+
+    def stop(self) -> None:
+        self._unregister()
         self.bus.unregister_object(self.registration)
 
     # D-Bus ------------------------------------------------------------------

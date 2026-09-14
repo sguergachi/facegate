@@ -9,8 +9,8 @@ FaceGate is a Face ID-style interface for
 project that does the real work: it drives the IR webcam and performs the face
 comparison. FaceGate doesn't replace any of that; it adds an explicit consent
 screen before Howdy uses the camera for `sudo`, and shows the scan and its
-result. Onboarding and face management live in that island too. FaceGate runs
-in the tray, where **Open FaceGate** expands it into configuration. It uses a
+result. Onboarding and settings live in that island too. FaceGate runs in the
+tray, where **Open FaceGate** expands it into configuration. It uses a
 true layer-shell surface, so the black island
 is anchored to the monitor's physical top edge rather than placed as an
 ordinary desktop window. The visual HUD runs in your normal desktop
@@ -69,15 +69,24 @@ Press **Deny** to decline, or Escape to dismiss the island at any point.
 The spacing and hierarchy are governed by the measured [layout contract](DESIGN.md),
 including the grid, concentric radii, and spring-based motion choreography.
 
-## Managing faces
+## Settings and faces
 
 Choose **Open FaceGate** from its tray menu, open **FaceGate** from the app
 menu, or run `facegate-settings`. Every route expands the top-edge island;
 there is no separate settings window. The first time, it shows how FaceGate
 works over three short pages (replay them with
-`facegate-settings --welcome`), then helps you add your face. After that it
-lists the faces Howdy knows for your account, under a large header that
-collapses into a compact bar as you scroll.
+`facegate-settings --welcome`), then helps you add your face. After that the
+main screen shows the installed version, a global FaceGate switch, and two
+destinations:
+
+- **Face Approval** lists the faces Howdy knows for your account. Its large
+  header collapses into a compact bar as you scroll.
+- **View Options** follows the pointer by default, or locks the island to one
+  connected monitor. A disconnected locked monitor falls back to the pointer
+  until it returns.
+
+Turning FaceGate off keeps every saved face and preference, but sudo and admin
+requests use their usual password prompts until it is turned on again.
 
 - **Add a Face** reshapes the same island into admin approval. Once approved,
   that same surface transitions directly into a live, face-following IR preview
