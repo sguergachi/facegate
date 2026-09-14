@@ -276,6 +276,16 @@ def do_auth(pamh):
         return pamh.PAM_AUTHINFO_UNAVAIL
 
     service = getattr(pamh, "service", None) or "sudo"
+    if service != "polkit-1":
+        try:
+            argv = requesters.read_process(os.getpid())[2]
+        except Exception:
+            argv = []
+        if password_comes_from_elsewhere(argv):
+            # sudo -S reads its password from stdin and -n must never wait:
+            # neither may be held up by the island, whether or not a face exists.
+            log("sudo takes its password from stdin or not at all; FaceGate stays out of the way")
+            return pamh.PAM_AUTHINFO_UNAVAIL
     if not has_face_models(username):
         # polkit's own agent (FaceGate's island) asks for the password itself.
         if service == "polkit-1":
@@ -321,12 +331,6 @@ def do_auth(pamh):
 
 def password_fallback(pamh, username):
     """No face to try: ask for sudo's password in the island when possible."""
-    try:
-        argv = requesters.read_process(os.getpid())[2]
-    except Exception:
-        argv = []
-    if password_comes_from_elsewhere(argv):
-        return pamh.PAM_AUTHINFO_UNAVAIL
     try:
         requester = requesters.describe_command(os.getpid())
     except Exception as error:

@@ -10,6 +10,11 @@ PAM_PATH = Path(__file__).parents[1] / "pam" / "facegate-pam.py"
 SPEC = importlib.util.spec_from_file_location("facegate_pam_test", PAM_PATH)
 pam = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(pam)
+# Tests exercise the module's logging; keep it out of the real system log.
+pam.log = lambda message: None
+# Nor may they depend on this machine's own FaceGate switch.
+REAL_TURNED_OFF = pam.turned_off
+pam.turned_off = lambda username, path=None: False
 
 
 class FakePam:
@@ -31,17 +36,17 @@ class TurnedOffTests(unittest.TestCase):
         user = getpass.getuser()
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "settings.json"
-            self.assertFalse(pam.turned_off(user, str(path)))
+            self.assertFalse(REAL_TURNED_OFF(user, str(path)))
             path.write_text(json.dumps({"enabled": True}))
-            self.assertFalse(pam.turned_off(user, str(path)))
+            self.assertFalse(REAL_TURNED_OFF(user, str(path)))
             path.write_text("not json")
-            self.assertFalse(pam.turned_off(user, str(path)))
+            self.assertFalse(REAL_TURNED_OFF(user, str(path)))
             path.write_text(json.dumps({"enabled": False}))
-            self.assertTrue(pam.turned_off(user, str(path)))
+            self.assertTrue(REAL_TURNED_OFF(user, str(path)))
             # A link is never followed, even to a file that says off.
             link = Path(directory) / "link.json"
             os.symlink(path, link)
-            self.assertFalse(pam.turned_off(user, str(link)))
+            self.assertFalse(REAL_TURNED_OFF(user, str(link)))
 
     def test_off_skips_the_island_entirely(self):
         with mock.patch.object(pam, "turned_off", return_value=True), mock.patch.object(pam, "request_hud") as hud:
@@ -144,6 +149,19 @@ When                Type  Source                                           Valid
             pam.ask_password_in_island(FakePam(), "sammy", {})
         self.assertEqual(request_hud.call_args[0][2]["locked_until"], 4102444800.0)
 
+    def test_stdin_sudo_skips_the_island_even_with_a_face_enrolled(self):
+        # With a face, sudo -S used to wait on an approval nobody would see.
+        for argv in (["sudo", "-S", "./install.sh"], ["sudo", "-n", "true"]):
+            with (
+                mock.patch.object(pam, "turned_off", return_value=False),
+                mock.patch.object(pam, "should_skip", return_value=False),
+                mock.patch.object(pam, "has_face_models", return_value=True),
+                mock.patch.object(pam.requesters, "read_process", return_value=("sudo", 1, argv)),
+                mock.patch.object(pam, "request_hud") as request_hud,
+            ):
+                self.assertEqual(pam.do_auth(FakePam()), FakePam.PAM_AUTHINFO_UNAVAIL)
+            request_hud.assert_not_called()
+
     def test_stdin_and_non_interactive_sudo_never_open_the_island(self):
         for argv in (["sudo", "-S", "true"], ["sudo", "-kS", "true"], ["sudo", "--stdin", "true"], ["sudo", "-n", "true"]):
             self.assertTrue(pam.password_comes_from_elsewhere(argv), argv)
@@ -160,6 +178,7 @@ When                Type  Source                                           Valid
             mock.patch.object(pam.requesters, "describe_command", return_value={}),
             mock.patch.object(pam.subprocess, "call", return_value=0),
             mock.patch.object(pam, "reset_password_failures") as reset,
+            mock.patch.object(pam.requesters, "read_process", return_value=("sudo", 1, ["sudo", "true"])),
         ):
             self.assertEqual(pam.do_auth(FakePam()), FakePam.PAM_SUCCESS)
         reset.assert_called_once_with("sammy")
