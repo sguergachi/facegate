@@ -71,20 +71,16 @@ class FramingTests(unittest.TestCase):
 
 
 class ThreadedScanTests(unittest.TestCase):
-    def test_preview_keeps_the_camera_rate_while_detection_is_slow(self):
-        import threading
+    def test_preview_keeps_the_camera_rate_while_analysis_holds_the_interpreter(self):
         import time as clock
 
-        import numpy
-
-        scanner = faces.Scanner.__new__(faces.Scanner)
         import cv2
 
+        scanner = faces.Scanner.__new__(faces.Scanner)
         scanner.cv2 = cv2
         scanner.clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         scanner.max_height = 320
         scanner.dark_threshold = 100
-        scanner.encode = None
         lit = numpy.full((340, 340), 120, numpy.uint8)
 
         def read_frame():
@@ -98,29 +94,32 @@ class ThreadedScanTests(unittest.TestCase):
             def bottom(self): return 230
             def height(self): return 140
 
-        detections = []
-
         def detector(image, _upsample):
-            # A detector far slower than the camera.
-            detections.append(threading.get_ident())
-            clock.sleep(0.12)
+            clock.sleep(0.03)
             return [Face()]
 
-        scanner.detector = detector
-        scanner.read_frame = read_frame
+        def encode(_color, _rect):
+            # Like dlib's recognition: a quarter second that never lets go of
+            # Python's interpreter lock.
+            deadline = clock.perf_counter() + 0.25
+            spins = 0
+            while clock.perf_counter() < deadline:
+                spins += 1
+            return [float(clock.monotonic())]
+
+        scanner.detector, scanner.encode, scanner.read_frame = detector, encode, read_frame
         started = clock.monotonic()
-        frames = 0
-        faces_seen = []
-        for event in scanner.scan(PREVIEW_WIDTH, PREVIEW_HEIGHT, lambda: clock.monotonic() - started > 1.0):
+        frames, faces_seen, progress = 0, [], 0
+        for event in scanner.scan(PREVIEW_WIDTH, PREVIEW_HEIGHT, lambda: clock.monotonic() - started > 2.0):
             if event["event"] == "frame":
                 frames += 1
                 faces_seen.append(event["face"])
-        self.assertGreaterEqual(frames, 24)
-        # Frames say when the face is found, so the stars know when to gather.
+            progress += event["event"] == "progress"
+        self.assertGreaterEqual(frames, 48)
+        # Analysis still ran, in its own process, and frames say when a face is found.
+        self.assertGreater(progress, 0)
         self.assertFalse(faces_seen[0])
         self.assertTrue(faces_seen[-1])
-        self.assertLessEqual(len(detections), 10)
-        self.assertNotIn(threading.get_ident(), detections)
 
 
 class FakeScanner:

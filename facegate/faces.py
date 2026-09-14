@@ -14,9 +14,11 @@ from __future__ import annotations
 import base64
 import json
 import math
+import multiprocessing
 import os
 import threading
 import time
+import warnings
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterator
 
@@ -223,14 +225,18 @@ class Scanner:
         """Yield frame/hint/progress events, then one `captured` event.
 
         The preview runs at the camera's own rate. A camera thread reads every
-        frame and publishes a cropped preview of each lit one at once; an
-        analysis thread takes the newest lit frame whenever it is free, finds
-        the face (which the crop follows) and collects samples. Face detection
-        and recognition take far longer than a frame, but never hold the
-        preview up. Only the newest preview is ever sent, so a slow reader
-        sees the present rather than a backlog.
+        frame and publishes a cropped preview of each lit one at once. Face
+        detection and recognition run in a separate process: dlib's
+        recognition holds Python's interpreter lock for a quarter of a second
+        per sample, which starved the camera thread when it ran in a thread
+        beside it. An analysis thread hands that process the newest lit frame
+        whenever it is free and applies what it finds: the face (which the
+        crop follows), hints and samples. Only the newest preview is ever
+        sent, so a slow reader sees the present rather than a backlog.
         """
         scan = _Scan(self, width, height, clock)
+        # Fork before any thread starts, so the child inherits a quiet process.
+        scan.start_analyst()
         workers = [threading.Thread(target=scan.read_camera, daemon=True), threading.Thread(target=scan.analyse, daemon=True)]
         yield {"event": "hint", "text": HINTS["camera"]}
         for worker in workers:
@@ -350,28 +356,83 @@ class _Scan:
                 self.preview = event
                 self.changed.notify_all()
 
-    # Analysis thread ----------------------------------------------------------------
+    # Analysis ---------------------------------------------------------------------
+
+    def start_analyst(self) -> None:
+        context = multiprocessing.get_context("fork")
+        self.connection, child = context.Pipe()
+        self.analyst = context.Process(target=_run_analyst, args=(child, self.scanner, self.clock), daemon=True)
+        with warnings.catch_warnings():
+            # Fork is deliberate: the child shares the loaded dlib models, which
+            # can't be pickled, and runs only dlib and serial OpenCV.
+            warnings.simplefilter("ignore", DeprecationWarning)
+            self.analyst.start()
+        child.close()
 
     def analyse(self) -> None:
-        scanner, cv2, state = self.scanner, self.scanner.cv2, self.state
+        """Feed the analysis process the newest lit frame, and apply its findings."""
         seen = 0
-        while True:
-            with self.changed:
-                self.changed.wait_for(lambda: self.stop or (self.latest is not None and self.latest[2] != seen), timeout=0.5)
-                if self.stop:
+        try:
+            while True:
+                with self.changed:
+                    self.changed.wait_for(lambda: self.stop or (self.latest is not None and self.latest[2] != seen), timeout=0.5)
+                    if self.stop:
+                        return
+                    if self.latest is None or self.latest[2] == seen:
+                        continue
+                    frame, gray, seen = self.latest
+                self.connection.send((frame, gray))
+                while not self.connection.poll(0.1):
+                    if self.stop:
+                        return
+                    if not self.analyst.is_alive():
+                        self.fail("Face analysis stopped unexpectedly.")
+                        return
+                face_box, trouble, hints, events, failure, done = self.connection.recv()
+                with self.changed:
+                    self.face_box = face_box
+                    self.state.trouble = trouble
+                for key in hints:
+                    self.hint(key)
+                for event in events:
+                    self.post(event)
+                if failure:
+                    self.fail(failure)
                     return
-                if self.latest is None or self.latest[2] == seen:
-                    continue
-                frame, gray, seen = self.latest
+                if done:
+                    return
+        except (EOFError, OSError):
+            if not self.stop:
+                self.fail("Face analysis stopped unexpectedly.")
+        finally:
             try:
-                if self._analyse_frame(scanner, cv2, state, frame, gray):
-                    return
-            except EnrollError as error:
-                self.fail(str(error))
-                return
+                self.connection.send(None)
+            except (OSError, ValueError):
+                pass
+            self.analyst.join(timeout=1)
+            if self.analyst.is_alive():
+                self.analyst.terminate()
 
-    def _analyse_frame(self, scanner: Scanner, cv2: Any, state: ScanState, frame: Any, gray: Any) -> bool:
+
+class _Analyst:
+    """Finds the face and collects samples, in the analysis process."""
+
+    def __init__(self, scanner: Scanner, clock: Callable[[], float]) -> None:
+        self.scanner, self.clock = scanner, clock
+        self.state = ScanState()
+        self.face_box: tuple[float, float, float, float] | None = None
+        self.hints: list[str] = []
+        self.events: list[dict[str, Any]] = []
+
+    def hint(self, key: str) -> None:
+        self.hints.append(key)
+
+    def post(self, event: dict[str, Any]) -> None:
+        self.events.append(event)
+
+    def analyse(self, frame: Any, gray: Any) -> bool:
         """Find the face and maybe take a sample; True once enough are captured."""
+        scanner, cv2, state = self.scanner, self.scanner.cv2, self.state
         now = self.clock()
         frame_height = gray.shape[0]
         scale = (scanner.max_height / frame_height) if scanner.max_height and frame_height > scanner.max_height else 1.0
@@ -417,6 +478,31 @@ class _Scan:
             self.post({"event": "captured", "encodings": state.samples})
             return True
         return False
+
+
+
+def _run_analyst(connection: Any, scanner: Scanner, clock: Callable[[], float]) -> None:
+    """The analysis process: one frame in, its findings out, until told to stop."""
+    # Forked from a process whose OpenCV had worker threads: work serially,
+    # so nothing here waits on a pool that didn't come across the fork.
+    scanner.cv2.setNumThreads(1)
+    analyst = _Analyst(scanner, clock)
+    while True:
+        try:
+            item = connection.recv()
+        except (EOFError, OSError):
+            return
+        if item is None:
+            return
+        failure, done = "", False
+        try:
+            done = analyst.analyse(*item)
+        except EnrollError as error:
+            failure = str(error)
+        connection.send((analyst.face_box, analyst.state.trouble, analyst.hints, analyst.events, failure, done))
+        analyst.hints, analyst.events = [], []
+        if failure or done:
+            return
 
 
 def howdy_scanner(howdy_dir: str = HOWDY_DIR) -> tuple[Scanner, Callable[[], None]]:

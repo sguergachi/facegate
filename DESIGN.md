@@ -552,11 +552,12 @@ width and hugs the enrollment content.
 - **Fluidity:** the preview runs at the camera's own rate. In the root
   helper a camera thread reads every frame (OpenCV's buffer held to one, so
   nothing queues) and sends a cropped preview of each lit one at once, with
-  whether a face is in view, while
-  an analysis thread takes the newest frame whenever it is free to find the
-  face, which the crop follows, and collect samples; detection and
-  recognition never hold the preview up, and only the newest preview is
-  sent. IR emitters often light only every other frame (the BRIO: 30 fps,
+  whether a face is in view. Detection and recognition run in a separate,
+  forked process (dlib's recognition holds Python's interpreter lock for a
+  quarter second per sample, which starved a camera thread beside it); an
+  analysis thread hands it the newest lit frame whenever it is free and
+  applies the face (which the crop follows), hints and samples. Only the
+  newest preview is sent. IR emitters often light only every other frame (the BRIO: 30 fps,
   so 15 lit), and unlit frames hold no picture, so they're skipped; the stars
   move on springs every display frame, so motion stays as smooth as the
   display between camera frames.

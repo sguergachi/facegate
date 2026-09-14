@@ -2862,7 +2862,7 @@ class SettingsPanel(Gtk.Overlay):
                 self.island.open()
                 self._render()
             if kind == "frame":
-                self.island.send({"frame": event.get("data"), "w": event.get("w"), "h": event.get("h")})
+                self.island.send({"frame": event.get("data"), "w": event.get("w"), "h": event.get("h"), "face": event.get("face")})
             elif kind == "hint":
                 self.island.send({"hint": event.get("text")})
             else:
