@@ -196,7 +196,9 @@ Nested rounded shapes share a centre, as on Apple hardware:
 | Secondary button | Same pill, `#1c1c1e` fill, white label. The second choice beside a primary (Deny, Not Now, Add Another Look), or a lone Cancel while a scan runs |
 | Close | 32 circle, `#1c1c1e`, 1.75 pt ✕ glyph drawn at 9 pt, top-right on the corner centre |
 | Icon button | 40 circle, transparent until hover. Destructive icons turn red on hover |
-| Destructive | Red pill (40 high). Only reachable as a second step: the 40 trash circle **grows leftward into** the **Remove** pill (right end fixed on the end cap, spring 0.40/0.90; the icon fades out first, the word in once there's room). It narrows back after 4 s (0.30/1.0), or into a spinner while admin approval is asked. Its layout width is always the pill's, so the row never reflows |
+| Face row actions | Two 40 circles, 8 apart: Edit (pencil) and the trash on the end cap. One drawn control whose layout width is always the Remove pill's, so the row never reflows |
+| Destructive | Red pill (40 high). Only reachable as a second step: the trash circle **grows leftward into** the **Remove** pill over both circles (right end fixed on the end cap, spring 0.40/0.90; icons fade out first, the word in once there's room). It narrows back after 4 s, on Escape, or when you click anywhere else (0.30/1.0), and into a spinner while admin approval is asked |
+| Rename | Edit turns the name into a text field in the same slot, font and height, with all of it selected. The row gains the 1.5 pt focus ring, the pencil becomes ✓, and the detail reads "Saving asks for admin approval". Return, ✓ or clicking away saves; Escape cancels. The new name shows at once and is put back if approval is declined |
 | Password field | 44 high, radius 12, `#1c1c1e` fill, 1.5 pt inner ring on focus |
 | Switch | Drawn, 52 × 32 with a 28 thumb. The thumb travels on a spring (0.35/1.0) while the track blends `#3a3a3c` → success green |
 | Navigation row | The pill row with a 40 icon, title and detail, and a chevron |
@@ -369,9 +371,10 @@ friendly and sensing, and never a literal or mask-like face.
 
 - **Consent before camera.** The camera never starts without an explicit
   Approve, or an admin approval in the enrollment flow.
-- **Changes need admin, every time.** Listing faces needs no prompt. Adding or
-  removing one always asks for admin approval in the island (polkit
-  `auth_admin`, never kept).
+- **Changes need admin, every time.** Listing faces needs no prompt. Adding,
+  renaming or removing one always asks for admin approval in the island
+  (polkit `auth_admin`, never kept). That is why renaming starts from an
+  explicit Edit button rather than a tap on the name.
 - **Destructive actions take two steps** and revert themselves if not confirmed.
 - **Escape always backs out**: it declines an approval, cancels a scan, or
   closes configuration back into the bezel.

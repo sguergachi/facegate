@@ -34,6 +34,7 @@ gi.require_version("PangoCairo", "1.0")
 from gi.repository import Gdk, Gio, GLib, Graphene, Gsk, Gtk, Pango, PangoCairo  # noqa: E402
 
 from . import __version__, preferences  # noqa: E402
+from .faces import LABEL_CHARS as NAME_CHARS  # noqa: E402
 from .edge_hud import (  # noqa: E402
     ISLAND_WIDTH,
     MARK_PROFILES,
@@ -463,13 +464,16 @@ def draw_chevron_glyph(area: Gtk.DrawingArea, context: Any, width: int, height: 
     context.stroke()
 
 
-def row_copy(title: str, detail: str) -> tuple[Gtk.Box, Gtk.Label]:
+def row_copy(title: str | Gtk.Widget, detail: str) -> tuple[Gtk.Box, Gtk.Label]:
     copy = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
     copy.set_valign(Gtk.Align.CENTER)
     copy.set_hexpand(True)
-    title_label = label(title, "row-title", xalign=0)
-    title_label.set_ellipsize(Pango.EllipsizeMode.END)
-    title_label.set_single_line_mode(True)
+    if isinstance(title, Gtk.Widget):
+        title_label = title
+    else:
+        title_label = label(title, "row-title", xalign=0)
+        title_label.set_ellipsize(Pango.EllipsizeMode.END)
+        title_label.set_single_line_mode(True)
     detail_label = label(detail, "row-detail", xalign=0)
     detail_label.set_ellipsize(Pango.EllipsizeMode.END)
     detail_label.set_single_line_mode(True)
@@ -478,7 +482,7 @@ def row_copy(title: str, detail: str) -> tuple[Gtk.Box, Gtk.Label]:
     return copy, detail_label
 
 
-def pill_layout(title: str, detail: str, leading: Gtk.Widget | None = None, trailing: Gtk.Widget | None = None, trailing_radius: float = 0.0) -> tuple[Gtk.Box, Gtk.Label]:
+def pill_layout(title: str | Gtk.Widget, detail: str, leading: Gtk.Widget | None = None, trailing: Gtk.Widget | None = None, trailing_radius: float = 0.0) -> tuple[Gtk.Box, Gtk.Label]:
     """The one layout every 64-point settings row uses (inside 12 padding).
 
     A leading 40 icon sits in the padding, concentric with the rounded end;
@@ -670,52 +674,63 @@ class DisplayGlyph(Gtk.DrawingArea):
 # Face rows -----------------------------------------------------------------
 
 
-class RemoveControl(Gtk.Widget):
-    """Trash, then Remove, as one control that grows instead of swapping.
+class FaceActions(Gtk.Widget):
+    """A face row's Edit and Remove, as one control that grows instead of swapping.
 
-    The 40 trash circle widens leftward into the red Remove pill while its
-    right end stays on the row's end cap, then narrows back when the choice
-    lapses, or into a spinner while admin approval is asked. Its layout width
-    is always the pill's, so nothing else in the row moves.
+    At rest it is two 40 circles, 8 apart: a pencil, and the trash on the
+    row's end cap. Trash widens leftward into the red Remove pill over both
+    (its right end never moves) and narrows back when the choice lapses, or
+    into a spinner while admin approval is asked. While a name is edited the
+    pencil becomes Save. The layout width is always the pill's, so nothing
+    else in the row moves.
     """
 
-    def __init__(self, on_ask: Callable[[], None], on_confirm: Callable[[], None]) -> None:
-        super().__init__(accessible_role=Gtk.AccessibleRole.BUTTON)
-        self.set_focusable(True)
-        self.update_property([Gtk.AccessibleProperty.LABEL], ["Remove this face"])
-        self.on_ask, self.on_confirm = on_ask, on_confirm
-        self.mode = "trash"
+    def __init__(self, on_edit: Callable[[], None], on_ask: Callable[[], None], on_confirm: Callable[[], None]) -> None:
+        super().__init__(accessible_role=Gtk.AccessibleRole.GROUP)
+        self.on_edit, self.on_ask, self.on_confirm = on_edit, on_ask, on_confirm
+        # "idle", "confirm" (Remove shown), "busy" (approval pending) or "editing".
+        self.mode = "idle"
+        self.pencil = Gtk.Image.new_from_icon_name("document-edit-symbolic")
+        self.check = Gtk.Image.new_from_icon_name("object-select-symbolic")
         self.trash = Gtk.Image.new_from_icon_name("user-trash-symbolic")
-        self.trash.add_css_class("remove-trash")
         self.text = label("Remove", "remove-label")
         self.spinner = Gtk.Spinner()
-        for child in (self.trash, self.text, self.spinner):
+        for child in (self.pencil, self.check, self.trash, self.text, self.spinner):
             child.set_parent(self)
+        for icon in (self.pencil, self.check, self.trash):
+            icon.add_css_class("row-action")
+        self.trash.add_css_class("destructive")
         text_width = self.text.measure(Gtk.Orientation.HORIZONTAL, -1)[1]
-        self.pill_width = max(AVATAR_SIZE, SPACE_S * math.ceil((text_width + 2 * SPACE_L) / SPACE_S))
-        # open: circle → pill; busy: the spinner; hover and press: feedback.
+        # The pill covers both circles, and fits its word with 16 either side.
+        self.pill_width = max(2 * AVATAR_SIZE + SPACE_S, SPACE_S * math.ceil((text_width + 2 * SPACE_L) / SPACE_S))
         self.open = Spring(0.0)
         self.busy = Spring(0.0)
-        self.hover = Spring(0.0)
+        self.editing = Spring(0.0)
+        self.hover_edit = Spring(0.0)
+        self.hover_trash = Spring(0.0)
         self.press = Spring(1.0)
-        self.hover.configure(0.2, 1.0)
+        for spring in (self.busy, self.editing):
+            spring.configure(0.3, 1.0)
+        for spring in (self.hover_edit, self.hover_trash):
+            spring.configure(0.2, 1.0)
         self.press.configure(0.16, 1.0)
-        self.busy.configure(0.3, 1.0)
+        self.springs = (self.open, self.busy, self.editing, self.hover_edit, self.hover_trash, self.press)
+        self.pressed: str | None = None
         self.last: int | None = None
         self.ticking = False
 
         click = Gtk.GestureClick()
-        click.connect("pressed", lambda _gesture, _n, x, y: self._press(self._hit(x, y)))
-        click.connect("released", lambda _gesture, _n, x, y: self._release(self._hit(x, y)))
-        click.connect("stopped", lambda *_: self._press(False))
+        click.connect("pressed", lambda _gesture, _n, x, y: self._press(self._target(x, y)))
+        click.connect("released", lambda _gesture, _n, x, y: self._release(self._target(x, y)))
+        click.connect("stopped", lambda *_: self._press(None))
         self.add_controller(click)
         motion = Gtk.EventControllerMotion()
-        motion.connect("motion", lambda _motion, x, y: self._set_hover(self._hit(x, y)))
-        motion.connect("leave", lambda *_: self._set_hover(False))
+        motion.connect("motion", lambda _motion, x, y: self._set_hover(self._target(x, y)))
+        motion.connect("leave", lambda *_: self._set_hover(None))
         self.add_controller(motion)
-        keys = Gtk.EventControllerKey()
-        keys.connect("key-pressed", lambda _keys, keyval, *_: keyval in (Gdk.KEY_Return, Gdk.KEY_space, Gdk.KEY_KP_Enter) and self._activate())
-        self.add_controller(keys)
+        self.update_property([Gtk.AccessibleProperty.LABEL], ["Edit or remove this face"])
+
+    # State -------------------------------------------------------------------
 
     def set_mode(self, mode: str) -> None:
         self.mode = mode
@@ -723,41 +738,50 @@ class RemoveControl(Gtk.Widget):
         self.open.configure(*((0.4, 0.9) if mode == "confirm" else (0.3, 1.0)))
         self.open.target = 1.0 if mode == "confirm" else 0.0
         self.busy.target = 1.0 if mode == "busy" else 0.0
+        self.editing.target = 1.0 if mode == "editing" else 0.0
         self.spinner.set_spinning(mode == "busy")
         if reduced_motion():
-            for spring in (self.open, self.busy):
+            for spring in (self.open, self.busy, self.editing):
                 spring.value, spring.velocity = spring.target, 0.0
         self._animate()
 
-    def _width(self) -> float:
-        return mix(AVATAR_SIZE, self.pill_width, clamp(self.open.value))
+    def _circle(self, index: int) -> float:
+        """The centre x of the trash (0) or pencil (1) circle."""
+        return self.get_width() - AVATAR_SIZE / 2 - index * (AVATAR_SIZE + SPACE_S)
 
-    def _hit(self, x: float, y: float) -> bool:
-        return self.mode != "busy" and x >= self.get_width() - self._width() and 0 <= y <= self.get_height()
+    def _target(self, x: float, y: float) -> str | None:
+        if not 0 <= y <= self.get_height() or self.mode == "busy":
+            return None
+        if self.mode == "confirm":
+            return "confirm" if x >= self.get_width() - self._pill() else None
+        if abs(x - self._circle(1)) <= AVATAR_SIZE / 2:
+            return "save" if self.mode == "editing" else "edit"
+        if abs(x - self._circle(0)) <= AVATAR_SIZE / 2 and self.mode == "idle":
+            return "trash"
+        return None
 
     def do_contains(self, x: float, y: float) -> bool:
-        return self._hit(x, y)
+        return self._target(x, y) is not None
 
-    def _press(self, pressed: bool) -> None:
-        self.press.target = 0.97 if pressed and not reduced_motion() else 1.0
+    def _press(self, target: str | None) -> None:
+        self.pressed = target
+        self.press.target = 0.97 if target and not reduced_motion() else 1.0
         self._animate()
 
-    def _release(self, inside: bool) -> None:
-        self._press(False)
-        if inside:
-            self._activate()
+    def _release(self, target: str | None) -> None:
+        pressed = self.pressed
+        self._press(None)
+        if target and target == pressed:
+            {"edit": self.on_edit, "save": self.on_edit, "trash": self.on_ask, "confirm": self.on_confirm}[target]()
 
-    def _set_hover(self, hovered: bool) -> None:
-        self.hover.target = 1.0 if hovered else 0.0
-        (self.trash.add_css_class if hovered else self.trash.remove_css_class)("hover")
+    def _set_hover(self, target: str | None) -> None:
+        self.hover_edit.target = 1.0 if target in ("edit", "save") else 0.0
+        self.hover_trash.target = 1.0 if target == "trash" else 0.0
+        for icon, hovered in ((self.pencil, target == "edit"), (self.check, target == "save"), (self.trash, target == "trash")):
+            (icon.add_css_class if hovered else icon.remove_css_class)("hover")
         self._animate()
 
-    def _activate(self) -> bool:
-        if self.mode == "trash":
-            self.on_ask()
-        elif self.mode == "confirm":
-            self.on_confirm()
-        return True
+    # Motion ------------------------------------------------------------------
 
     def _animate(self) -> None:
         if not self.ticking:
@@ -769,33 +793,38 @@ class RemoveControl(Gtk.Widget):
         frame = clock.get_frame_time()
         elapsed = min((frame - self.last) / 1_000_000, 1 / 30) if self.last else 0.0
         self.last = frame
-        springs = (self.open, self.busy, self.hover, self.press)
-        for spring in springs:
+        for spring in self.springs:
             spring.step(elapsed)
         self.queue_allocate()
         self.queue_draw()
-        if all(abs(spring.value - spring.target) < 0.001 and abs(spring.velocity) < 0.01 for spring in springs):
-            for spring in springs:
+        if all(abs(spring.value - spring.target) < 0.001 and abs(spring.velocity) < 0.01 for spring in self.springs):
+            for spring in self.springs:
                 spring.value, spring.velocity = spring.target, 0.0
             self.ticking = False
             return GLib.SOURCE_REMOVE
         return GLib.SOURCE_CONTINUE
 
+    # Layout and paint ----------------------------------------------------------
+
+    def _pill(self) -> float:
+        return mix(AVATAR_SIZE, self.pill_width, clamp(self.open.value))
+
     def do_measure(self, orientation: Gtk.Orientation, _for_size: int) -> tuple[int, int, int, int]:
         size = self.pill_width if orientation == Gtk.Orientation.HORIZONTAL else AVATAR_SIZE
         return size, size, -1, -1
 
-    def _centre(self, child: Gtk.Widget, x: float, y: float) -> None:
+    @staticmethod
+    def _centre(child: Gtk.Widget, x: float, y: float) -> None:
         width = child.measure(Gtk.Orientation.HORIZONTAL, -1)[1]
         height = child.measure(Gtk.Orientation.VERTICAL, width)[1]
         child.allocate(width, height, -1, Gsk.Transform().translate(Graphene.Point().init(x - width / 2, y - height / 2)))
 
     def do_size_allocate(self, width: int, height: int, _baseline: int) -> None:
-        circle_x = width - AVATAR_SIZE / 2
-        self._centre(self.trash, circle_x, height / 2)
-        self._centre(self.spinner, circle_x, height / 2)
+        middle = height / 2
+        for child, index in ((self.trash, 0), (self.spinner, 0), (self.pencil, 1), (self.check, 1)):
+            self._centre(child, self._circle(index), middle)
         # The word rides with the pill's centre as it opens.
-        self._centre(self.text, width - self._width() / 2, height / 2)
+        self._centre(self.text, width - self._pill() / 2, middle)
 
     def _child(self, snapshot: Gtk.Snapshot, child: Gtk.Widget, opacity: float) -> None:
         if opacity <= 0.002:
@@ -809,51 +838,80 @@ class RemoveControl(Gtk.Widget):
             snapshot.pop()
         snapshot.pop()
 
+    @staticmethod
+    def _fill(snapshot: Gtk.Snapshot, x: float, width: float, height: float, rgba: tuple[float, float, float, float]) -> None:
+        if rgba[3] <= 0.002:
+            return
+        bounds = Graphene.Rect().init(x, 0, width, height)
+        shape = Gsk.RoundedRect()
+        shape.init_from_rect(bounds, height / 2)
+        snapshot.push_rounded_clip(shape)
+        snapshot.append_color(Gdk.RGBA(red=rgba[0], green=rgba[1], blue=rgba[2], alpha=rgba[3]), bounds)
+        snapshot.pop()
+
     def do_snapshot(self, snapshot: Gtk.Snapshot) -> None:
         width, height = self.get_width(), self.get_height()
-        open_amount = clamp(self.open.value)
-        pill = self._width()
-        scale = self.press.value
+        opened, busy, editing = clamp(self.open.value), clamp(self.busy.value), clamp(self.editing.value)
+        pill = self._pill()
+        pressed_x = {"edit": self._circle(1), "save": self._circle(1), "trash": self._circle(0)}.get(self.pressed or "", width - pill / 2)
         snapshot.save()
-        snapshot.translate(Graphene.Point().init(width - pill / 2, height / 2))
-        snapshot.scale(scale, scale)
-        snapshot.translate(Graphene.Point().init(-(width - pill / 2), -height / 2))
-        shape = Gsk.RoundedRect()
-        shape.init_from_rect(Graphene.Rect().init(width - pill, 0, pill, height), height / 2)
-        snapshot.push_rounded_clip(shape)
-        bounds = Graphene.Rect().init(width - pill, 0, pill, height)
-        # A hover fill while it's still the trash; red as it becomes Remove.
-        hover = clamp(self.hover.value) * (1 - open_amount) * (1 - clamp(self.busy.value))
-        if hover > 0.002:
-            snapshot.append_color(Gdk.RGBA(red=0.17, green=0.17, blue=0.18, alpha=hover), bounds)
-        if open_amount > 0.002:
-            snapshot.append_color(Gdk.RGBA(red=1.0, green=0.27, blue=0.23, alpha=open_amount), bounds)
-        snapshot.pop()
-        # The trash leaves first and the word arrives once there is room for it.
-        self._child(snapshot, self.trash, clamp(1 - open_amount / 0.4) * (1 - clamp(self.busy.value)))
-        self._child(snapshot, self.text, clamp((open_amount - 0.45) / 0.55))
-        self._child(snapshot, self.spinner, clamp(self.busy.value))
+        snapshot.translate(Graphene.Point().init(pressed_x, height / 2))
+        snapshot.scale(self.press.value, self.press.value)
+        snapshot.translate(Graphene.Point().init(-pressed_x, -height / 2))
+        rest = (1 - opened) * (1 - busy)
+        # Hover fills while at rest; red as the trash becomes Remove.
+        self._fill(snapshot, self._circle(1) - AVATAR_SIZE / 2, AVATAR_SIZE, height, (0.17, 0.17, 0.18, clamp(self.hover_edit.value) * rest))
+        self._fill(snapshot, self._circle(0) - AVATAR_SIZE / 2, AVATAR_SIZE, height, (0.17, 0.17, 0.18, clamp(self.hover_trash.value) * rest * (1 - editing)))
+        self._fill(snapshot, width - pill, pill, height, (1.0, 0.27, 0.23, opened))
+        # Icons leave first; the word arrives once there is room for it.
+        leaving = clamp(1 - opened / 0.4) * (1 - busy)
+        self._child(snapshot, self.pencil, leaving * (1 - editing))
+        self._child(snapshot, self.check, leaving * editing)
+        self._child(snapshot, self.trash, leaving * (1 - editing))
+        self._child(snapshot, self.text, clamp((opened - 0.45) / 0.55))
+        self._child(snapshot, self.spinner, busy)
         snapshot.restore()
 
 
 class FaceRow(Gtk.Revealer):
-    def __init__(self, face: dict[str, Any], on_remove: Callable[["FaceRow"], None]) -> None:
+    def __init__(self, face: dict[str, Any], on_remove: Callable[["FaceRow"], None], on_rename: Callable[["FaceRow", str, str], None]) -> None:
         super().__init__()
         self.face_id = int(face["id"])
         self.on_remove = on_remove
+        self.on_rename = on_rename
         self.revert: int | None = None
+        self.editing = False
         self.set_transition_type(Gtk.RevealerTransitionType.SLIDE_DOWN)
         self.set_transition_duration(ROW_REVEAL_MS)
 
-        self.remove = RemoveControl(self._ask, self._confirm)
+        # The name and its editor share one slot, same type and height, so
+        # editing changes nothing but the caret.
+        self.name = face.get("label") or "Face"
+        self.title = label(self.name, "row-title", xalign=0)
+        self.title.set_ellipsize(Pango.EllipsizeMode.END)
+        self.title.set_single_line_mode(True)
+        self.editor = Gtk.Text()
+        self.editor.add_css_class("row-title")
+        self.editor.add_css_class("name-editor")
+        self.editor.set_max_length(NAME_CHARS)
+        self.editor.update_property([Gtk.AccessibleProperty.LABEL], ["Face name"])
+        self.editor.connect("activate", lambda *_: self.end_edit(True))
+        keys = Gtk.EventControllerKey()
+        keys.connect("key-pressed", lambda _keys, keyval, *_: keyval == Gdk.KEY_Escape and (self.end_edit(False) or True))
+        self.editor.add_controller(keys)
+        focus = Gtk.EventControllerFocus()
+        focus.connect("leave", lambda *_: self.end_edit(True))
+        self.editor.add_controller(focus)
+        self.name_slot = Gtk.Stack()
+        self.name_slot.set_vhomogeneous(True)
+        self.name_slot.set_hhomogeneous(False)
+        self.name_slot.add_named(self.title, "name")
+        self.name_slot.add_named(self.editor, "editor")
+
+        self.actions = FaceActions(self._toggle_edit, self._ask, self._confirm)
         added = face.get("time") or 0
-        row, _detail = pill_layout(
-            face.get("label") or "Face",
-            time.strftime("Added %b %-d, %Y", time.localtime(added)) if added else "Added with Howdy",
-            Mark(AVATAR_SIZE, animated=False),
-            self.remove,
-            AVATAR_SIZE / 2,
-        )
+        self.added = time.strftime("Added %b %-d, %Y", time.localtime(added)) if added else "Added with Howdy"
+        row, self.detail = pill_layout(self.name_slot, self.added, Mark(AVATAR_SIZE, animated=False), self.actions, AVATAR_SIZE / 2)
         row.add_css_class("face-row")
         self.row = row
         # Rows are spaced by their own bottom margin, so the gap collapses with them.
@@ -863,13 +921,19 @@ class FaceRow(Gtk.Revealer):
         row.set_hexpand(True)
         self.set_child(holder)
 
-    def _ask(self) -> None:
-        self.remove.set_mode("confirm")
-        self.revert = GLib.timeout_add_seconds(CONFIRM_SECONDS, self._settle)
+    # Remove -----------------------------------------------------------------
 
-    def _settle(self) -> bool:
-        self.revert = None
-        self.remove.set_mode("trash")
+    def _ask(self) -> None:
+        self.actions.set_mode("confirm")
+        self.revert = GLib.timeout_add_seconds(CONFIRM_SECONDS, self.dismiss_remove)
+
+    def dismiss_remove(self) -> bool:
+        """Fold Remove back into the trash: it lapsed, or you clicked away."""
+        if self.revert:
+            GLib.source_remove(self.revert)
+            self.revert = None
+        if self.actions.mode == "confirm":
+            self.actions.set_mode("idle")
         return False
 
     def _confirm(self) -> None:
@@ -879,8 +943,48 @@ class FaceRow(Gtk.Revealer):
         self.on_remove(self)
 
     def set_busy(self, busy: bool) -> None:
-        self.remove.set_mode("busy" if busy else "trash")
+        self.actions.set_mode("busy" if busy else "idle")
         self.row.set_sensitive(not busy)
+
+    # Rename -----------------------------------------------------------------
+
+    def _toggle_edit(self) -> None:
+        if self.editing:
+            self.end_edit(True)
+        else:
+            self.begin_edit()
+
+    def begin_edit(self) -> None:
+        if self.editing or self.actions.mode != "idle":
+            return
+        self.editing = True
+        self.editor.set_text(self.name)
+        self.name_slot.set_visible_child_name("editor")
+        self.detail.set_text("Saving asks for admin approval")
+        self.row.add_css_class("editing")
+        self.actions.set_mode("editing")
+        self.editor.grab_focus()
+        self.editor.select_region(0, -1)
+
+    def end_edit(self, save: bool) -> None:
+        """Return (or Save, or clicking away) keeps the name; Escape doesn't."""
+        if not self.editing:
+            return
+        self.editing = False
+        name = " ".join(self.editor.get_text().split())
+        self.name_slot.set_visible_child_name("name")
+        self.detail.set_text(self.added)
+        self.row.remove_css_class("editing")
+        self.actions.set_mode("idle")
+        if save and name and name != self.name:
+            previous = self.name
+            # Shown at once; put back if approval is declined.
+            self.set_name(name)
+            self.on_rename(self, name, previous)
+
+    def set_name(self, name: str) -> None:
+        self.name = name
+        self.title.set_text(name)
 
     def celebrate(self) -> None:
         """A new face arrives lit, then settles to the resting row colour."""
@@ -1238,7 +1342,7 @@ CSS = """
     border-radius: %(row_radius)dpx;
     padding: 0 %(row_padding)dpx;
     /* A rare celebration: the new face's glow lingers, longer than UI motion. */
-    transition: background-color 900ms ease;
+    transition: background-color 900ms ease, box-shadow 180ms ease;
 }
 .face-row.fresh { background-color: rgba(48, 209, 88, 0.22); transition: background-color 160ms %(ease_out)s; }
 .row-title { font-size: 15px; line-height: 20px; font-weight: 600; color: #f5f5f7; }
@@ -1300,8 +1404,12 @@ CSS = """
 .settings-panel button.primary.secondary label { color: #f5f5f7; }
 .settings-panel button.primary.secondary:hover { background-color: #2c2c2e; }
 .settings-panel button.primary.secondary:active { background-color: #3a3a3c; }
-.remove-trash { color: #8e8e93; transition: color 180ms ease; }
-.remove-trash.hover { color: #ff453a; }
+.row-action { color: #8e8e93; transition: color 180ms ease; }
+.row-action.hover { color: #f5f5f7; }
+.row-action.destructive.hover { color: #ff453a; }
+.face-row.editing { box-shadow: inset 0 0 0 1.5px rgba(255, 255, 255, 0.24); }
+.settings-panel text.name-editor { min-height: 20px; padding: 0; margin: 0; background: none; border: none; box-shadow: none; caret-color: #f5f5f7; }
+.settings-panel text.name-editor selection { background-color: rgba(255, 255, 255, 0.24); color: #f5f5f7; }
 .remove-label { font-size: 14px; line-height: 20px; font-weight: 600; color: #ffffff; }
 """ % {
     "title": TITLE_PX, "close": CLOSE_SIZE, "close_radius": CLOSE_SIZE // 2,
@@ -2023,6 +2131,12 @@ class SettingsPanel(Gtk.Overlay):
         keys = Gtk.EventControllerKey()
         keys.connect("key-pressed", self._on_key)
         self.add_controller(keys)
+        # Seen before any widget handles the click, and never claimed.
+        away = Gtk.GestureClick()
+        away.set_button(0)
+        away.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        away.connect("pressed", self._on_press)
+        self.add_controller(away)
         onboarded = self.settings.get("onboarded") and not welcome
         self.flow.go("welcome", animate=False)
         self._show_page("home" if onboarded else "flow", animate=False)
@@ -2266,7 +2380,22 @@ class SettingsPanel(Gtk.Overlay):
         self._show_page("home", direction=0)
         self._render()
 
+    def _on_press(self, _gesture: Gtk.GestureClick, _presses: int, x: float, y: float) -> None:
+        """Clicking anywhere else folds Remove away and finishes a rename."""
+        picked = self.pick(x, y, Gtk.PickFlags.DEFAULT)
+        inside = lambda widget: picked is not None and (picked is widget or picked.is_ancestor(widget))
+        for row in self.rows.values():
+            if row.actions.mode == "confirm" and not inside(row.actions):
+                row.dismiss_remove()
+            if row.editing and not (inside(row.editor) or inside(row.actions)):
+                row.end_edit(True)
+
     def _on_key(self, _controller: Any, keyval: int, _keycode: int, _state: Any) -> bool:
+        confirming = [row for row in self.rows.values() if row.actions.mode == "confirm"]
+        if keyval == Gdk.KEY_Escape and confirming:
+            for row in confirming:
+                row.dismiss_remove()
+            return True
         if keyval == Gdk.KEY_Escape:
             # Back out one level at a time, unless a face is being added:
             # then Escape still stops it by closing, as it always has.
@@ -2431,8 +2560,10 @@ class SettingsPanel(Gtk.Overlay):
         for face in self.faces:
             face_id = int(face["id"])
             if face_id in self.rows:
+                if not self.rows[face_id].editing:
+                    self.rows[face_id].set_name(face.get("label") or "Face")
                 continue
-            row = FaceRow(face, self._remove)
+            row = FaceRow(face, self._remove, self._rename)
             self.rows[face_id] = row
             self.rows_box.append(row)
             # Reveal on the next frame so the row slides in rather than appearing.
@@ -2472,6 +2603,36 @@ class SettingsPanel(Gtk.Overlay):
             self._render()
 
         self.run = HelperRun(["remove", str(row.face_id)], on_event, on_exit)
+        self.run.start()
+        self._render()
+
+    def _rename(self, row: FaceRow, name: str, previous: str) -> None:
+        if self.run:
+            row.set_name(previous)
+            self._say("Wait for the current change to finish.")
+            return
+        self._say("")
+        row.set_busy(True)
+        renamed = False
+        failure = ""
+
+        def on_event(event: dict[str, Any]) -> None:
+            nonlocal renamed, failure
+            if event.get("event") == "faces":
+                renamed = True
+                self._show_faces(event.get("faces") or [])
+            elif event.get("event") == "error":
+                failure = str(event.get("message") or "")
+
+        def on_exit(_status: int) -> None:
+            self.run = None
+            row.set_busy(False)
+            if not renamed:
+                row.set_name(previous)
+                self._say(failure or "Not approved, so the name was kept.")
+            self._render()
+
+        self.run = HelperRun(["rename", str(row.face_id), name], on_event, on_exit)
         self.run.start()
         self._render()
 

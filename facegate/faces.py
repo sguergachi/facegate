@@ -79,6 +79,10 @@ def remove_model(models: list[dict[str, Any]], model_id: int) -> list[dict[str, 
     return [model for index, model in enumerate(models) if int(model.get("id", index)) != model_id]
 
 
+def rename_model(models: list[dict[str, Any]], model_id: int, label: str) -> list[dict[str, Any]]:
+    return [dict(model, label=label) if int(model.get("id", index)) == model_id else model for index, model in enumerate(models)]
+
+
 def clean_label(text: object) -> str:
     return "".join(char for char in str(text or "") if char.isprintable()).strip()[:LABEL_CHARS]
 

@@ -5,6 +5,7 @@ one per line, to stdout:
 
     facegate-faces-list        -> {"event": "faces", ...}          (no prompt)
     facegate-faces remove ID   -> {"event": "faces", ...}          (admin)
+    facegate-faces rename ID L -> {"event": "faces", ...}          (admin)
     facegate-faces enroll      -> frame/hint/progress..., then     (admin)
                                   "added", "cancelled" or "error"
 
@@ -79,6 +80,8 @@ class Helper:
             self.handle({"cmd": "list"})
         elif args[:1] == ["remove"] and len(args) == 2:
             self.handle({"cmd": "remove", "id": args[1]})
+        elif args[:1] == ["rename"] and len(args) == 3:
+            self.handle({"cmd": "rename", "id": args[1], "label": args[2]})
         elif args[:1] == ["enroll"] and len(args) <= 2:
             self.handle({"cmd": "enroll", "label": args[1] if len(args) == 2 else ""})
         else:
@@ -90,14 +93,23 @@ class Helper:
         name = command.get("cmd")
         if name == "list":
             self.send_faces()
-        elif name == "remove":
+        elif name in ("remove", "rename"):
             try:
                 model_id = int(command.get("id"))
             except (TypeError, ValueError):
                 self.send({"event": "error", "message": "No such face."})
                 return
-            faces.save_models(self.path, faces.remove_model(faces.load_models(self.path), model_id))
-            self.send_faces(removed=model_id)
+            models = faces.load_models(self.path)
+            if name == "remove":
+                faces.save_models(self.path, faces.remove_model(models, model_id))
+                self.send_faces(removed=model_id)
+                return
+            label = faces.clean_label(command.get("label"))
+            if not label:
+                self.send({"event": "error", "message": "A face needs a name."})
+                return
+            faces.save_models(self.path, faces.rename_model(models, model_id, label))
+            self.send_faces(renamed=model_id)
         elif name == "enroll":
             self.enroll(command)
 

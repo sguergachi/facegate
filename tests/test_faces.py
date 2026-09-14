@@ -136,6 +136,15 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(self.helper.run(["rm", "-rf", "/"]), 2)
         self.assertEqual(self.events()[-1]["event"], "error")
 
+    def test_rename_keeps_the_face_and_cleans_the_name(self):
+        faces.save_models(self.helper.path, [faces.new_model([], "Face", [[0.5]], 1)])
+        self.assertEqual(self.helper.run(["rename", "0", "  Glasses\n"]), 0)
+        self.assertEqual(self.events()[-1]["faces"][0]["label"], "Glasses")
+        self.assertEqual(faces.load_models(self.helper.path)[0]["data"], [[0.5]])
+        self.helper.handle({"cmd": "rename", "id": 0, "label": "   "})
+        self.assertEqual(self.events()[-1]["event"], "error")
+        self.assertEqual(faces.load_models(self.helper.path)[0]["label"], "Glasses")
+
     def test_remove(self):
         faces.save_models(self.helper.path, [faces.new_model([], "Face", [[0.0]], 1)])
         self.helper.handle({"cmd": "remove", "id": 0})

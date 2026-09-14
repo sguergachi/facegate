@@ -95,8 +95,10 @@ until it is turned on again. Saved faces and preferences are kept.
   rectangle. A trace fills its rim clockwise as samples are captured, while the
   island says what it needs ("Move a little closer"), then closes green.
   Cancel or Escape stops the scan and saves nothing.
+- **Rename** a face with its pencil button: edit the name in place, then press
+  Return. It also asks for admin approval; Escape cancels.
 - **Remove** a face with the trash button, then **Remove** again. It also asks
-  for admin approval.
+  for admin approval. Clicking anywhere else, or Escape, backs out.
 
 Faces are Howdy's own models, so `sudo howdy list` shows them too. Each one
 keeps five encodings taken a moment apart, rather than Howdy's single frame.
