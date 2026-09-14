@@ -110,17 +110,21 @@ def has_face_models(username, howdy_dir=HOWDY_DIR):
 
 
 def password_comes_from_elsewhere(argv):
-    """sudo -S, -A and -n get their password another way, or never ask."""
+    """sudo -S reads the password from stdin, and -n must never ask.
+
+    -A (a graphical askpass helper, as Arch Update and paru use) still gets
+    the island: it replaces that dialog, and Cancel falls back to it.
+    """
     for arg in argv[1:]:
         if arg == "--" or not arg.startswith("-") or arg == "-":
             return False
         if arg.startswith("--"):
             name = arg[2:].split("=", 1)[0]
-            if name in ("stdin", "askpass", "non-interactive"):
+            if name in ("stdin", "non-interactive"):
                 return True
             continue
         for index, flag in enumerate(arg[1:]):
-            if flag in "SAn":
+            if flag in "Sn":
                 return True
             if flag in SUDO_VALUE_OPTIONS:
                 # The rest of this word (or the next word) is the value.

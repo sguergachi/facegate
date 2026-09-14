@@ -46,7 +46,9 @@ sudo / pkexec / KDE admin prompt → FaceGate consent HUD → existing Howdy com
   (**Cancel** / **Allow**). The typed password is handed to PAM as the
   authentication token, and `pam_unix` checks it as usual, so a wrong one reads
   "Incorrect password. Try again." on the next of sudo's tries. Cancel, a
-  missing island, `sudo -S`, `-A` and `-n` keep the terminal prompt. With a
+  missing island, `sudo -S` and `-n` keep their usual prompt; an app's
+  graphical askpass (`sudo -A`, as paru and Arch Update use) is replaced by the
+  island, and Cancel falls back to it. With a
   face enrolled, **Deny** still leaves sudo at its terminal prompt.
 
 SDDM is deliberately untouched. If FaceGate is closed, rejects the request,

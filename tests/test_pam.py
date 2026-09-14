@@ -90,10 +90,11 @@ class FaceModelTests(unittest.TestCase):
             self.assertEqual(pam.do_auth(pamh), FakePam.PAM_AUTHINFO_UNAVAIL)
         self.assertFalse(hasattr(pamh, "authtok"))
 
-    def test_stdin_askpass_and_non_interactive_sudo_never_open_the_island(self):
-        for argv in (["sudo", "-S", "true"], ["sudo", "-kS", "true"], ["sudo", "--stdin", "true"], ["sudo", "-n", "true"], ["sudo", "-A", "true"]):
+    def test_stdin_and_non_interactive_sudo_never_open_the_island(self):
+        for argv in (["sudo", "-S", "true"], ["sudo", "-kS", "true"], ["sudo", "--stdin", "true"], ["sudo", "-n", "true"]):
             self.assertTrue(pam.password_comes_from_elsewhere(argv), argv)
-        for argv in (["sudo", "true"], ["sudo", "-u", "nobody", "true"], ["sudo", "-uS", "true"], ["sudo", "pacman", "-S", "vim"], ["sudo", "--", "-S"]):
+        # A graphical askpass (sudo -A, as paru uses) is replaced by the island.
+        for argv in (["sudo", "-A", "pacman", "-Sy"], ["sudo", "--askpass", "true"], ["sudo", "true"], ["sudo", "-u", "nobody", "true"], ["sudo", "-uS", "true"], ["sudo", "pacman", "-S", "vim"], ["sudo", "--", "-S"]):
             self.assertFalse(pam.password_comes_from_elsewhere(argv), argv)
 
     def test_successful_face_match_clears_password_failures(self):
