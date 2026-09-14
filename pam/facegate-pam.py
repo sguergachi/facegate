@@ -41,9 +41,6 @@ SOCKET_BASENAME = "facegate.sock"
 # Written by FaceGate's main screen; "enabled": false turns FaceGate off.
 SETTINGS_PATH = ".config/facegate/settings.json"
 MAX_SETTINGS_BYTES = 64 * 1024
-CONSENT_TIMEOUT_SECONDS = 12
-# Typing a password takes longer than a glance; sudo's own limit is 5 minutes.
-PASSWORD_TIMEOUT_SECONDS = 120
 # sudo options that take a value, so the word after them is not the command.
 SUDO_VALUE_OPTIONS = frozenset("CDghpRrTtUu")
 
@@ -59,7 +56,12 @@ def log(message):
 
 
 def request_hud(username, phase, payload=None, timeout=2):
-    """Talk to the user's 0600 runtime socket.  Returns None on any failure."""
+    """Talk to the user's 0600 runtime socket.  Returns None on any failure.
+
+    A timeout of None waits for as long as you take to answer, like any
+    prompt. That can't strand sudo: if the island goes away its socket
+    closes and this returns None at once, and Ctrl+C still ends sudo.
+    """
     try:
         user_id = pwd.getpwnam(username).pw_uid
         path = "/run/user/%d/%s" % (user_id, SOCKET_BASENAME)
@@ -67,8 +69,9 @@ def request_hud(username, phase, payload=None, timeout=2):
         if payload:
             message.update(payload)
         client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        client.settimeout(timeout)
+        client.settimeout(2)
         client.connect(path)
+        client.settimeout(timeout)
         client.sendall(json.dumps(message, separators=(",", ":")) + "\n")
         response = client.recv(4096)
         client.close()
@@ -173,8 +176,7 @@ def ask_password_in_island(pamh, username, requester):
     if until:
         # The island counts down, then offers the field once sudo can accept it.
         payload["locked_until"] = until
-    wait = PASSWORD_TIMEOUT_SECONDS + (max(0, until - time.time()) if until > 0 else 0)
-    reply = request_hud(username, "password", payload, timeout=wait)
+    reply = request_hud(username, "password", payload, timeout=None)
     password = reply.get("password") if isinstance(reply, dict) else None
     if not password or not isinstance(password, (type(u""), str)):
         return False
@@ -296,8 +298,8 @@ def do_auth(pamh):
     consent = request_hud(
         username,
         "approval",
-        {"service": service, "timeout_ms": CONSENT_TIMEOUT_SECONDS * 1000, "requester": requester},
-        timeout=CONSENT_TIMEOUT_SECONDS + 2,
+        {"service": service, "requester": requester},
+        timeout=None,
     )
     if not consent or not consent.get("approved"):
         log("Face scan not approved for %s; password fallback" % username)

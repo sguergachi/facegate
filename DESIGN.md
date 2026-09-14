@@ -378,7 +378,9 @@ friendly and sensing, and never a literal or mask-like face.
 - **Destructive actions take two steps** and revert themselves if not confirmed.
 - **Escape always backs out**: it declines an approval, cancels a scan, or
   closes configuration back into the bezel.
-- **The password is always available.** Deny, a timeout, or a failed match
+- **Prompts wait for you.** An approval or password never times out on its
+  own; if the island goes away, sudo falls back to its terminal prompt at once.
+- **The password is always available.** Deny or a failed match
   leads to the password, never to a dead end.
 - **Say who's asking** (the app and host), but treat it as information only;
   it must never affect authentication.

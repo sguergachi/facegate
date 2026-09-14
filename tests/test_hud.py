@@ -236,6 +236,18 @@ class SudoPasswordTests(unittest.TestCase):
         hud.entry.set_text.assert_called_once_with("")
         hud.mark.set_state.assert_called_once_with("denied")
 
+    def test_approval_waits_until_answered(self):
+        self.hud.approval_timeout = None
+        self.hud.present_approval = mock.Mock()
+        self.hud.handle_request({"id": "a", "phase": "approval", "requester": {}}, self.hud_side)
+        self.hud.present_approval.assert_called_once()
+        self.assertIsNone(self.hud.approval_timeout)
+        # Ctrl+C on sudo closes its end: the island goes, rather than waiting forever.
+        self.pam_side.close()
+        self.hud._approval_hung_up()
+        self.assertIsNone(self.hud.pending)
+        self.hud.dismiss.assert_called_once()
+
     def test_turned_off_never_shows_and_lets_pam_use_the_usual_prompt(self):
         self.hud.enabled = False
         self.hud.present_approval = mock.Mock()

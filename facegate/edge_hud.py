@@ -780,6 +780,8 @@ class PendingApproval:
     connection: socket.socket
     request_id: str
     polkit: bool = False
+    # Notices the requester giving up (Ctrl+C on sudo), since approval never times out.
+    watch: int | None = None
 
 
 def run_quietly(command: str) -> None:
@@ -1669,6 +1671,8 @@ class EdgeHud:
         if not self.pending:
             return
         pending, self.pending = self.pending, None
+        if pending.watch:
+            GLib.source_remove(pending.watch)
         if self.approval_timeout:
             GLib.source_remove(self.approval_timeout)
             self.approval_timeout = None
@@ -1871,6 +1875,18 @@ class EdgeHud:
             self.dismiss()
         return False
 
+    def _approval_hung_up(self, *_args: Any) -> bool:
+        pending = self.pending
+        if pending:
+            pending.watch = None
+            self.pending = None
+            if self.approval_timeout:
+                GLib.source_remove(self.approval_timeout)
+                self.approval_timeout = None
+            pending.connection.close()
+            self.dismiss()
+        return False
+
     def _approval_timed_out(self) -> bool:
         self.approval_timeout = None
         self.resolve(False)
@@ -1909,12 +1925,15 @@ class EdgeHud:
                 # The agent knows the real caller; PAM only guessed.
                 requester = active.requester
             self.pending = PendingApproval(connection, str(message.get("id", "")), polkit)
+            self.pending.watch = GLib.io_add_watch(connection.fileno(), GLib.PRIORITY_DEFAULT, GLib.IO_IN | GLib.IO_HUP | GLib.IO_ERR, self._approval_hung_up)
             self.present_approval(requester)
+            # Approval waits for you. Only a client that asks for a limit gets one.
             try:
-                requested = int(message.get("timeout_ms", 12_000))
-            except (TypeError, ValueError):
-                requested = 12_000
-            self.approval_timeout = GLib.timeout_add(max(1_000, min(requested, 30_000)), self._approval_timed_out)
+                requested = int(message["timeout_ms"])
+            except (KeyError, TypeError, ValueError):
+                requested = 0
+            if requested > 0:
+                self.approval_timeout = GLib.timeout_add(max(1_000, requested), self._approval_timed_out)
         elif phase == "scanning":
             self.reply(connection, {"ok": True})
             self.present_scanning()

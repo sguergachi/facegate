@@ -38,7 +38,7 @@ sudo / pkexec / KDE admin prompt → FaceGate consent HUD → existing Howdy com
   is the session's **polkit authentication agent**, replacing KDE's
   "Authentication Required" dialog (the installer stops and masks
   `plasma-polkit-agent.service`; the uninstaller restores it). The island is the
-  only prompt: approve to scan your face; after **Deny**, a timeout, or no face
+  only prompt: approve to scan your face; after **Deny**, or no face
   match it turns into a password field (**Cancel** / **Allow**, three tries).
   If no usable face model exists—including while adding the first one—it skips
   the camera and asks for the typed sudo password immediately.
