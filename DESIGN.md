@@ -290,8 +290,8 @@ something seen often is not a reason. When unsure, delete it.
 - **Direction means something.** Progress runs clockwise from 12 o'clock.
   Forward content enters from the right, and island content settles downward,
   following the island's growth.
-- **Scroll-linked motion is 1:1.** The collapsing header maps the scroll
-  offset straight to its progress, with no easing and no delay.
+- **Scroll picks a state; springs move between states.** The collapsing header
+  never rests part-way, so a slow scroll can't leave it half-collapsed.
 - **Frame-clock driven.** Continuous motion runs on the display's frame clock
   (every refresh at 144/165 Hz), never on fixed timers.
 - **Results get one gesture each:** success is a green close plus a small
@@ -598,12 +598,15 @@ to it without the mark or title changing proportion.
 | Rows | 64 high, radius 32, padding 12, 8 apart; 40 avatar, 40 row button |
 | Bottom bar | 32 fade + 16 clearance + 48 button + 24 margin (button at y 608) |
 
-- **Collapsing header:** as the list scrolls, progress
-  `t = offset / (header height − 96)` drives it 1:1. The mark shrinks
-  144 → 32 and moves 12 to the left of the title. The title scales 28 → 17
-  and rises until the pair is centred as a group on the close button's line
-  (y = 48). The detail rides up with the title and is gone by `t = 0.45`. The
-  header shrinks to a 96 pt bar, and a hairline fades in over the last 15%.
+- **Collapsing header:** only ever full (292) or a bar (96), never in
+  between. Scrolling down collapses it and scrolling back up into the top of
+  the list expands it. Each change runs on a no-bounce spring (0.35/1.0)
+  while the list travels with it: collapsing lands at offset 196 so the rows
+  start 16 below the bar, and expanding returns to offset 0. A list that can't
+  scroll 196 keeps the full header and scrolls beneath it. Everything stays
+  centred: the mark shrinks 144 → 32 to sit 24 from the top, the title scales
+  28 → 17 and tucks directly beneath it, the detail fades out by
+  `t = 0.45`, and a hairline fades in over the last 15%.
   The header's visual layer ignores input so the list scrolls beneath it, and a
   transparent scroll target matching its current height sits on top.
 - **Rows** slide in (260 ms) when they arrive, and a newly added face flashes

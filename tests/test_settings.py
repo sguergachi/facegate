@@ -129,7 +129,7 @@ class GeometryTests(unittest.TestCase):
         """Every length is on the 4-point grid; structure is on the 8-point rhythm."""
         grid = [
             "PAGE_MARGIN", "BUTTON_HEIGHT", "BUTTON_GAP", "PANEL_RADIUS", "CLOSE_SIZE", "CLOSE_INSET", "CONTENT_WIDTH",
-            "HERO_SIZE", "HERO_TOP", "MARK_TO_TITLE", "TITLE_TO_DETAIL", "HERO_BOTTOM", "BAR_HEIGHT", "BAR_MARK", "BAR_GAP",
+            "HERO_SIZE", "HERO_TOP", "MARK_TO_TITLE", "TITLE_TO_DETAIL", "HERO_BOTTOM", "BAR_HEIGHT", "BAR_MARK", "BAR_MARK_TOP",
             "HEADER_FEATHER", "SECTION_TO_ROWS", "BOTTOM_FEATHER", "BUTTON_CLEARANCE", "BOTTOM_BAR",
             "ROW_PADDING", "AVATAR_SIZE", "ROW_HEIGHT", "ROW_RADIUS", "ROW_GAP",
             "FLOW_TOP", "ART_HEIGHT", "ART_TO_TITLE", "TITLE_TO_BODY", "COPY_TO_EXTRA", "LIST_GAP", "ICON_SIZE",

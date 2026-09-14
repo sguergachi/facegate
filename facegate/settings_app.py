@@ -88,10 +88,11 @@ TITLE_TO_DETAIL = SPACE_S
 # With the 16 below the header, the "Faces" heading sits a group gap (24)
 # under the detail.
 HERO_BOTTOM = SPACE_S
-# Collapsed, the bar's content is centred on the close button's line.
+# Collapsed, the header is a 96 bar: the mark shrinks to 32 at the top, the
+# page margin down, and the title sits snug beneath it, the pair centred as one.
 BAR_HEIGHT = 2 * PANEL_RADIUS
 BAR_MARK = 32
-BAR_GAP = SPACE_M
+BAR_MARK_TOP = SPACE_XL
 TITLE_PX = 28
 BAR_TITLE_PX = 17
 HEADER_FEATHER = SPACE_L
@@ -867,7 +868,13 @@ class IslandStory(Gtk.DrawingArea):
 
 
 class CollapsingHeader:
-    """A large mark and title that shrink into a compact bar as content scrolls.
+    """A large mark and title that become a compact bar once content scrolls.
+
+    The header is only ever full or a bar, never in between. Scrolling down
+    collapses it and scrolling back into the top of the list expands it; each
+    change runs on a spring while the list travels with it, so rows arrive
+    exactly below the header. A list too short to reach the bar keeps the
+    full header and scrolls beneath it.
 
     The visual layer never takes input, so the list scrolls beneath it; a
     transparent scroll target the size of the header sits above it.
@@ -902,6 +909,16 @@ class CollapsingHeader:
         self.backdrop.set_size_request(PANEL_WIDTH, self.full + HEADER_FEATHER)
         self.progress = 0.0
         self.height = float(self.full)
+        self.collapsed = False
+        # While the spring runs it owns the scroll offset, travelling from one
+        # rest offset to the other in step with the header.
+        self.spring = Spring(0.0)
+        self.spring.configure(0.35, 1.0)
+        self.steering = False
+        self.writing = False
+        self.journey = (0.0, 0.0, 0.0)
+        self.last_offset = 0.0
+        self.last_frame: int | None = None
 
         # The visual layer ignores input; this forwards scrolling over it.
         self.scroll_target = Gtk.Box()
@@ -910,7 +927,10 @@ class CollapsingHeader:
         scroll.connect("scroll", self._forward_scroll)
         self.scroll_target.add_controller(scroll)
 
-        scroller.get_vadjustment().connect("value-changed", lambda adjustment: self.update(adjustment.get_value()))
+        adjustment = scroller.get_vadjustment()
+        adjustment.connect("value-changed", self._on_scroll)
+        # A list that shrinks (a face removed) may no longer be able to hold the bar.
+        adjustment.connect("changed", self._on_scroll)
         self.update(0.0)
 
     def _forward_scroll(self, controller: Gtk.EventControllerScroll, _dx: float, dy: float) -> bool:
@@ -919,22 +939,67 @@ class CollapsingHeader:
         adjustment.set_value(adjustment.get_value() + step)
         return True
 
-    def update(self, offset: float) -> None:
-        t = clamp(offset / max(1.0, self.full - BAR_HEIGHT))
+    def _on_scroll(self, adjustment: Gtk.Adjustment) -> None:
+        offset = adjustment.get_value()
+        rising, self.last_offset = offset > self.last_offset, offset
+        if self.writing or self.steering:
+            return
+        # The offset at which the full header has become the bar.
+        point = self.full - BAR_HEIGHT
+        reachable = adjustment.get_upper() - adjustment.get_page_size() >= point
+        if not self.collapsed and rising and offset > 0 and reachable:
+            self._switch(True, max(offset, point))
+        elif self.collapsed and (not reachable or (not rising and offset < point)):
+            self._switch(False, 0.0)
+
+    def _switch(self, collapsed: bool, offset: float) -> None:
+        self.collapsed = collapsed
+        self.spring.target = 1.0 if collapsed else 0.0
+        self.journey = (self.scroller.get_vadjustment().get_value(), offset, self.spring.value)
+        if reduced_motion() or not self.visual.get_mapped():
+            self.spring.value, self.spring.velocity = self.spring.target, 0.0
+            self._steer()
+        elif not self.steering:
+            self.steering = True
+            self.last_frame = None
+            self.visual.add_tick_callback(self._tick)
+
+    def _tick(self, _widget: Gtk.Widget, clock: Gdk.FrameClock) -> bool:
+        frame = clock.get_frame_time()
+        elapsed = min((frame - self.last_frame) / 1_000_000, 1 / 30) if self.last_frame else 0.0
+        self.last_frame = frame
+        self.spring.step(elapsed)
+        self._steer()
+        # Frames are only requested while the header is changing.
+        return GLib.SOURCE_CONTINUE if self.steering else GLib.SOURCE_REMOVE
+
+    def _steer(self) -> None:
+        start_offset, end_offset, start_progress = self.journey
+        target = self.spring.target
+        settled = abs(self.spring.value - target) < 0.002 and abs(self.spring.velocity) < 0.01
+        if settled:
+            self.spring.value, self.spring.velocity = target, 0.0
+            self.steering = False
+        span = target - start_progress
+        amount = 1.0 if settled or abs(span) < 1e-6 else clamp((self.spring.value - start_progress) / span)
+        self.writing = True
+        self.scroller.get_vadjustment().set_value(mix(start_offset, end_offset, amount))
+        self.writing = False
+        self.update(self.spring.value)
+
+    def update(self, progress: float) -> None:
+        t = clamp(progress)
         self.progress = t
         width = PANEL_WIDTH
         bar_scale = BAR_TITLE_PX / TITLE_PX
         title_scale = mix(1.0, bar_scale, t)
         full_title_y = self.title_top + self.title_height / 2
-        title_y = mix(full_title_y, BAR_HEIGHT / 2, t)
-        group = BAR_MARK + BAR_GAP + self.title_width * bar_scale
-        bar_mark_x = width / 2 - group / 2 + BAR_MARK / 2
+        # Everything stays centred; only size and height change.
+        title_y = mix(full_title_y, BAR_MARK_TOP + BAR_MARK + self.title_height * bar_scale / 2, t)
         mark_size = mix(HERO_SIZE, BAR_MARK, t)
-        mark_x = mix(width / 2, bar_mark_x, t)
-        mark_y = mix(HERO_TOP + HERO_SIZE / 2, BAR_HEIGHT / 2, t)
-        self._place(self.mark, mark_x - mark_size / 2, mark_y - mark_size / 2, mark_size / HERO_SIZE)
-        title_x = mix(width / 2, bar_mark_x + BAR_MARK / 2 + BAR_GAP + self.title_width * bar_scale / 2, t)
-        self._place(self.title, title_x - self.title_width * title_scale / 2, title_y - self.title_height * title_scale / 2, title_scale)
+        mark_y = mix(HERO_TOP + HERO_SIZE / 2, BAR_MARK_TOP + BAR_MARK / 2, t)
+        self._place(self.mark, (width - mark_size) / 2, mark_y - mark_size / 2, mark_size / HERO_SIZE)
+        self._place(self.title, (width - self.title_width * title_scale) / 2, title_y - self.title_height * title_scale / 2, title_scale)
 
         # The detail rides up with the title and is gone before it reaches the bar.
         self._place(self.detail, PAGE_MARGIN, self.detail_top - (full_title_y - title_y), 1.0)
