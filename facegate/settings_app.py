@@ -96,6 +96,8 @@ BAR_MARK_TOP = SPACE_XL
 TITLE_PX = 28
 BAR_TITLE_PX = 17
 HEADER_FEATHER = SPACE_L
+# How far a scroll must travel one way before the header changes state.
+SCROLL_INTENT = SPACE_XL
 SECTION_TO_ROWS = SPACE_S
 # Content fades out over the feather, then clears the button by the gap.
 BOTTOM_FEATHER = SPACE_XXL
@@ -917,7 +919,8 @@ class CollapsingHeader:
         self.steering = False
         self.writing = False
         self.journey = (0.0, 0.0, 0.0)
-        self.last_offset = 0.0
+        self.last_offset = self.anchor = 0.0
+        self.direction = 0
         self.last_frame: int | None = None
 
         # The visual layer ignores input; this forwards scrolling over it.
@@ -941,16 +944,26 @@ class CollapsingHeader:
 
     def _on_scroll(self, adjustment: Gtk.Adjustment) -> None:
         offset = adjustment.get_value()
-        rising, self.last_offset = offset > self.last_offset, offset
         if self.writing or self.steering:
+            # The header's own travel is not a gesture; intent starts afresh after it.
+            self.last_offset = self.anchor = offset
+            self.direction = 0
             return
-        # The offset at which the full header has become the bar.
+        direction = (offset > self.last_offset) - (offset < self.last_offset)
+        if direction and direction != self.direction:
+            # A new gesture is measured from where it turned.
+            self.direction, self.anchor = direction, self.last_offset
+        self.last_offset = offset
+        travel = offset - self.anchor
+        # Collapsing hides 196 of header, so the list moves by exactly that
+        # from where the gesture began: the rows in view stay in view.
         point = self.full - BAR_HEIGHT
-        reachable = adjustment.get_upper() - adjustment.get_page_size() >= point
-        if not self.collapsed and rising and offset > 0 and reachable:
-            self._switch(True, max(offset, point))
-        elif self.collapsed and (not reachable or (not rising and offset < point)):
-            self._switch(False, 0.0)
+        limit = adjustment.get_upper() - adjustment.get_page_size()
+        reachable = limit >= point
+        if not self.collapsed and reachable and travel >= SCROLL_INTENT:
+            self._switch(True, min(limit, self.anchor + point))
+        elif self.collapsed and (not reachable or travel <= -SCROLL_INTENT):
+            self._switch(False, max(0.0, self.anchor - point))
 
     def _switch(self, collapsed: bool, offset: float) -> None:
         self.collapsed = collapsed

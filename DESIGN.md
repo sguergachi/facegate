@@ -599,11 +599,12 @@ to it without the mark or title changing proportion.
 | Bottom bar | 32 fade + 16 clearance + 48 button + 24 margin (button at y 608) |
 
 - **Collapsing header:** only ever full (292) or a bar (96), never in
-  between. Scrolling down collapses it and scrolling back up into the top of
-  the list expands it. Each change runs on a no-bounce spring (0.35/1.0)
-  while the list travels with it: collapsing lands at offset 196 so the rows
-  start 16 below the bar, and expanding returns to offset 0. A list that can't
-  scroll 196 keeps the full header and scrolls beneath it. Everything stays
+  between. A scroll's intent decides: 24 of travel down collapses it and 24
+  up expands it, anywhere in the list. Each change runs on a no-bounce spring
+  (0.35/1.0) while the list moves by the header's 196 difference, measured
+  from where the gesture began, so the rows in view stay in view (from the
+  top, that lands the first row 16 below the bar). A list that can't scroll
+  196 keeps the full header and scrolls beneath it. Everything stays
   centred: the mark shrinks 144 → 32 to sit 24 from the top, the title scales
   28 → 17 and tucks directly beneath it, the detail fades out by
   `t = 0.45`, and a hairline fades in over the last 15%.
