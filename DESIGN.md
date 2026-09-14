@@ -531,39 +531,41 @@ title. The island narrows from its configuration width to the compact 344
 width and hugs the enrollment content.
 
 - **Preview:** the camera crop follows the face (eased; the face is about half
-  the height, eyes a little above center). It's drawn as starlight, after
-  Apple Watch pairing: about 2,900 stars scattered through a field (5 apart,
-  jittered), each a sharp core up to 1 pt whose size follows the brightness
-  of the face beneath it in real time (60 ms), bloomed by a tight 1.6 and a
-  wide 5 pt glow. Each frame is stretched between its 4th and 97th brightness
-  percentiles, the dimmest 18% (noise, background) lights nothing, and a 2.2
-  curve keeps eyes, nose and mouth readable. Every star twinkles on its own
-  phase and rate (0.6–1.8 Hz, down to 65%). Cores are cool `#d6f0ff`, glows
-  lean cyan; a rounded rectangle (radius 30) whose last 36 pt feather to
-  nothing dissolves the field into the black island. Each captured sample
-  brightens the stars briefly.
-- **Materialize and vanish:** with the first frame the field comes alive over
-  0.9 s, each star appearing at its own random moment and swelling into
-  place, so the face sparkles into being. 0.45 s after a result the stars,
-  already in the result's colour, wink out in random order over 0.7 s.
+  the height, eyes a little above center; it follows at a 12/s rate, and a
+  missed detection keeps the last face for 0.8 s so the crop never jumps).
+  It's drawn as starlight, after Apple Watch pairing:
+  - **The cloud:** the moment the preview appears, about 2,900 stars sparkle
+    in (0.6 s, each at its own random moment) as a slowly drifting oval cloud,
+    every star wandering on its own slow waves. It waits there for a face.
+  - **Gathering:** frames say whether the camera found a face. When it does,
+    every star springs (stiffness about 60, varied per star so they arrive as
+    a swarm) to its own spot on a jittered 5 pt field and takes that spot's
+    brightness: bright spots form the face while the rest fade on the way.
+    Losing the face sends them back into the cloud.
+  - **Light:** each frame is stretched between its 4th and 97th brightness
+    percentiles, the dimmest 18% lights nothing, and a 2.2 curve keeps eyes,
+    nose and mouth readable. Stars twinkle on their own phase and rate. Points
+    are cool `#d6f0ff`, bloomed by a tight 1.2 and a wide 4 pt glow leaning
+    cyan, and fade out through the rounded rectangle's last 36 pt.
+  - **Done:** 0.45 s after a result the stars, already in its colour, wink
+    out in random order over 0.7 s.
 - **Fluidity:** the preview runs at the camera's own rate. In the root
   helper a camera thread reads every frame (OpenCV's buffer held to one, so
-  nothing queues) and sends a cropped preview of each lit one at once, while
+  nothing queues) and sends a cropped preview of each lit one at once, with
+  whether a face is in view, while
   an analysis thread takes the newest frame whenever it is free to find the
   face, which the crop follows, and collect samples; detection and
   recognition never hold the preview up, and only the newest preview is
-  sent. IR emitters often light only every other frame, so unlit frames are
-  skipped.
+  sent. IR emitters often light only every other frame (the BRIO: 30 fps,
+  so 15 lit), and unlit frames hold no picture, so they're skipped; the stars
+  move on springs every display frame, so motion stays as smooth as the
+  display between camera frames.
 - **Rendering:** the preview is recorded entirely as GSK render nodes, which
-  GTK's Vulkan renderer draws on the GPU; there is no GL and no CPU
-  rasterising. Each display frame, NumPy writes one core radius and a lit
-  flag per star into two tiny textures (even and odd rows), drawn
-  nearest-neighbour so each fills its star's cell. A repeated, jittered tile
-  holds the distance to each cell's star; a screen blend and a colour matrix
-  turn radius minus distance into each core's anti-aliased edge in device
-  pixels, two GPU blurs of the cores are the glow, a mask feathers the
-  rounded rectangle, and the progress trace is a path stroke. Python's share
-  is under a millisecond per frame.
+  GTK's Vulkan renderer draws on the GPU; there is no GL and no drawing code
+  on the CPU. Each display frame NumPy integrates the stars' springs and
+  splats them as points (bilinear, one pass) into a single A8 texture at the
+  display's pixel density; mask nodes tint it, two GPU blurs bloom it, and the
+  progress trace is a path stroke. Python's share is under 2 ms at 2x.
 - **Progress:** a trace on the preview's rim, clockwise from top center. A
   short comet circles until the first sample. Each of the five samples springs
   the trace forward with a brief glow. Success closes it green and turns the

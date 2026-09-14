@@ -431,16 +431,23 @@ IR_TINT = (0.84, 0.94, 1.0)
 # within and makes a face look like a ghost. Instead, starlight: particles
 # that form the face (see starlight.py), drawn as render nodes on the GPU.
 STAR_STYLE = {
+    # Stars have spots 5 apart across the frame; in the face each takes its
+    # spot's brightness, points splatted at `core` intensity, bloomed by a
+    # tight glow and a wide one.
     "pitch": 5.0,
-    # A star's core grows to `core` points (distances are encoded up to
-    # `reach`); its light blooms through two blurs, a tight glow and a wide one.
-    "core": 1.0,
-    "reach": 3.0,
-    "glow": 1.6,
+    "core": 2.4,
+    "glow": 1.2,
     "glow_alpha": 1.0,
-    "bloom": 5.0,
-    "bloom_alpha": 0.8,
+    "bloom": 4.0,
+    "bloom_alpha": 0.7,
     "twinkle": 0.35,
+    # Before a face, the cloud: an oval this big, each star wandering this far.
+    "cloud_width": 150.0,
+    "cloud_height": 170.0,
+    "wander": 9.0,
+    # Spring stiffness (per second squared) toward the face or the cloud.
+    "stiffness": 60.0,
+    "gather_seconds": 0.25,
     # Brightness is stretched between these percentiles of each frame, then
     # shaped: the dimmest fifth (noise, background) lights nothing, and a steep
     # curve keeps eyes, nose and mouth from washing into one bright mass.
@@ -448,8 +455,8 @@ STAR_STYLE = {
     "high_share": 0.97,
     "floor": 0.18,
     "gamma": 2.2,
-    "follow_seconds": 0.06,
-    "appear_seconds": 0.9,
+    "follow_seconds": 0.05,
+    "appear_seconds": 0.6,
     "vanish_seconds": 0.7,
     "corner": PREVIEW_RADIUS,
     "feather": PREVIEW_FEATHER,
@@ -537,8 +544,9 @@ class PreviewArea(Gtk.Widget):
         self.model = PreviewModel()
         self.progress = Spring(0.0)
         self.progress.configure(0.45, 0.9)
-        # Written by the socket thread or the panel, picked up on the frame clock.
-        self.latest: bytes | None = None
+        # Written by the socket thread or the panel, picked up on the frame clock:
+        # the newest frame, and whether the camera found a face in it.
+        self.latest: tuple[bytes, bool] | None = None
         self.stars = Starlight(PREVIEW_WIDTH, PREVIEW_HEIGHT, STAR_STYLE)
         self.look = Look()
         self.rim = rim_path(TRACE_INSET, TRACE_INSET, PREVIEW_WIDTH - 2 * TRACE_INSET, PREVIEW_HEIGHT - 2 * TRACE_INSET, PREVIEW_RADIUS - TRACE_INSET)
@@ -551,7 +559,8 @@ class PreviewArea(Gtk.Widget):
             pixels = base64.b64decode(message["frame"])
             if (width, height) != (PREVIEW_WIDTH, PREVIEW_HEIGHT) or len(pixels) != width * height:
                 return
-            self.latest = pixels
+            # Older helpers don't say; their frames always show the face.
+            self.latest = (pixels, message.get("face") is not False)
         except (KeyError, TypeError, ValueError):
             pass
 
@@ -579,7 +588,7 @@ class PreviewArea(Gtk.Widget):
         model = self.model
         latest, self.latest = self.latest, None
         if latest is not None:
-            self.stars.submit(latest)
+            self.stars.submit(*latest)
         model.elapsed += elapsed
         model.state_elapsed += elapsed
         self.progress.step(elapsed)

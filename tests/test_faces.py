@@ -6,6 +6,7 @@ import tempfile
 import unittest
 
 import cairo
+import numpy
 
 from facegate import faces, faces_helper
 from facegate.edge_hud import PREVIEW_FEATHER, STAR_STYLE, HudServer, PreviewModel, preview_look
@@ -109,9 +110,15 @@ class ThreadedScanTests(unittest.TestCase):
         scanner.read_frame = read_frame
         started = clock.monotonic()
         frames = 0
+        faces_seen = []
         for event in scanner.scan(PREVIEW_WIDTH, PREVIEW_HEIGHT, lambda: clock.monotonic() - started > 1.0):
-            frames += event["event"] == "frame"
+            if event["event"] == "frame":
+                frames += 1
+                faces_seen.append(event["face"])
         self.assertGreaterEqual(frames, 24)
+        # Frames say when the face is found, so the stars know when to gather.
+        self.assertFalse(faces_seen[0])
+        self.assertTrue(faces_seen[-1])
         self.assertLessEqual(len(detections), 10)
         self.assertNotIn(threading.get_ident(), detections)
 
@@ -205,73 +212,75 @@ class PreviewTests(unittest.TestCase):
         self.starlight = starlight
         self.frame = bytes(range(256)) * (PREVIEW_WIDTH * PREVIEW_HEIGHT // 256) + bytes(PREVIEW_WIDTH * PREVIEW_HEIGHT % 256)
 
-    def test_feather_is_opaque_inside_and_clear_at_the_rim(self):
-        alpha = self.starlight.feather_alpha(PREVIEW_WIDTH, PREVIEW_HEIGHT, 30, PREVIEW_FEATHER)
-        texels = self.starlight.FEATHER_TEXELS
-        middle = alpha.shape[0] // 2
-        self.assertEqual(alpha[middle, alpha.shape[1] // 2], 255)
-        self.assertEqual(alpha[0, 0], 0)
-        self.assertEqual(alpha[middle, 0], 0)
-        self.assertLess(alpha[middle, PREVIEW_FEATHER * texels // 2], 255)
+    def run_for(self, stars, seconds):
+        for _ in range(round(seconds * 60)):
+            stars.advance(1 / 60)
 
-    def test_stars_fill_the_field_and_one_tile_repeats_it(self):
-        grid = self.starlight.star_grid(PREVIEW_WIDTH, PREVIEW_HEIGHT, STAR_STYLE["pitch"])
-        cells = self.starlight.star_cells(grid)
-        self.assertGreater(len(cells), 2000)
-        xs = [self.starlight.cell_centre(grid, row, column)[0] for row, column in cells]
-        self.assertTrue(all(0 < x < PREVIEW_WIDTH for x in xs))
-        # Odd rows sit exactly half a pitch across, so the jittered tile repeats the grid.
-        self.assertAlmostEqual(grid["left_odd"] - grid["left_even"], grid["pitch"] / 2)
+    def test_feather_is_clear_at_the_rim_and_full_inside(self):
+        points = numpy.array([[PREVIEW_WIDTH / 2, PREVIEW_HEIGHT / 2], [0, 0], [0, PREVIEW_HEIGHT / 2]], numpy.float32)
+        visible = self.starlight.feather(points, PREVIEW_WIDTH, PREVIEW_HEIGHT, 30, PREVIEW_FEATHER)
+        self.assertEqual(visible[0], 1)
+        self.assertEqual(visible[1], 0)
+        self.assertEqual(visible[2], 0)
 
-    def test_every_star_is_near_its_cell_centre_in_the_distance_tile(self):
-        grid = self.starlight.star_grid(PREVIEW_WIDTH, PREVIEW_HEIGHT, STAR_STYLE["pitch"])
-        jitter = self.starlight.jitter_pattern(grid["pitch"], grid["row_height"])
-        tile = self.starlight.distance_tile(grid["pitch"], grid["row_height"], STAR_STYLE["reach"], jitter)
-        texels = self.starlight.TILE_TEXELS
-        # The star of the first even cell, found where its jitter puts it.
-        x = grid["pitch"] / 2 + jitter[0, 0, 0]
-        y = grid["row_height"] / 2 + jitter[0, 0, 1]
-        self.assertLess(tile[int(y * texels), int(x * texels)], 10)
-        # Cores stay inside their cells, however they're scattered; the glow is a blur.
-        self.assertLess(abs(jitter[..., 1]).max() + STAR_STYLE["core"], grid["row_height"] / 2)
-        self.assertLess(abs(jitter[..., 0]).max() + STAR_STYLE["core"], grid["pitch"] / 2)
+    def test_spots_fill_the_frame(self):
+        spots = self.starlight.star_spots(PREVIEW_WIDTH, PREVIEW_HEIGHT, STAR_STYLE["pitch"])
+        self.assertGreater(len(spots), 2000)
+        self.assertTrue(((spots[:, 0] > 0) & (spots[:, 0] < PREVIEW_WIDTH) & (spots[:, 1] > 0) & (spots[:, 1] < PREVIEW_HEIGHT)).all())
 
-    def test_brighter_pixels_make_bigger_stars_whatever_the_exposure(self):
+    def test_the_cloud_shows_at_once_and_drifts_while_waiting_for_a_face(self):
+        stars = self.starlight.Starlight(PREVIEW_WIDTH, PREVIEW_HEIGHT, STAR_STYLE)
+        self.run_for(stars, 1.0)
+        # No camera frame yet, and the cloud is already alive.
+        self.assertEqual(stars.presence, 1.0)
+        self.assertGreater(stars.light.sum(), 100)
+        before = stars.position.copy()
+        self.run_for(stars, 0.5)
+        moved = numpy.hypot(*(stars.position - before).T)
+        self.assertGreater(moved.mean(), 0.5)
+        self.assertLess(moved.mean(), 20)
+
+    def test_stars_gather_into_the_face_then_return_to_the_cloud(self):
+        stars = self.starlight.Starlight(PREVIEW_WIDTH, PREVIEW_HEIGHT, STAR_STYLE)
+        self.run_for(stars, 0.5)
+        stars.submit(self.frame, face=True)
+        self.run_for(stars, 1.5)
+        self.assertGreater(stars.gathered, 0.95)
+        self.assertLess(numpy.hypot(*(stars.position - stars.spots).T).mean(), 1.0)
+        stars.submit(self.frame, face=False)
+        self.run_for(stars, 1.5)
+        self.assertLess(stars.gathered, 0.05)
+        # Within a spring's trailing distance of the still-drifting cloud.
+        self.assertLess(numpy.hypot(*(stars.position - stars._cloud()).T).mean(), 5.0)
+
+    def test_brighter_pixels_make_brighter_stars_whatever_the_exposure(self):
         stars = self.starlight.Starlight(PREVIEW_WIDTH, PREVIEW_HEIGHT, STAR_STYLE)
         pixels = bytes(20 if x < PREVIEW_WIDTH // 2 else 60 for _y in range(PREVIEW_HEIGHT) for x in range(PREVIEW_WIDTH))
         brightness = stars.brightness(pixels)
-        rows, columns, _parity = stars.slots
-        xs = [self.starlight.cell_centre(stars.grid, row, column)[0] for row, column in zip(rows, columns)]
-        left = [value for x, value in zip(xs, brightness) if x < PREVIEW_WIDTH / 2 - 8]
-        right = [value for x, value in zip(xs, brightness) if x > PREVIEW_WIDTH / 2 + 8]
-        self.assertEqual(max(left), 0)
-        self.assertGreater(min(right), 0.95)
+        xs = stars.spots[:, 0]
+        self.assertEqual(brightness[xs < PREVIEW_WIDTH / 2 - 8].max(), 0)
+        self.assertGreater(brightness[xs > PREVIEW_WIDTH / 2 + 8].min(), 0.95)
         with self.assertRaises(ValueError):
             stars.submit(b"\x00" * 10)
 
-    def test_stars_materialize_then_wink_out(self):
+    def test_stars_wink_out_when_done(self):
         stars = self.starlight.Starlight(PREVIEW_WIDTH, PREVIEW_HEIGHT, STAR_STYLE)
-        self.assertFalse(stars.visible)
         stars.submit(self.frame)
-        stars.advance(0.1)
-        early = stars.presence
-        for _ in range(60):
-            stars.advance(1 / 30)
-        self.assertLess(early, 0.2)
-        self.assertEqual(stars.presence, 1.0)
+        self.run_for(stars, 1.0)
         stars.fade_out()
-        for _ in range(60):
-            stars.advance(1 / 30)
+        self.run_for(stars, 1.0)
         self.assertEqual(stars.presence, 0.0)
         self.assertFalse(stars.visible)
+        self.assertEqual(stars.light.max(), 0)
 
-    def test_stars_become_render_nodes_in_every_state(self):
+    def test_stars_splat_at_display_density_and_become_render_nodes(self):
         from gi.repository import Gtk
 
         stars = self.starlight.Starlight(PREVIEW_WIDTH, PREVIEW_HEIGHT, STAR_STYLE)
-        self.assertIsNone(stars.stars(1.0, self.starlight.Look()))
         stars.submit(self.frame)
-        stars.advance(0.5)
+        self.run_for(stars, 0.5)
+        texture = stars.splat(2.0)
+        self.assertEqual((texture.get_width(), texture.get_height()), (PREVIEW_WIDTH * 2, PREVIEW_HEIGHT * 2))
         for state in ("scanning", "success", "failure"):
             look = self.starlight.Look()
             look.tint, look.glow, look.shake = preview_look(PreviewModel(state=state, result=0.5, pulse=0.5, state_elapsed=0.1))

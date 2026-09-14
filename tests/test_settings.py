@@ -119,10 +119,12 @@ class PreviewFrameTests(unittest.TestCase):
         preview = SimpleNamespace(latest=None)
         pixels = bytes(range(256)) * (312 * 208 // 256) + bytes(312 * 208 % 256)
         edge_hud.PreviewArea.take_frame(preview, {"frame": base64.b64encode(pixels).decode(), "w": 312, "h": 208})
-        self.assertEqual(preview.latest, pixels)
+        self.assertEqual(preview.latest, (pixels, True))
         edge_hud.PreviewArea.take_frame(preview, {"frame": "AAAA", "w": 10, "h": 10})
         edge_hud.PreviewArea.take_frame(preview, {"frame": "AAAA", "w": 312, "h": 208})
-        self.assertEqual(preview.latest, pixels)
+        self.assertEqual(preview.latest, (pixels, True))
+        edge_hud.PreviewArea.take_frame(preview, {"frame": base64.b64encode(pixels).decode(), "w": 312, "h": 208, "face": False})
+        self.assertEqual(preview.latest, (pixels, False))
 
 
 class GeometryTests(unittest.TestCase):

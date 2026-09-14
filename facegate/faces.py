@@ -36,7 +36,7 @@ UNLIT_GRACE = 0.6
 
 # The preview keeps the face at about half its height, eyes a little above center.
 FACE_FILL = 0.5
-FOLLOW_RATE = 7.0
+FOLLOW_RATE = 12.0
 
 
 # Models ----------------------------------------------------------------------
@@ -345,7 +345,7 @@ class _Scan:
             self.follow.step(crop_target(frame_width, frame_height, face_box, self.aspect), elapsed)
             x, y, crop_width, crop_height = crop_rect(self.follow.center_x, self.follow.center_y, self.follow.height, frame_width, frame_height, self.aspect)
             preview = cv2.resize(gray[y:y + crop_height, x:x + crop_width], (self.width, self.height), interpolation=cv2.INTER_AREA)
-            event = {"event": "frame", "w": self.width, "h": self.height, "data": base64.b64encode(preview.tobytes()).decode("ascii")}
+            event = {"event": "frame", "w": self.width, "h": self.height, "face": face_box is not None, "data": base64.b64encode(preview.tobytes()).decode("ascii")}
             with self.changed:
                 self.preview = event
                 self.changed.notify_all()
@@ -381,7 +381,8 @@ class _Scan:
             rect = faces[0]
             self.face_box = (rect.left() / scale, rect.top() / scale, rect.right() / scale, rect.bottom() / scale)
             state.last_face = now
-        else:
+        elif now - state.last_face > NO_FACE_GRACE:
+            # A missed detection or two keeps the last face, so the crop doesn't jump.
             self.face_box = None
         if len(faces) > 1:
             state.trouble = "many"

@@ -92,7 +92,8 @@ until it is turned on again. Saved faces and preferences are kept.
 
 - **Add a Face** reshapes the same island into admin approval. Once approved,
   that same surface transitions directly into a live, face-following preview, drawn from the IR
-  camera as starlight, particles that form your face, rather than the ghostly
+  camera as starlight: a drifting cloud of particles that gathers into your
+  face when the camera finds it, rather than the ghostly
   raw IR image,
   feathered into its rounded
   rectangle. A trace fills its rim clockwise as samples are captured, while the

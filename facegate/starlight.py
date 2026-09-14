@@ -1,24 +1,20 @@
-"""The enrollment preview as starlight: particles that form the face.
+"""The enrollment preview as starlight: particles that gather into your face.
 
 Like the particle cloud of Apple Watch pairing, the camera is never shown as a
-picture. Thousands of tiny stars sit in a jittered field; each one's size and
-brightness follow the face beneath it in real time, every star twinkles on its
-own phase, and they sparkle into being as the scan starts and wink out again,
-in random order, when it ends.
+picture. As soon as the preview opens, thousands of tiny stars drift in a slow,
+wandering cloud. When the camera finds a face, each star flies to its own spot
+and takes that spot's brightness, so the bright ones form the face and the
+rest dim away; they keep following the face as it moves, and fall back into
+the cloud if it's lost. When the scan ends they take the result's colour and
+wink out, in random order.
 
-The stars are never drawn in Python. Each display frame NumPy writes one value
-per star into two tiny textures (even and odd rows of the field), and the rest
-is render nodes that GTK's renderer runs on the GPU (Vulkan, for FaceGate's
-island):
+The camera gives a lit frame about every 70 ms, but the stars move on springs
+every display frame, so motion is as smooth as the display.
 
-- The textures are drawn nearest-neighbour, so each texel fills its star's
-  cell: red holds the core's radius and blue marks that a star is lit.
-- A tile holding the distance to each cell's star, jittered and periodic,
-  repeats across the preview in green.
-- A screen blend stacks those channels, and a colour matrix turns them into
-  each star's sharp core (radius minus distance, in device pixels). A GPU
-  blur of the cores is their glow, free to spread past each cell, and a
-  mask feathers the edges.
+Nothing is rasterised by Python drawing code: NumPy integrates the stars and
+splats them as points into one small texture at the display's own pixel
+density, and render nodes (drawn on the GPU by GTK's renderer, Vulkan for the
+island) tint that texture and bloom it through two blurs.
 """
 
 from __future__ import annotations
@@ -35,92 +31,41 @@ gi.require_version("Gtk", "4.0")
 import numpy  # noqa: E402
 from gi.repository import Gdk, GLib, Graphene, Gsk, Gtk  # noqa: E402
 
-# The distance tile and the feather are drawn this many texels per point.
-TILE_TEXELS = 12
-FEATHER_TEXELS = 2
-# The jitter repeats every this many cells each way (even, to keep row parity).
-JITTER_PERIOD = 8
-
 
 def rect(x: float, y: float, width: float, height: float) -> Graphene.Rect:
     return Graphene.Rect().init(x, y, width, height)
 
 
-def star_grid(width: int, height: int, pitch: float) -> dict[str, float]:
-    """Cells on a hexagonal lattice centred in the frame: every other row shifts half a pitch."""
+def star_spots(width: int, height: int, pitch: float, seed: int = 7) -> numpy.ndarray:
+    """Each star's place in the face: a jittered hexagonal field over the frame."""
     row_height = pitch * math.sqrt(3) / 2
     rows = int((height - pitch) // row_height) + 1
-    columns = [int((width - pitch - (pitch / 2 if parity else 0)) // pitch) + 1 for parity in (0, 1)]
-    lefts = [(width - (count - 1) * pitch) / 2 for count in columns]
-    return {
-        "pitch": pitch, "row_height": row_height, "top": (height - (rows - 1) * row_height) / 2, "rows": rows,
-        "left_even": lefts[0], "left_odd": lefts[1], "columns_even": columns[0], "columns_odd": columns[1],
-    }
-
-
-def star_cells(grid: dict[str, float]) -> list[tuple[int, int]]:
-    """Every cell as (row, column), row by row."""
-    return [(row, column) for row in range(grid["rows"]) for column in range(grid["columns_odd" if row % 2 else "columns_even"])]
-
-
-def cell_centre(grid: dict[str, float], row: int, column: int) -> tuple[float, float]:
-    return grid["left_odd" if row % 2 else "left_even"] + column * grid["pitch"], grid["top"] + row * grid["row_height"]
-
-
-def jitter_pattern(pitch: float, row_height: float, seed: int = 7) -> numpy.ndarray:
-    """A periodic (JITTER_PERIOD x JITTER_PERIOD x 2) offset for each star, kept inside its cell."""
+    top = (height - (rows - 1) * row_height) / 2
+    spots = []
+    for row in range(rows):
+        shift = pitch / 2 if row % 2 else 0.0
+        columns = int((width - pitch - shift) // pitch) + 1
+        left = (width - (columns - 1) * pitch) / 2
+        spots.extend((left + column * pitch, top + row * row_height) for column in range(columns))
     random = numpy.random.default_rng(seed)
-    offsets = random.uniform(-1, 1, (JITTER_PERIOD, JITTER_PERIOD, 2))
-    # Enough to scatter the lattice into a field, little enough that a core
-    # stays inside its cell (the glow is a blur, and may spread past it).
-    offsets[..., 0] *= 0.26 * pitch
-    offsets[..., 1] *= 0.22 * row_height
-    return offsets
+    spots = numpy.array(spots, numpy.float32)
+    spots[:, 0] += random.uniform(-0.3, 0.3, len(spots)) * pitch
+    spots[:, 1] += random.uniform(-0.3, 0.3, len(spots)) * row_height
+    return spots
 
 
-def memory_texture(pixels: numpy.ndarray, memory_format: Gdk.MemoryFormat, channels: int) -> Gdk.Texture:
-    height, width = pixels.shape[:2]
-    data = numpy.ascontiguousarray(pixels, dtype=numpy.uint8)
-    return Gdk.MemoryTexture.new(width, height, memory_format, GLib.Bytes.new(data.tobytes()), width * channels)
-
-
-def feather_alpha(width: int, height: int, radius: float, feather: float, texels: int = FEATHER_TEXELS) -> numpy.ndarray:
-    """A rounded rectangle whose last `feather` points fade to nothing, as 0..255."""
-    ys, xs = numpy.mgrid[0:height * texels, 0:width * texels].astype(numpy.float32)
-    x = (xs + 0.5) / texels - width / 2
-    y = (ys + 0.5) / texels - height / 2
-    qx, qy = numpy.abs(x) - (width / 2 - radius), numpy.abs(y) - (height / 2 - radius)
+def feather(points: numpy.ndarray, width: float, height: float, radius: float, reach: float) -> numpy.ndarray:
+    """How visible each point is inside a rounded rectangle whose last `reach` fades out."""
+    qx = numpy.abs(points[:, 0] - width / 2) - (width / 2 - radius)
+    qy = numpy.abs(points[:, 1] - height / 2) - (height / 2 - radius)
     edge = numpy.hypot(numpy.maximum(qx, 0), numpy.maximum(qy, 0)) + numpy.minimum(numpy.maximum(qx, qy), 0) - radius
-    amount = numpy.clip(-edge / feather, 0, 1)
-    return numpy.round(255 * amount * amount * (3 - 2 * amount)).astype(numpy.uint8)
-
-
-def distance_tile(pitch: float, row_height: float, reach: float, jitter: numpy.ndarray, texels: int = TILE_TEXELS) -> numpy.ndarray:
-    """One repeat of the field: each point's distance to its own cell's star, over `reach`.
-
-    The tile starts half a pitch left of, and half a row above, an even-row
-    cell, and spans JITTER_PERIOD cells each way, so it repeats seamlessly.
-    Cells are assigned exactly as the per-star textures are drawn.
-    """
-    span_x, span_y = JITTER_PERIOD * pitch, JITTER_PERIOD * row_height
-    width, height = round(span_x * texels), round(span_y * texels)
-    ys, xs = numpy.mgrid[0:height, 0:width].astype(numpy.float32)
-    x = (xs + 0.5) / width * span_x
-    y = (ys + 0.5) / height * span_y
-    row = numpy.minimum((y / row_height).astype(int), JITTER_PERIOD - 1)
-    odd = row % 2 == 1
-    # Even rows' stars sit at half a pitch into each cell; odd rows' on the cell lines.
-    column = numpy.where(odd, numpy.floor(x / pitch + 0.5), numpy.floor(x / pitch)).astype(int)
-    centre_x = numpy.where(odd, column * pitch, (column + 0.5) * pitch)
-    centre_y = (row + 0.5) * row_height
-    offsets = jitter[row, column % JITTER_PERIOD]
-    distance = numpy.hypot(x - centre_x - offsets[..., 0], y - centre_y - offsets[..., 1])
-    return numpy.round(255 * numpy.clip(distance / reach, 0, 1)).astype(numpy.uint8)
+    amount = numpy.clip(-edge / reach, 0, 1)
+    return amount * amount * (3 - 2 * amount)
 
 
 @dataclass
 class Look:
-    """What changes from frame to frame: the stars' colour and the shake."""
+    """What changes from frame to frame: the stars' colours and the shake."""
 
     tint: tuple[float, float, float] = (1.0, 1.0, 1.0)
     glow: tuple[float, float, float] = (1.0, 1.0, 1.0)
@@ -128,50 +73,56 @@ class Look:
 
 
 class Starlight:
-    """Keeps every star's state, and records the stars as render nodes."""
+    """Every star's motion and light, recorded as render nodes each frame."""
 
     def __init__(self, width: int, height: int, style: dict[str, float]) -> None:
         self.width, self.height, self.style = width, height, style
-        self.grid = grid = star_grid(width, height, style["pitch"])
-        cells = numpy.array(star_cells(grid))
-        rows, columns = cells[:, 0], cells[:, 1]
-        self.slots = (rows, columns, rows % 2)
-        centres = numpy.array([cell_centre(grid, row, column) for row, column in cells], numpy.float32)
-        # Five taps across each star's cell soften the camera's grain.
-        x, y = centres[:, 0].astype(int), centres[:, 1].astype(int)
+        self.spots = star_spots(width, height, style["pitch"])
+        count = len(self.spots)
+        random = numpy.random.default_rng(11)
+        # Five taps across each spot soften the camera's grain.
+        x = numpy.clip(self.spots[:, 0].astype(int), 0, width - 1)
+        y = numpy.clip(self.spots[:, 1].astype(int), 0, height - 1)
         taps = [(0, 0), (-2, 0), (2, 0), (0, -2), (0, 2)]
         self.taps = numpy.stack([numpy.clip(y + dy, 0, height - 1) * width + numpy.clip(x + dx, 0, width - 1) for dx, dy in taps])
         self.weights = numpy.array([0.4, 0.15, 0.15, 0.15, 0.15], numpy.float32)[:, None]
-        # Each star's own twinkle, and the moment it appears as the field comes alive.
-        random = numpy.random.default_rng(11)
-        count = len(cells)
-        self.phase = random.uniform(0, math.tau, count).astype(numpy.float32)
-        self.rate = random.uniform(0.6, 1.8, count).astype(numpy.float32) * math.tau
+        # The cloud: each star wanders around its own anchor, on two slow
+        # waves per axis, so the whole cloud drifts without ever repeating.
+        angle = random.uniform(0, math.tau, count)
+        distance = numpy.sqrt(random.uniform(0, 1, count))
+        self.anchor = numpy.stack([
+            width / 2 + numpy.cos(angle) * distance * style["cloud_width"] / 2,
+            height / 2 + numpy.sin(angle) * distance * style["cloud_height"] / 2,
+        ], axis=1).astype(numpy.float32)
+        self.wander_rate = random.uniform(0.08, 0.35, (count, 4)).astype(numpy.float32) * math.tau
+        self.wander_phase = random.uniform(0, math.tau, (count, 4)).astype(numpy.float32)
+        self.cloud_light = random.uniform(0.35, 0.85, count).astype(numpy.float32)
+        # Each star's springiness varies a little, so they arrive as a swarm.
+        self.stiffness = random.uniform(0.7, 1.3, count).astype(numpy.float32) * style["stiffness"]
+        self.twinkle_rate = random.uniform(0.6, 1.8, count).astype(numpy.float32) * math.tau
+        self.twinkle_phase = random.uniform(0, math.tau, count).astype(numpy.float32)
         self.threshold = random.uniform(0, 1, count).astype(numpy.float32)
-        jitter = jitter_pattern(grid["pitch"], grid["row_height"])
-        tile = distance_tile(grid["pitch"], grid["row_height"], style["reach"], jitter)
-        rgba = numpy.zeros(tile.shape + (4,), numpy.uint8)
-        rgba[..., 1], rgba[..., 3] = tile, 255
-        self.tile = memory_texture(rgba, Gdk.MemoryFormat.R8G8B8A8, 4)
-        self.feather = memory_texture(feather_alpha(width, height, style["corner"], style["feather"]), Gdk.MemoryFormat.A8, 1)
         self.reset()
 
     def reset(self) -> None:
-        count = len(self.threshold)
+        """A new preview: the cloud appears at once and waits for a face."""
+        count = len(self.spots)
+        self.clock = 0.0
+        self.position = self._cloud().copy()
+        self.velocity = numpy.zeros((count, 2), numpy.float32)
         self.levels = numpy.zeros(count, numpy.float32)
         self.targets = numpy.zeros(count, numpy.float32)
-        self.has_frame = False
-        # 0..1: how much of the field is alive. It rises as the scan starts and
-        # falls when it ends; each star lives above its own threshold.
+        self.face = False
+        # 0..1 how gathered into the face the stars are, and how alive the field is.
+        self.gathered = 0.0
         self.presence = 0.0
-        self.presence_target = 0.0
-        self.clock = 0.0
-        self.textures: tuple[Gdk.Texture, Gdk.Texture] | None = None
+        self.presence_target = 1.0
+        self.light = numpy.zeros(count, numpy.float32)
 
-    # Frames and time -------------------------------------------------------------
+    # Input ----------------------------------------------------------------------
 
     def brightness(self, pixels: bytes) -> numpy.ndarray:
-        """Each star's brightness from the face: the frame's own range, a noise floor, a curve."""
+        """Each spot's brightness: the frame's own range, a noise floor, a curve."""
         if len(pixels) != self.width * self.height:
             raise ValueError("frame size does not match its dimensions")
         frame = numpy.frombuffer(pixels, numpy.uint8).astype(numpy.float32)
@@ -180,109 +131,105 @@ class Starlight:
         stretched = numpy.clip((values - low) / max(high - low, 5.0), 0, 1)
         return numpy.clip((stretched - self.style["floor"]) / (1 - self.style["floor"]), 0, 1) ** self.style["gamma"]
 
-    def submit(self, pixels: bytes) -> None:
+    def submit(self, pixels: bytes, face: bool = True) -> None:
+        """A camera frame, and whether a face was found in it."""
         self.targets = self.brightness(pixels).astype(numpy.float32)
-        if not self.has_frame:
-            self.has_frame = True
-            self.presence_target = 1.0
+        self.face = face
 
     def fade_out(self) -> None:
         """The scan is over: the stars wink out."""
         self.presence_target = 0.0
 
+    # Motion ---------------------------------------------------------------------
+
+    def _cloud(self) -> numpy.ndarray:
+        wave = numpy.sin(self.wander_rate * self.clock + self.wander_phase)
+        drift = numpy.stack([wave[:, 0] + 0.6 * wave[:, 1], wave[:, 2] + 0.6 * wave[:, 3]], axis=1)
+        return self.anchor + drift * self.style["wander"]
+
     def advance(self, elapsed: float) -> None:
         style = self.style
+        elapsed = min(elapsed, 1 / 20)
         self.clock += elapsed
-        # Stars follow the face closely, so the field tracks it in real time.
+        # Light follows the camera closely; gathering eases in and out.
         self.levels += (self.targets - self.levels) * (1 - math.exp(-elapsed / style["follow_seconds"]))
+        goal = 1.0 if self.face else 0.0
+        self.gathered += (goal - self.gathered) * (1 - math.exp(-elapsed / style["gather_seconds"]))
         seconds = style["appear_seconds"] if self.presence_target > self.presence else style["vanish_seconds"]
-        step = elapsed / seconds
-        self.presence = min(self.presence_target, self.presence + step) if self.presence_target > self.presence else max(self.presence_target, self.presence - step)
-        if not self.has_frame:
-            return
-        # A star is alive once the field's presence passes its threshold, and
-        # swells into place over the next fifth of the way.
+        change = elapsed / seconds
+        self.presence = min(self.presence_target, self.presence + change) if self.presence_target > self.presence else max(self.presence_target, self.presence - change)
+
+        # Stars spring toward the face's spots or back into the cloud.
+        target = self.spots if self.face else self._cloud()
+        stiffness = self.stiffness[:, None]
+        damping = 2 * 0.82 * numpy.sqrt(stiffness)
+        self.velocity += ((target - self.position) * stiffness - self.velocity * damping) * elapsed
+        self.position += self.velocity * elapsed
+
+        # A star is alive once the field's presence passes its threshold.
         alive = numpy.clip((self.presence * 1.25 - self.threshold) / 0.25, 0, 1)
         alive = alive * alive * (3 - 2 * alive)
-        twinkle = 1 - style["twinkle"] * (0.5 + 0.5 * numpy.sin(self.rate * self.clock + self.phase))
-        core = numpy.sqrt(self.levels) * alive * twinkle * (style["core"] / style["reach"])
-        # Specks smaller than a device pixel only shimmer.
-        lit = core * style["reach"] >= 0.3
-        self.textures = self._textures(numpy.where(lit, core, 0), lit)
-
-    def _textures(self, core: numpy.ndarray, lit: numpy.ndarray) -> tuple[Gdk.Texture, Gdk.Texture]:
-        rows, columns, parity = self.slots
-        textures = []
-        for odd, key in ((0, "columns_even"), (1, "columns_odd")):
-            chosen = parity == odd
-            # Rows of the other parity stay transparent, so both textures stack.
-            texels = numpy.zeros((self.grid["rows"], int(self.grid[key]), 4), numpy.uint8)
-            texels[rows[chosen], columns[chosen], 0] = numpy.round(core[chosen] * 255)
-            texels[rows[chosen], columns[chosen], 2] = lit[chosen] * 255
-            texels[rows[chosen], columns[chosen], 3] = 255
-            textures.append(memory_texture(texels, Gdk.MemoryFormat.R8G8B8A8, 4))
-        return textures[0], textures[1]
+        twinkle = 1 - style["twinkle"] * (0.5 + 0.5 * numpy.sin(self.twinkle_rate * self.clock + self.twinkle_phase))
+        # Cloud light gives way quickly as the stars gather, so stars bound for
+        # the dark around a face fade on the way rather than filling the frame.
+        light = self.cloud_light * (1 - self.gathered) ** 3 + numpy.sqrt(self.levels) * self.gathered
+        self.light = light * alive * twinkle * feather(self.position, self.width, self.height, style["corner"], style["feather"])
 
     @property
     def visible(self) -> bool:
-        return self.textures is not None and (self.presence > 0.001 or self.presence_target > 0)
+        return self.presence > 0.001 or self.presence_target > 0
 
     # Nodes ----------------------------------------------------------------------
 
-    def _field(self, snapshot: Gtk.Snapshot) -> None:
-        """Core radius (red), lit flag (blue) and distance to the star (green), stacked."""
-        grid = self.grid
-        pitch, row_height = grid["pitch"], grid["row_height"]
-        snapshot.push_blend(Gsk.BlendMode.SCREEN)
-        snapshot.append_color(Gdk.RGBA(red=0, green=0, blue=0, alpha=1), rect(0, 0, self.width, self.height))
-        for texture, left, key in ((self.textures[0], grid["left_even"], "columns_even"), (self.textures[1], grid["left_odd"], "columns_odd")):
-            bounds = rect(left - pitch / 2, grid["top"] - row_height / 2, grid[key] * pitch, grid["rows"] * row_height)
-            snapshot.append_scaled_texture(texture, Gsk.ScalingFilter.NEAREST, bounds)
-        snapshot.pop()
-        tile = rect(grid["left_even"] - pitch / 2, grid["top"] - row_height / 2, JITTER_PERIOD * pitch, JITTER_PERIOD * row_height)
-        snapshot.push_repeat(rect(0, 0, self.width, self.height), tile)
-        snapshot.append_texture(self.tile, tile)
-        snapshot.pop()
-        snapshot.pop()
+    def splat(self, device_scale: float) -> Gdk.Texture:
+        """Every star as a soft point, at the display's own pixel density."""
+        scale = max(1, round(device_scale))
+        width, height = self.width * scale, self.height * scale
+        x = self.position[:, 0] * scale - 0.5
+        y = self.position[:, 1] * scale - 0.5
+        left, top = numpy.floor(x), numpy.floor(y)
+        fx, fy = x - left, y - top
+        left, top = left.astype(numpy.int64), top.astype(numpy.int64)
+        light = self.light * self.style["core"]
+        # Each star shares its light between the four pixels around it, all
+        # gathered in one pass.
+        columns = numpy.concatenate([left, left + 1, left, left + 1])
+        rows = numpy.concatenate([top, top, top + 1, top + 1])
+        shares = numpy.concatenate([(1 - fx) * (1 - fy), fx * (1 - fy), (1 - fx) * fy, fx * fy]) * numpy.tile(light, 4)
+        inside = (columns >= 0) & (columns < width) & (rows >= 0) & (rows < height) & (shares > 0.002)
+        image = numpy.bincount(rows[inside] * width + columns[inside], shares[inside], minlength=width * height)
+        pixels = numpy.clip(image * 255, 0, 255).astype(numpy.uint8)
+        return Gdk.MemoryTexture.new(width, height, Gdk.MemoryFormat.A8, GLib.Bytes.new(pixels.tobytes()), width)
 
     def stars(self, device_scale: float, look: Look) -> Gsk.RenderNode | None:
         if not self.visible:
             return None
-        style = self.style
-        field = Gtk.Snapshot()
-        self._field(field)
-        # The cores: alpha = (radius - distance) in device pixels, centred on
-        # each edge, only where a star is lit.
-        gain = style["reach"] * device_scale
-        matrix = Graphene.Matrix().init_from_float([0, 0, 0, gain, 0, 0, 0, -gain, 0, 0, 0, 0.5, 0, 0, 0, 0])
-        cores = Gtk.Snapshot()
-        cores.push_color_matrix(matrix, Graphene.Vec4().init(look.tint[0], look.tint[1], look.tint[2], 0))
-        cores.append_node(field.to_node())
-        cores.pop()
-        core_node = cores.to_node()
-        glow = Gtk.Snapshot()
-        glow.push_color_matrix(Graphene.Matrix().init_from_float([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]), Graphene.Vec4().init(look.glow[0], look.glow[1], look.glow[2], 0))
-        glow.append_node(core_node)
-        glow.pop()
-        glow_node = glow.to_node()
+        texture = self.splat(device_scale)
+        bounds = rect(0, 0, self.width, self.height)
+
+        def lit(color: tuple[float, float, float]) -> Gsk.RenderNode:
+            colored = Gtk.Snapshot()
+            colored.push_mask(Gsk.MaskMode.ALPHA)
+            colored.append_texture(texture, bounds)
+            colored.pop()
+            colored.append_color(Gdk.RGBA(red=color[0], green=color[1], blue=color[2], alpha=1), bounds)
+            colored.pop()
+            return colored.to_node()
+
+        glow = lit(look.glow)
         snapshot = Gtk.Snapshot()
-        # Starlight: each core's light spread into a soft glow, twice over for
-        # a wide faint bloom and a tighter bright one.
-        for radius, alpha in ((style["bloom"], style["bloom_alpha"]), (style["glow"], style["glow_alpha"])):
+        # Starlight: each point's light spread into a wide faint bloom and a
+        # tighter bright glow, under the sharp points themselves.
+        for radius, alpha in ((self.style["bloom"], self.style["bloom_alpha"]), (self.style["glow"], self.style["glow_alpha"])):
             snapshot.push_opacity(alpha)
             snapshot.push_blur(radius)
-            snapshot.append_node(glow_node)
+            snapshot.append_node(glow)
             snapshot.pop()
             snapshot.pop()
-        snapshot.append_node(core_node)
+        snapshot.append_node(lit(look.tint))
         return snapshot.to_node()
 
     def snapshot(self, snapshot: Gtk.Snapshot, device_scale: float, look: Look) -> None:
         stars = self.stars(device_scale, look)
-        if stars is None:
-            return
-        snapshot.push_mask(Gsk.MaskMode.ALPHA)
-        snapshot.append_texture(self.feather, rect(0, 0, self.width, self.height))
-        snapshot.pop()
-        snapshot.append_node(stars)
-        snapshot.pop()
+        if stars is not None:
+            snapshot.append_node(stars)
