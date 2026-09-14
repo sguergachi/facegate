@@ -204,12 +204,14 @@ Nested rounded shapes share a centre, as on Apple hardware:
 | Navigation row | The pill row with a 40 icon, title and detail, and a chevron |
 | Choice row | The pill row with text only and a paint-only 16 pt radio ring |
 | Scroll indicator | Overlay only: 4 pt slider at 24% white in the right gutter, centred between the rows and the island edge. 6 pt at 42% on hover. Its track spans only the visible content, from below the header's fade to above the bottom fade (the button bar, or the 48 corner), so a fade never draws over it. Hidden when idle |
+| Footer action | Text only: 13 medium, tertiary grey, white on hover. 32 high hit target, centred, 24 from the bottom. Only for something rarely wanted (Replay Welcome) |
 | Page dots | 6 pt dots, `#3a3a3c`. The current page is an 18 pt white capsule, which grows as paint (a spring on the frame clock), never by animating layout |
 
 Rules:
 - Hit targets are at least 32 pt (close), usually 40–48.
-- There are no text-link buttons. Every choice is a pill, and a pair of
-  choices shares one row.
+- There are no text-link buttons, with one exception: the main screen's
+  footer action. Every other choice is a pill, and a pair of choices shares
+  one row.
 - A disabled primary becomes a secondary-coloured pill with tertiary text
   that says why it's waiting ("Waiting for approval…"). It is never a greyed
   copy of the enabled button.
@@ -580,6 +582,9 @@ version label in the interface, quiet in secondary text.
   agent takes polkit back. Faces and placement are kept.
 - **Face Approval** shows the face count; **View Options** shows "Follows the
   pointer" or "Locked to ‹monitor›".
+- **Replay Welcome**, the footer action, plays onboarding again in the same
+  island (a crossfade, like onboarding handing over); finishing or Not Now
+  returns to the main screen.
 - Pages travel like onboarding copy (forward leaves 16 left, enters 24 from
   the right; Back mirrors it). Back appears top-left, mirroring the close
   button, and Escape goes back one level before it closes.
