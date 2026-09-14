@@ -603,8 +603,9 @@ to it without the mark or title changing proportion.
   up expands it, anywhere in the list. Each change runs on a no-bounce spring
   (0.35/1.0) while the list moves by the header's 196 difference, measured
   from where the gesture began, so the rows in view stay in view (from the
-  top, that lands the first row 16 below the bar). A list that can't scroll
-  196 keeps the full header and scrolls beneath it. Everything stays
+  top, that lands the first row 16 below the bar). Any list that overflows
+  gets just enough invisible room at its end to reach the bar, so a short
+  list collapses too; a list that fits never scrolls. Everything stays
   centred: the mark shrinks 144 → 32 to sit 24 from the top, the title scales
   28 → 17 and tucks directly beneath it, the detail fades out by
   `t = 0.45`, and a hairline fades in over the last 15%.

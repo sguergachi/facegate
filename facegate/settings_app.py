@@ -930,11 +930,25 @@ class CollapsingHeader:
         scroll.connect("scroll", self._forward_scroll)
         self.scroll_target.add_controller(scroll)
 
+        # Goes at the end of the page's content. A list that overflows at all
+        # gets just enough room here to scroll to the bar, so even a short one
+        # collapses; a list that fits never scrolls.
+        self.slack = Gtk.Box()
+        self.slack_height = 0
+
         adjustment = scroller.get_vadjustment()
         adjustment.connect("value-changed", self._on_scroll)
-        # A list that shrinks (a face removed) may no longer be able to hold the bar.
-        adjustment.connect("changed", self._on_scroll)
+        adjustment.connect("changed", self._on_range)
         self.update(0.0)
+
+    def _on_range(self, adjustment: Gtk.Adjustment) -> None:
+        overflow = adjustment.get_upper() - self.slack_height - adjustment.get_page_size()
+        slack = max(0, round(self.full - BAR_HEIGHT - overflow)) if overflow > 0 else 0
+        if slack != self.slack_height:
+            self.slack_height = slack
+            self.slack.set_size_request(-1, slack)
+        # A list that shrinks (a face removed) may no longer be able to hold the bar.
+        self._on_scroll(adjustment)
 
     def _forward_scroll(self, controller: Gtk.EventControllerScroll, _dx: float, dy: float) -> bool:
         adjustment = self.scroller.get_vadjustment()
@@ -1991,6 +2005,7 @@ class SettingsPanel(Gtk.Overlay):
         body.set_margin_start(PAGE_MARGIN)
         body.set_margin_end(PAGE_MARGIN)
         content.append(body)
+        content.append(header.slack)
         scroller.set_child(content)
 
         overlay.set_child(scroller)
