@@ -62,6 +62,7 @@ class FaceModelTests(unittest.TestCase):
             mock.patch.object(pam, "has_face_models", return_value=False),
             mock.patch.object(pam.requesters, "read_process", return_value=("sudo", 1, ["sudo", "pacman", "-Syu"])),
             mock.patch.object(pam.requesters, "describe_command", return_value={"command": "sudo pacman -Syu"}),
+            mock.patch.object(pam, "locked_until", return_value=0),
             mock.patch.object(pam, "request_hud", return_value={"password": "hunter2"}) as request_hud,
             mock.patch.object(pam, "emit_hud") as emit_hud,
         ):
@@ -85,10 +86,37 @@ class FaceModelTests(unittest.TestCase):
             mock.patch.object(pam, "has_face_models", return_value=False),
             mock.patch.object(pam.requesters, "read_process", return_value=("sudo", 1, ["sudo", "true"])),
             mock.patch.object(pam.requesters, "describe_command", return_value={}),
+            mock.patch.object(pam, "locked_until", return_value=0),
             mock.patch.object(pam, "request_hud", return_value={"password": None}),
         ):
             self.assertEqual(pam.do_auth(pamh), FakePam.PAM_AUTHINFO_UNAVAIL)
         self.assertFalse(hasattr(pamh, "authtok"))
+
+    def test_faillock_lock_is_detected_so_the_island_can_say_when_to_retry(self):
+        import time as clock
+
+        base = clock.mktime(clock.strptime("2026-09-13 22:23:15", "%Y-%m-%d %H:%M:%S"))
+        output = """sammy:
+When                Type  Source                                           Valid
+2026-09-13 22:23:15 SVC   sudo                                                 V
+2026-09-13 22:23:19 SVC   sudo                                                 V
+2026-09-13 22:23:22 SVC   sudo                                                 V
+"""
+        settings = {"deny": 3, "fail_interval": 900, "unlock_time": 600}
+        self.assertEqual(pam.locked_until("sammy", base + 60, output, settings), base + 7 + 600)
+        self.assertEqual(pam.locked_until("sammy", base + 7 + 601, output, settings), 0)
+        two = "\n".join(output.splitlines()[:-1])
+        self.assertEqual(pam.locked_until("sammy", base + 60, two, settings), 0)
+        self.assertEqual(pam.locked_until("sammy", base + 60, output, dict(settings, unlock_time=0)), -1)
+
+    def test_locked_sudo_tells_the_island_when_it_unlocks(self):
+        pam.island_password.update(asked=0, pending=False)
+        with (
+            mock.patch.object(pam, "locked_until", return_value=4102444800.0),
+            mock.patch.object(pam, "request_hud", return_value={"password": None}) as request_hud,
+        ):
+            pam.ask_password_in_island(FakePam(), "sammy", {})
+        self.assertEqual(request_hud.call_args[0][2]["locked_until"], 4102444800.0)
 
     def test_stdin_and_non_interactive_sudo_never_open_the_island(self):
         for argv in (["sudo", "-S", "true"], ["sudo", "-kS", "true"], ["sudo", "--stdin", "true"], ["sudo", "-n", "true"]):

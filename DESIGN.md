@@ -469,7 +469,11 @@ dialog. `sudo` uses the same view when no face is enrolled: the password goes
 back to PAM for `pam_unix` to check, a rejected one returns as "Incorrect
 password. Try again." on sudo's next try, and the account rule reports
 "Verified". If no verdict arrives within 15 s the island retracts; every attempt starts
-with an empty field. It keeps the requester title and command, replaces the hint with
+with an empty field. When `pam_faillock` has locked sudo it refuses every
+password, even the right one, so the island doesn't ask: the lock shakes red,
+the field and Allow are disabled, the detail reads "Too many failed attempts.
+Try again at ‹time›.", the keyboard is released, and the field returns on its
+own when the lock expires. It keeps the requester title and command, replaces the hint with
 "Enter your password to allow this.", and adds a 44 pt password field 16 pt
 below the copy, with **Cancel** / **Allow** 16 pt below that. The island takes
 exclusive keyboard focus only while this field is shown. While PAM checks the

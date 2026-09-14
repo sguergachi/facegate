@@ -181,7 +181,7 @@ class SudoPasswordTests(unittest.TestCase):
         self.edge_hud = edge_hud
         hud = edge_hud.EdgeHud.__new__(edge_hud.EdgeHud)
         hud.pending = hud.enrollment = hud.expected_enrollment = hud.polkit = hud.view = None
-        hud.sudo_password = hud.sudo_password_watch = hud.dismiss_timeout = hud.enrollment_start = None
+        hud.sudo_password = hud.sudo_password_watch = hud.sudo_lock_timer = hud.dismiss_timeout = hud.enrollment_start = None
         hud.silenced = False
         hud.config_active = False
         hud.present_password = mock.Mock()
@@ -208,6 +208,20 @@ class SudoPasswordTests(unittest.TestCase):
         self.edge_hud.EdgeHud.cancel(self.hud)
         self.assertEqual(self.pam_side.recv(4096), b'{"password":null}\n')
         self.hud.dismiss.assert_called_once()
+
+    def test_a_locked_sudo_says_when_instead_of_taking_a_password(self):
+        import time
+
+        self.hud._show_sudo_lock = mock.Mock()
+        until = time.time() + 300
+        self.hud.handle_request({"phase": "password", "locked_until": until}, self.hud_side)
+        self.hud._show_sudo_lock.assert_called_once_with(None, False, until)
+        self.hud.present_password.assert_not_called()
+        # An expired lock just asks for the password.
+        self.hud.sudo_password = None
+        self.edge_hud.GLib.source_remove(self.hud.sudo_password_watch)
+        self.hud.handle_request({"phase": "password", "locked_until": time.time() - 5}, socket.socketpair()[1])
+        self.hud.present_password.assert_called_once()
 
     def test_a_retry_always_starts_with_an_empty_field(self):
         hud = self.edge_hud.EdgeHud.__new__(self.edge_hud.EdgeHud)

@@ -35,6 +35,7 @@ HOWDY_DIR = "/usr/lib/security/howdy"
 HOWDY_COMPARE = HOWDY_DIR + "/compare.py"
 HOWDY_CONFIG = HOWDY_DIR + "/config.ini"
 FAILLOCK = "/usr/bin/faillock"
+FAILLOCK_CONF = "/etc/security/faillock.conf"
 SOCKET_BASENAME = "facegate.sock"
 CONSENT_TIMEOUT_SECONDS = 12
 # Typing a password takes longer than a glance; sudo's own limit is 5 minutes.
@@ -139,12 +140,13 @@ def ask_password_in_island(pamh, username, requester):
     normal stack (pam_unix try_first_pass, faillock) decides. Returns False
     when the island is unavailable or dismissed, so sudo asks in the terminal.
     """
-    reply = request_hud(
-        username,
-        "password",
-        {"service": "sudo", "requester": requester, "error": island_password["asked"] > 0},
-        timeout=PASSWORD_TIMEOUT_SECONDS,
-    )
+    until = locked_until(username)
+    payload = {"service": "sudo", "requester": requester, "error": island_password["asked"] > 0}
+    if until:
+        # The island counts down, then offers the field once sudo can accept it.
+        payload["locked_until"] = until
+    wait = PASSWORD_TIMEOUT_SECONDS + (max(0, until - time.time()) if until > 0 else 0)
+    reply = request_hud(username, "password", payload, timeout=wait)
     password = reply.get("password") if isinstance(reply, dict) else None
     if not password or not isinstance(password, (type(u""), str)):
         return False
@@ -155,6 +157,56 @@ def ask_password_in_island(pamh, username, requester):
     island_password["asked"] += 1
     island_password["pending"] = True
     return True
+
+
+def faillock_settings(path=FAILLOCK_CONF):
+    """deny, fail_interval and unlock_time, with pam_faillock's defaults."""
+    settings = {"deny": 3, "fail_interval": 900, "unlock_time": 600}
+    try:
+        with open(path) as conf:
+            for line in conf:
+                key, _, value = line.split("#", 1)[0].partition("=")
+                key, value = key.strip(), value.strip()
+                if key in settings:
+                    settings[key] = 0 if value == "never" else int(value)
+    except (IOError, OSError, ValueError):
+        pass
+    return settings
+
+
+def locked_until(username, now=None, output=None, settings=None):
+    """When pam_faillock will accept a password again, or 0 if it does now.
+
+    While locked, pam_faillock refuses every password, even the right one, so
+    asking for one would only look like "Incorrect password".
+    """
+    settings = settings or faillock_settings()
+    now = time.time() if now is None else now
+    if output is None:
+        if not os.path.exists(FAILLOCK):
+            return 0
+        try:
+            output = subprocess.Popen([FAILLOCK, "--user", username], stdout=subprocess.PIPE, stderr=subprocess.PIPE).communicate()[0]
+        except (IOError, OSError):
+            return 0
+    if not isinstance(output, str):
+        output = output.decode("utf-8", "replace")
+    failures = []
+    for line in output.splitlines():
+        fields = line.split()
+        if len(fields) >= 5 and fields[-1] == "V":
+            try:
+                failures.append(time.mktime(time.strptime(fields[0] + " " + fields[1], "%Y-%m-%d %H:%M:%S")))
+            except ValueError:
+                continue
+    recent = [when for when in failures if now - when <= settings["fail_interval"]]
+    if not settings["deny"] or len(recent) < settings["deny"]:
+        return 0
+    if settings["unlock_time"] == 0:
+        # Locked until an administrator resets it; nothing to count down to.
+        return -1
+    until = max(recent) + settings["unlock_time"]
+    return until if until > now else 0
 
 
 def reset_password_failures(username):
