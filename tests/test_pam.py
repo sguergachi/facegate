@@ -23,6 +23,32 @@ class FakePam:
         return "sammy"
 
 
+class TurnedOffTests(unittest.TestCase):
+    def test_only_an_explicit_off_in_the_users_own_file_counts(self):
+        import getpass
+        import os
+
+        user = getpass.getuser()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.json"
+            self.assertFalse(pam.turned_off(user, str(path)))
+            path.write_text(json.dumps({"enabled": True}))
+            self.assertFalse(pam.turned_off(user, str(path)))
+            path.write_text("not json")
+            self.assertFalse(pam.turned_off(user, str(path)))
+            path.write_text(json.dumps({"enabled": False}))
+            self.assertTrue(pam.turned_off(user, str(path)))
+            # A link is never followed, even to a file that says off.
+            link = Path(directory) / "link.json"
+            os.symlink(path, link)
+            self.assertFalse(pam.turned_off(user, str(link)))
+
+    def test_off_skips_the_island_entirely(self):
+        with mock.patch.object(pam, "turned_off", return_value=True), mock.patch.object(pam, "request_hud") as hud:
+            self.assertEqual(pam.do_auth(FakePam()), FakePam.PAM_AUTHINFO_UNAVAIL)
+        hud.assert_not_called()
+
+
 class FaceModelTests(unittest.TestCase):
     def test_missing_empty_and_malformed_models_use_password(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -13,6 +13,7 @@ import json
 import os
 import pwd
 import socket
+import stat
 import subprocess
 import sys
 import syslog
@@ -37,6 +38,9 @@ HOWDY_CONFIG = HOWDY_DIR + "/config.ini"
 FAILLOCK = "/usr/bin/faillock"
 FAILLOCK_CONF = "/etc/security/faillock.conf"
 SOCKET_BASENAME = "facegate.sock"
+# Written by FaceGate's main screen; "enabled": false turns FaceGate off.
+SETTINGS_PATH = ".config/facegate/settings.json"
+MAX_SETTINGS_BYTES = 64 * 1024
 CONSENT_TIMEOUT_SECONDS = 12
 # Typing a password takes longer than a glance; sudo's own limit is 5 minutes.
 PASSWORD_TIMEOUT_SECONDS = 120
@@ -89,6 +93,30 @@ def should_skip(config):
         if any("closed" in open(path).read() for path in glob.glob("/proc/acpi/button/lid/*/state")):
             return True
     return False
+
+
+def turned_off(username, path=None):
+    """Whether the user switched FaceGate off on its main screen.
+
+    Read here rather than asked of the island, so off never depends on the
+    island running: sudo simply gets its usual password prompt. The file is
+    the user's own and can only take FaceGate out of the way, never grant
+    anything. Still, only a regular file they own is read, without following
+    links or blocking.
+    """
+    try:
+        user = pwd.getpwnam(username)
+        descriptor = os.open(path or os.path.join(user.pw_dir, SETTINGS_PATH), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            info = os.fstat(descriptor)
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != user.pw_uid:
+                return False
+            settings = json.loads(os.read(descriptor, MAX_SETTINGS_BYTES))
+        finally:
+            os.close(descriptor)
+    except Exception:
+        return False
+    return isinstance(settings, dict) and settings.get("enabled") is False
 
 
 def has_face_models(username, howdy_dir=HOWDY_DIR):
@@ -231,6 +259,9 @@ def do_auth(pamh):
     except Exception:
         return pamh.PAM_AUTHINFO_UNAVAIL
     if not username:
+        return pamh.PAM_AUTHINFO_UNAVAIL
+    if turned_off(username):
+        log("FaceGate is off for %s; usual password prompt" % username)
         return pamh.PAM_AUTHINFO_UNAVAIL
 
     config = ConfigParser.ConfigParser()

@@ -85,8 +85,9 @@ destinations:
   connected monitor. A disconnected locked monitor falls back to the pointer
   until it returns.
 
-Turning FaceGate off keeps every saved face and preference, but sudo and admin
-requests use their usual password prompts until it is turned on again.
+Turning FaceGate off takes it out of the way entirely: sudo and admin
+requests use their usual password prompts, even if the island isn't running,
+until it is turned on again. Saved faces and preferences are kept.
 
 - **Add a Face** reshapes the same island into admin approval. Once approved,
   that same surface transitions directly into a live, face-following IR preview

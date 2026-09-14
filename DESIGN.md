@@ -567,10 +567,12 @@ version label in the interface, quiet in secondary text.
 | Face Approval / View Options rows | y 444 / 516, 8 apart |
 
 - **Use FaceGate** reads "Approves sudo and admin prompts" when on and
-  "Prompts ask for your password" when off, and the hero mark rests with its
-  eyes closed. Off, FaceGate never shows for sudo or polkit: PAM falls
-  through to the usual password prompt and KDE's own agent takes polkit
-  back. Faces and placement are kept.
+  "sudo and admin prompts work as usual" when off, and the hero mark rests
+  with its eyes closed. Off means entirely out of the way: the PAM module
+  reads the switch itself (a regular file the user owns, links never
+  followed) and returns before contacting the island, so sudo behaves as if
+  FaceGate weren't installed even when the island isn't running. KDE's own
+  agent takes polkit back. Faces and placement are kept.
 - **Face Approval** shows the face count; **View Options** shows "Follows the
   pointer" or "Locked to ‹monitor›".
 - Pages travel like onboarding copy (forward leaves 16 left, enters 24 from

@@ -2046,7 +2046,7 @@ class SettingsPanel(Gtk.Overlay):
         enabled = preferences.enabled(self.settings)
         if self.enabled_row.switch.active != enabled:
             self.enabled_row.switch.set_active(enabled)
-        self.enabled_row.detail.set_text("Approves sudo and admin prompts" if enabled else "Prompts ask for your password")
+        self.enabled_row.detail.set_text("Approves sudo and admin prompts" if enabled else "sudo and admin prompts work as usual")
         self.home_header.mark.set_state("approval" if enabled else "off")
 
         if not self.faces_loaded:
