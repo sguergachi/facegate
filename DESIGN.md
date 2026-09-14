@@ -60,8 +60,9 @@ Rules:
   done, red means failed or destructive. Nothing else is coloured.
 - Primary buttons are white with black text. Secondary buttons are `#1c1c1e`
   with white text. There is no blue accent button.
-- The IR preview is the only imagery. It is shown as luminance, tinted cool
-  (`#d6f0ff`), and takes on the result colour only at a result.
+- The camera preview is the only imagery, and it is never the raw IR
+  picture, which lights skin from within and looks ghostly. It is a halftone
+  of cool (`#d6f0ff`) dots that takes on the result colour only at a result.
 
 ### Typography
 
@@ -187,7 +188,7 @@ Nested rounded shapes share a centre, as on Apple hardware:
 - Black is the only material. Depth comes from **fades and motion, not
   shadows**: headers and bottom bars fade content into black with gradients.
 - A single 1 px hairline separates the collapsed header from the list.
-- Imagery (the IR preview) dissolves into the surface: a 36 pt feathered
+- Imagery (the camera preview) dissolves into the surface: a 36 pt feathered
   rounded-rectangle mask, never a hard frame.
 
 ### Controls
@@ -524,17 +525,24 @@ between:
 - A late face result for that approval never replaces the scan.
 
 External tools (the enrollment demo) still stream over the HUD socket. The mark
-gives way to a 312 × 208 live IR preview at the top inset, 16 pt above the
+gives way to a 312 × 208 live camera preview at the top inset, 16 pt above the
 title. The island narrows from its configuration width to the compact 344
 width and hugs the enrollment content.
 
 - **Preview:** the camera crop follows the face (eased; the face is about half
-  the height, eyes a little above center). It's shown as luminance tinted a
-  cool `#d6f0ff`, and masked by a rounded rectangle (radius 30) whose last
-  36 pt feather to nothing, so the image dissolves into the black island.
+  the height, eyes a little above center). It's drawn as a halftone: dots 6
+  apart on a hexagonal grid, each one's size set by the brightness beneath it
+  (radius up to 2.6). Each frame is stretched between its 4th and 97th
+  brightness percentiles, the dimmest 18% (noise, background) draws nothing,
+  and a 2.2 curve keeps eyes, nose and mouth readable instead of one bright
+  mass. Cool `#d6f0ff` at 82%, masked by a rounded rectangle (radius 30)
+  whose last 36 pt feather to nothing, so the dots dissolve into the black
+  island. While scanning, a soft cyan band of light sweeps down through the
+  dots every 2.4 s (linear); each captured sample brightens them briefly.
 - **Fluidity:** IR emitters often light only every other frame, so unlit
-  frames are skipped and each lit frame cross-fades into the next over 70 ms
-  on the frame clock.
+  frames are skipped and every dot eases toward each lit frame (90 ms time
+  constant). The dots are redrawn at most 30 times a second; each display
+  frame only tints and composites them (under half a millisecond).
 - **Progress:** a trace on the preview's rim, clockwise from top center. A
   short comet circles until the first sample. Each of the five samples springs
   the trace forward with a brief glow. Success closes it green and tints the

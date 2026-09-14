@@ -8,7 +8,7 @@ import unittest
 import cairo
 
 from facegate import faces, faces_helper
-from facegate.edge_hud import PREVIEW_FEATHER, HudServer, PreviewModel, feather_mask, grey_surface, paint_preview
+from facegate.edge_hud import DOT_MAX_RADIUS, PREVIEW_FEATHER, DotField, HudServer, PreviewModel, feather_mask, paint_preview
 from facegate.protocol import MAX_STREAM_BYTES, PREVIEW_HEIGHT, PREVIEW_WIDTH, decode, encode
 
 
@@ -160,21 +160,44 @@ class PreviewTests(unittest.TestCase):
         self.assertEqual(data[(PREVIEW_HEIGHT // 2) * stride], 0)
         self.assertLess(data[(PREVIEW_HEIGHT // 2) * stride + PREVIEW_FEATHER // 2], 255)
 
-    def test_grey_frames_pad_rows_to_the_surface_stride(self):
-        surface = grey_surface(bytes(range(30)) * 2, 30, 2)
-        self.assertEqual(surface.get_stride(), 32)
-        self.assertEqual(bytes(surface.get_data())[32:62], bytes(range(30)))
+    def test_dots_fill_the_field_on_a_hexagonal_grid(self):
+        field = DotField()
+        xs = [x for x, _y in field.centres]
+        ys = sorted({y for _x, y in field.centres})
+        self.assertGreater(len(field.centres), 1000)
+        self.assertTrue(all(DOT_MAX_RADIUS <= x <= PREVIEW_WIDTH - DOT_MAX_RADIUS for x in xs))
+        self.assertAlmostEqual(ys[1] - ys[0], ys[2] - ys[1])
+
+    def test_brighter_pixels_make_bigger_dots_whatever_the_exposure(self):
+        # A dim frame, dark left and a little lighter right: levels still span 0..1.
+        pixels = bytes(20 if x < PREVIEW_WIDTH // 2 else 60 for _y in range(PREVIEW_HEIGHT) for x in range(PREVIEW_WIDTH))
+        field = DotField()
+        field.sample(pixels)
+        left = [level for (x, _y), level in zip(field.centres, field.levels) if x < PREVIEW_WIDTH / 2 - 8]
+        right = [level for (x, _y), level in zip(field.centres, field.levels) if x > PREVIEW_WIDTH / 2 + 8]
+        self.assertLess(max(left), 0.05)
+        self.assertGreater(min(right), 0.95)
         with self.assertRaises(ValueError):
-            grey_surface(b"\x00" * 10, 30, 2)
+            field.sample(b"\x00" * 10)
+
+    def test_dots_ease_toward_a_new_frame(self):
+        field = DotField()
+        field.sample(bytes(PREVIEW_WIDTH * PREVIEW_HEIGHT))
+        field.sample(bytes(range(256)) * (PREVIEW_WIDTH * PREVIEW_HEIGHT // 256) + bytes(PREVIEW_WIDTH * PREVIEW_HEIGHT % 256))
+        before = sum(field.levels)
+        field.advance(1 / 60)
+        self.assertGreater(sum(field.levels), before)
+        self.assertLess(sum(field.levels), sum(field.targets))
 
     def test_every_state_paints_with_and_without_frames(self):
-        frame = grey_surface(bytes(PREVIEW_WIDTH * PREVIEW_HEIGHT), PREVIEW_WIDTH, PREVIEW_HEIGHT)
+        field = DotField()
+        field.sample(bytes(range(256)) * (PREVIEW_WIDTH * PREVIEW_HEIGHT // 256) + bytes(PREVIEW_WIDTH * PREVIEW_HEIGHT % 256))
         for state in ("scanning", "success", "failure"):
-            for progress, blend in ((0.0, 0.0), (0.6, 0.5), (1.0, 1.0)):
-                for current, previous in ((None, None), (frame, None), (frame, frame)):
+            for progress in (0.0, 0.6, 1.0):
+                for current in (None, DotField(), field):
                     surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, PREVIEW_WIDTH, PREVIEW_HEIGHT)
-                    model = PreviewModel(state=state, progress=progress, result=progress, pulse=blend, blend=blend, elapsed=1.3)
-                    paint_preview(cairo.Context(surface), PREVIEW_WIDTH, PREVIEW_HEIGHT, current, model, previous)
+                    model = PreviewModel(state=state, progress=progress, result=progress, pulse=progress, elapsed=1.3)
+                    paint_preview(cairo.Context(surface), PREVIEW_WIDTH, PREVIEW_HEIGHT, current, model)
 
 
 class StreamTests(unittest.TestCase):

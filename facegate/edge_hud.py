@@ -426,9 +426,28 @@ PREVIEW_TO_TITLE = 16
 # the bleed leaves room for its glow.
 TRACE_INSET = 2
 PREVIEW_BLEED = 6
-# Lit IR frames often arrive at half the camera rate; each fades into the next.
-FRAME_BLEND_SECONDS = 0.07
 IR_TINT = (0.84, 0.94, 1.0)
+# The camera is shown as a halftone of dots, never as the raw IR picture,
+# which lights skin from within and makes a face look like a ghost. Dots sit
+# on a hexagonal grid; each one's size carries the brightness beneath it.
+DOT_PITCH = 6.0
+DOT_ROW = DOT_PITCH * math.sqrt(3) / 2
+DOT_MAX_RADIUS = DOT_PITCH * 0.44
+# Dots ease toward each new frame, so lit IR frames arriving at half the
+# camera rate read as motion rather than flicker.
+DOT_EASE_SECONDS = 0.09
+# Levels are stretched between these brightness percentiles of each frame,
+# then shaped: the dimmest fifth (camera noise, background) draws nothing,
+# and a steep curve keeps skin from flattening into one bright mass, so
+# eyes, nose and mouth still read.
+DOT_LEVELS = (0.04, 0.97)
+DOT_FLOOR = 0.18
+DOT_GAMMA = 2.2
+# The dots are redrawn at most this often (the camera's own rate); every
+# display frame only tints and composites them.
+DOT_LAYER_SECONDS = 1 / 30
+# While scanning, a soft cyan band of light drifts down through the dots.
+SWEEP_SECONDS = 2.4
 PREVIEW_COLORS = {"scanning": MARK_PROFILES["scanning"][:3], "success": MARK_PROFILES["success"][:3], "failure": MARK_PROFILES["failure"][:3]}
 
 _feather_masks: dict[tuple[int, int], cairo.ImageSurface] = {}
@@ -457,17 +476,76 @@ def feather_mask(width: int, height: int) -> cairo.ImageSurface:
     return mask
 
 
-def grey_surface(pixels: bytes, width: int, height: int) -> cairo.ImageSurface:
-    """Wrap 8-bit greyscale rows as an A8 surface: luminance becomes coverage."""
-    stride = cairo.ImageSurface.format_stride_for_width(cairo.FORMAT_A8, width)
-    if len(pixels) != width * height:
-        raise ValueError("frame size does not match its dimensions")
-    if stride == width:
-        data = bytearray(pixels)
-    else:
-        padding = bytes(stride - width)
-        data = bytearray(b"".join(pixels[row * width:(row + 1) * width] + padding for row in range(height)))
-    return cairo.ImageSurface.create_for_data(data, cairo.FORMAT_A8, width, height, stride)
+class DotField:
+    """A hexagonal halftone of the newest greyscale frame, easing between frames."""
+
+    def __init__(self, width: int = PREVIEW_WIDTH, height: int = PREVIEW_HEIGHT) -> None:
+        self.width, self.height = width, height
+        rows = int((height - DOT_PITCH) // DOT_ROW) + 1
+        top = (height - (rows - 1) * DOT_ROW) / 2
+        self.centres: list[tuple[float, float]] = []
+        for row in range(rows):
+            # Every other row shifts half a pitch; each row is centred on its own.
+            columns = int((width - DOT_PITCH - (DOT_PITCH / 2 if row % 2 else 0)) // DOT_PITCH) + 1
+            left = (width - (columns - 1) * DOT_PITCH) / 2
+            y = top + row * DOT_ROW
+            self.centres.extend((left + column * DOT_PITCH, y) for column in range(columns))
+        self.levels = [0.0] * len(self.centres)
+        self.targets = [0.0] * len(self.centres)
+        self.has_frame = False
+        self.layer: cairo.ImageSurface | None = None
+        self.layer_time = 0.0
+        self.dirty = False
+
+    def sample(self, pixels: bytes) -> None:
+        """Read the brightness under each dot, stretched to the frame's own range."""
+        width, height = self.width, self.height
+        if len(pixels) != width * height:
+            raise ValueError("frame size does not match its dimensions")
+        values = []
+        for x, y in self.centres:
+            # Five taps across the cell soften the camera's grain.
+            column, row = int(x), int(y)
+            left, right = max(0, column - 2), min(width - 1, column + 2)
+            above, below = max(0, row - 2), min(height - 1, row + 2)
+            values.append(pixels[row * width + column] + pixels[row * width + left] + pixels[row * width + right] + pixels[above * width + column] + pixels[below * width + column])
+        ordered = sorted(values)
+        low = ordered[int(DOT_LEVELS[0] * (len(ordered) - 1))]
+        high = max(low + 25, ordered[int(DOT_LEVELS[1] * (len(ordered) - 1))])
+        span = float(high - low)
+        stretched = (clamp((value - low) / span) for value in values)
+        self.targets = [clamp((level - DOT_FLOOR) / (1 - DOT_FLOOR)) ** DOT_GAMMA for level in stretched]
+        if not self.has_frame:
+            self.levels = list(self.targets)
+            self.has_frame = True
+        self.dirty = True
+
+    def advance(self, elapsed: float) -> None:
+        amount = 1 - math.exp(-elapsed / DOT_EASE_SECONDS)
+        levels = [level + (target - level) * amount for level, target in zip(self.levels, self.targets)]
+        if not self.dirty:
+            self.dirty = any(abs(new - old) > 0.002 for new, old in zip(levels, self.levels))
+        self.levels = levels
+
+    def trace(self, context: Any) -> None:
+        """Add every visible dot to the current path."""
+        for (x, y), level in zip(self.centres, self.levels):
+            radius = DOT_MAX_RADIUS * math.sqrt(level)
+            if radius >= 0.45:
+                context.new_sub_path()
+                context.arc(x, y, radius, 0, math.tau)
+
+    def surface(self, now: float) -> cairo.ImageSurface:
+        """The dots as feathered coverage, redrawn only when they've moved."""
+        if self.layer is None or (self.dirty and abs(now - self.layer_time) >= DOT_LAYER_SECONDS):
+            layer = cairo.ImageSurface(cairo.FORMAT_A8, self.width, self.height)
+            context = cairo.Context(layer)
+            self.trace(context)
+            context.fill()
+            context.set_operator(cairo.OPERATOR_DEST_IN)
+            context.mask_surface(feather_mask(self.width, self.height), 0, 0)
+            self.layer, self.layer_time, self.dirty = layer, now, False
+        return self.layer
 
 
 def rounded_rect_path(context: Any, x: float, y: float, width: float, height: float, radius: float) -> float:
@@ -500,39 +578,33 @@ class PreviewModel:
     pulse: float = 0.0
     elapsed: float = 0.0
     state_elapsed: float = 0.0
-    # How far the newest frame has faded in over the one before it.
-    blend: float = 1.0
 
 
-def paint_preview(context: Any, width: float, height: float, frame: cairo.ImageSurface | None, model: PreviewModel, previous: cairo.ImageSurface | None = None) -> None:
-    """The IR image feathered into a rounded rectangle, and the progress trace."""
+def paint_preview(context: Any, width: float, height: float, field: DotField | None, model: PreviewModel) -> None:
+    """The camera as a feathered field of dots, and the progress trace."""
     color = PREVIEW_COLORS.get(model.state, PREVIEW_COLORS["scanning"])
     context.save()
     if model.state == "failure":
         context.translate(6 * math.sin(model.state_elapsed * math.tau * 5.5) * math.exp(-model.state_elapsed * 6.5), 0)
-    if frame is not None:
-        glow = 0.9 + 0.1 * model.pulse
-        tint = tuple(mix(IR_TINT[index], color[index], 0.25 * model.result) * glow for index in range(3))
-        context.push_group()
-        # Adding weighted frames is an exact cross-fade of their luminance.
-        context.set_operator(cairo.OPERATOR_ADD)
-        blend = clamp(model.blend) if previous is not None else 1.0
-        for image, weight in ((previous, 1 - blend), (frame, blend)):
-            if image is None or weight <= 0.001:
-                continue
-            context.save()
-            context.scale(width / image.get_width(), height / image.get_height())
-            pattern = cairo.SurfacePattern(image)
-            pattern.set_filter(cairo.FILTER_GOOD)
-            context.set_source_rgba(*tint, weight)
-            context.mask(pattern)
-            context.restore()
-        context.set_operator(cairo.OPERATOR_OVER)
-        if model.pulse > 0.01:
-            context.set_source_rgba(*color, 0.1 * model.pulse)
-            context.paint()
-        context.pop_group_to_source()
-        context.mask_surface(feather_mask(round(width), round(height)), 0, 0)
+    if field is not None and field.has_frame:
+        layer = field.surface(model.elapsed)
+        context.save()
+        context.scale(width / field.width, height / field.height)
+        # Cool white while looking, taking on the result's colour at the end;
+        # each captured sample brightens the dots for a moment.
+        dim = 0.82 + 0.18 * model.pulse
+        context.set_source_rgb(*(mix(IR_TINT[index], color[index], 0.6 * model.result) * dim for index in range(3)))
+        context.mask_surface(layer, 0, 0)
+        if model.state == "scanning":
+            # Constant motion, so linear: the band enters above and leaves below.
+            middle = (((model.elapsed / SWEEP_SECONDS) % 1.0) * 1.4 - 0.2) * field.height
+            band = cairo.LinearGradient(0, middle - 36, 0, middle + 36)
+            band.add_color_stop_rgba(0, *color, 0)
+            band.add_color_stop_rgba(0.5, *color, 0.75 * (1 - model.progress * 0.5))
+            band.add_color_stop_rgba(1, *color, 0)
+            context.set_source(band)
+            context.mask_surface(layer, 0, 0)
+        context.restore()
 
     length = rounded_rect_path(context, TRACE_INSET, TRACE_INSET, width - 2 * TRACE_INSET, height - 2 * TRACE_INSET, PREVIEW_RADIUS - TRACE_INSET)
     context.set_line_cap(cairo.LINE_CAP_ROUND)
@@ -565,29 +637,30 @@ class PreviewArea(Gtk.DrawingArea):
         self.progress = Spring(0.0)
         self.progress.configure(0.45, 0.9)
         # Written by the socket thread or the panel, picked up on the frame clock.
-        self.latest: cairo.ImageSurface | None = None
-        self.shown: cairo.ImageSurface | None = None
-        self.previous: cairo.ImageSurface | None = None
+        self.latest: bytes | None = None
+        self.field = DotField()
         self.set_draw_func(self._draw)
 
     def _draw(self, _area: Gtk.DrawingArea, context: Any, _width: int, _height: int) -> None:
         context.translate(PREVIEW_BLEED, PREVIEW_BLEED)
-        paint_preview(context, PREVIEW_WIDTH, PREVIEW_HEIGHT, self.shown, self.model, self.previous)
+        paint_preview(context, PREVIEW_WIDTH, PREVIEW_HEIGHT, self.field, self.model)
 
     def take_frame(self, message: dict[str, Any]) -> None:
         """Keep the newest greyscale preview frame; bad frames are ignored."""
         try:
             width, height = int(message["w"]), int(message["h"])
-            if (width, height) != (PREVIEW_WIDTH, PREVIEW_HEIGHT):
+            pixels = base64.b64decode(message["frame"])
+            if (width, height) != (PREVIEW_WIDTH, PREVIEW_HEIGHT) or len(pixels) != width * height:
                 return
-            self.latest = grey_surface(base64.b64decode(message["frame"]), width, height)
+            self.latest = pixels
         except (KeyError, TypeError, ValueError):
             pass
 
     def reset(self) -> None:
         self.model = PreviewModel()
         self.progress.value = self.progress.target = self.progress.velocity = 0.0
-        self.latest = self.shown = self.previous = None
+        self.latest = None
+        self.field = DotField()
 
     def set_progress(self, value: float) -> None:
         value = clamp(value)
@@ -605,11 +678,10 @@ class PreviewArea(Gtk.DrawingArea):
 
     def advance(self, elapsed: float) -> None:
         model = self.model
-        latest = self.latest
-        if latest is not self.shown:
-            self.previous, self.shown = self.shown, latest
-            model.blend = 0.0
-        model.blend = min(1.0, model.blend + elapsed / FRAME_BLEND_SECONDS)
+        latest, self.latest = self.latest, None
+        if latest is not None:
+            self.field.sample(latest)
+        self.field.advance(elapsed)
         model.elapsed += elapsed
         model.state_elapsed += elapsed
         self.progress.step(elapsed)
