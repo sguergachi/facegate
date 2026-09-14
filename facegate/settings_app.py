@@ -118,6 +118,9 @@ ROW_GAP = SPACE_S
 ROW_TEXT_INSET = SPACE_XL
 ROW_REVEAL_MS = 260
 CONFIRM_SECONDS = 4
+# A name being edited grows from the row title's size and fills the row.
+ROW_TITLE_PX = 15
+EDIT_NAME_PX = 20
 RESULT_SECONDS = 1.6
 BACK_TARGETS = {"how": "welcome", "privacy": "how", "added": "privacy"}
 
@@ -464,16 +467,13 @@ def draw_chevron_glyph(area: Gtk.DrawingArea, context: Any, width: int, height: 
     context.stroke()
 
 
-def row_copy(title: str | Gtk.Widget, detail: str) -> tuple[Gtk.Box, Gtk.Label]:
+def row_copy(title: str, detail: str) -> tuple[Gtk.Box, Gtk.Label]:
     copy = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
     copy.set_valign(Gtk.Align.CENTER)
     copy.set_hexpand(True)
-    if isinstance(title, Gtk.Widget):
-        title_label = title
-    else:
-        title_label = label(title, "row-title", xalign=0)
-        title_label.set_ellipsize(Pango.EllipsizeMode.END)
-        title_label.set_single_line_mode(True)
+    title_label = label(title, "row-title", xalign=0)
+    title_label.set_ellipsize(Pango.EllipsizeMode.END)
+    title_label.set_single_line_mode(True)
     detail_label = label(detail, "row-detail", xalign=0)
     detail_label.set_ellipsize(Pango.EllipsizeMode.END)
     detail_label.set_single_line_mode(True)
@@ -482,18 +482,21 @@ def row_copy(title: str | Gtk.Widget, detail: str) -> tuple[Gtk.Box, Gtk.Label]:
     return copy, detail_label
 
 
-def pill_layout(title: str | Gtk.Widget, detail: str, leading: Gtk.Widget | None = None, trailing: Gtk.Widget | None = None, trailing_radius: float = 0.0) -> tuple[Gtk.Box, Gtk.Label]:
+def pill_layout(title: str, detail: str, leading: Gtk.Widget | None = None, trailing: Gtk.Widget | None = None, trailing_radius: float = 0.0, copy: Gtk.Widget | None = None) -> tuple[Gtk.Box, Gtk.Label | None]:
     """The one layout every 64-point settings row uses (inside 12 padding).
 
     A leading 40 icon sits in the padding, concentric with the rounded end;
     text with nothing before it starts 24 in. A trailing control is centred on
-    the other end's centre, 32 from the edge, whatever its size.
+    the other end's centre, 32 from the edge, whatever its size. A row with
+    its own `copy` widget uses it in place of the title and detail.
     """
     content = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=SPACE_M)
     if leading:
         leading.set_valign(Gtk.Align.CENTER)
         content.append(leading)
-    copy, detail_label = row_copy(title, detail)
+    detail_label = None
+    if copy is None:
+        copy, detail_label = row_copy(title, detail)
     if not leading:
         copy.set_margin_start(ROW_TEXT_INSET - ROW_PADDING)
     content.append(copy)
@@ -873,6 +876,66 @@ class FaceActions(Gtk.Widget):
         snapshot.restore()
 
 
+class NameBlock(Gtk.Widget):
+    """A face's name over its date; while the name is edited it fills the row.
+
+    The date fades as the name grows 15 → 20 and glides to the row's middle,
+    then both return when editing ends. Only transform and opacity change,
+    so the row never reflows.
+    """
+
+    def __init__(self, name: Gtk.Widget, detail: Gtk.Label) -> None:
+        super().__init__()
+        self.name, self.detail = name, detail
+        name.set_parent(self)
+        detail.set_parent(self)
+        self.set_hexpand(True)
+        self.set_valign(Gtk.Align.CENTER)
+        self.focus = Spring(0.0)
+        self.focus.configure(0.4, 1.0)
+        self.last: int | None = None
+        self.ticking = False
+
+    def set_editing(self, editing: bool) -> None:
+        self.focus.target = 1.0 if editing else 0.0
+        if reduced_motion() or not self.get_mapped():
+            self.focus.value, self.focus.velocity = self.focus.target, 0.0
+            self.queue_allocate()
+        elif not self.ticking:
+            self.ticking = True
+            self.last = None
+            self.add_tick_callback(self._tick)
+
+    def _tick(self, _widget: Gtk.Widget, clock: Gdk.FrameClock) -> bool:
+        frame = clock.get_frame_time()
+        elapsed = min((frame - self.last) / 1_000_000, 1 / 30) if self.last else 0.0
+        self.last = frame
+        self.focus.step(elapsed)
+        if abs(self.focus.value - self.focus.target) < 0.001 and abs(self.focus.velocity) < 0.01:
+            self.focus.value, self.focus.velocity = self.focus.target, 0.0
+            self.ticking = False
+        self.queue_allocate()
+        return GLib.SOURCE_CONTINUE if self.ticking else GLib.SOURCE_REMOVE
+
+    def do_measure(self, orientation: Gtk.Orientation, for_size: int) -> tuple[int, int, int, int]:
+        if orientation == Gtk.Orientation.HORIZONTAL:
+            # Names ellipsize; the row decides the width.
+            return 0, max(self.name.measure(orientation, -1)[1], self.detail.measure(orientation, -1)[1]), -1, -1
+        height = self.name.measure(orientation, -1)[1] + self.detail.measure(orientation, -1)[1]
+        return height, height, -1, -1
+
+    def do_size_allocate(self, width: int, height: int, _baseline: int) -> None:
+        amount = clamp(self.focus.value)
+        scale = mix(1.0, EDIT_NAME_PX / ROW_TITLE_PX, amount)
+        name_height = self.name.measure(Gtk.Orientation.VERTICAL, -1)[1]
+        # Laid out narrower as it grows, so the scaled name still fits the row.
+        name_y = mix(0.0, (height - name_height * scale) / 2, amount)
+        self.name.allocate(max(1, round(width / scale)), name_height, -1, Gsk.Transform().translate(Graphene.Point().init(0, name_y)).scale(scale, scale))
+        detail_height = self.detail.measure(Gtk.Orientation.VERTICAL, -1)[1]
+        self.detail.set_opacity(clamp(1 - amount / 0.6))
+        self.detail.allocate(width, detail_height, -1, Gsk.Transform().translate(Graphene.Point().init(0, name_height + SPACE_XS * amount)))
+
+
 class FaceRow(Gtk.Revealer):
     def __init__(self, face: dict[str, Any], on_remove: Callable[["FaceRow"], None], on_rename: Callable[["FaceRow", str, str], None]) -> None:
         super().__init__()
@@ -911,7 +974,11 @@ class FaceRow(Gtk.Revealer):
         self.actions = FaceActions(self._toggle_edit, self._ask, self._confirm)
         added = face.get("time") or 0
         self.added = time.strftime("Added %b %-d, %Y", time.localtime(added)) if added else "Added with Howdy"
-        row, self.detail = pill_layout(self.name_slot, self.added, Mark(AVATAR_SIZE, animated=False), self.actions, AVATAR_SIZE / 2)
+        self.detail = label(self.added, "row-detail", xalign=0)
+        self.detail.set_ellipsize(Pango.EllipsizeMode.END)
+        self.detail.set_single_line_mode(True)
+        self.name_block = NameBlock(self.name_slot, self.detail)
+        row, _detail = pill_layout("", "", Mark(AVATAR_SIZE, animated=False), self.actions, AVATAR_SIZE / 2, copy=self.name_block)
         row.add_css_class("face-row")
         self.row = row
         # Rows are spaced by their own bottom margin, so the gap collapses with them.
@@ -960,7 +1027,7 @@ class FaceRow(Gtk.Revealer):
         self.editing = True
         self.editor.set_text(self.name)
         self.name_slot.set_visible_child_name("editor")
-        self.detail.set_text("Saving asks for admin approval")
+        self.name_block.set_editing(True)
         self.row.add_css_class("editing")
         self.actions.set_mode("editing")
         self.editor.grab_focus()
@@ -973,7 +1040,7 @@ class FaceRow(Gtk.Revealer):
         self.editing = False
         name = " ".join(self.editor.get_text().split())
         self.name_slot.set_visible_child_name("name")
-        self.detail.set_text(self.added)
+        self.name_block.set_editing(False)
         self.row.remove_css_class("editing")
         self.actions.set_mode("idle")
         if save and name and name != self.name:
