@@ -75,7 +75,8 @@ Choose **Open FaceGate** from its tray menu, open **FaceGate** from the app
 menu, or run `facegate-settings`. Every route expands the top-edge island;
 there is no separate settings window. The first time, it shows how FaceGate
 works over three short pages (replay them with
-`facegate-settings --welcome`), then helps you add your face. After that the
+`facegate-settings --welcome`, or **Replay Welcome** at the foot of the main
+screen), then helps you add your face. After that the
 main screen shows the installed version, a global FaceGate switch, and two
 destinations:
 

@@ -1459,6 +1459,9 @@ CSS = """
 .settings-panel button.close, .settings-panel button.back { min-width: %(close)dpx; min-height: %(close)dpx; padding: 0; border-radius: %(close_radius)dpx; background-color: #1c1c1e; color: #98989d; }
 .settings-panel button.close:hover, .settings-panel button.back:hover { background-color: #2c2c2e; color: #f5f5f7; }
 .settings-panel button.close:active, .settings-panel button.back:active { background-color: #3a3a3c; color: #f5f5f7; }
+.settings-panel button.footer-action { min-height: %(close)dpx; padding: 0 %(space_l)dpx; border-radius: %(close_radius)dpx; background: none; font-size: 13px; font-weight: 500; color: #8e8e93; }
+.settings-panel button.footer-action label { color: inherit; }
+.settings-panel button.footer-action:hover { color: #f5f5f7; }
 .settings-panel button.primary { min-height: %(button)dpx; padding: 0 %(space_l)dpx; border-radius: %(button_radius)dpx; font-size: 15px; background-color: #f5f5f7; color: #000000; }
 .settings-panel button.primary:disabled { color: #8e8e93; }
 .settings-panel button.primary.secondary { color: #f5f5f7; }
@@ -2346,13 +2349,23 @@ class SettingsPanel(Gtk.Overlay):
 
     def _build_home(self) -> None:
         """The front door: the global switch, then the two setting areas."""
-        _page, self.home_header, body = self._scroll_page("home", "FaceGate", "Version %s" % __version__)
+        page, self.home_header, body = self._scroll_page("home", "FaceGate", "Version %s" % __version__)
         self.enabled_row = ToggleRow(self._toggle_enabled)
         self.face_entry = NavigationRow("Face Approval", Mark(PREFERENCE_ICON_SIZE, animated=False), lambda: self._show_page("manage"))
         self.view_entry = NavigationRow("View Options", DisplayGlyph(PREFERENCE_ICON_SIZE), lambda: self._show_page("view"))
         body.append(self._section("General", [self.enabled_row]))
         body.append(self._section("Settings", [self.face_entry, self.view_entry], PREFERENCE_GROUP_GAP))
         body.set_margin_bottom(PAGE_MARGIN)
+        # The one quiet text action: rarely wanted, so it stays out of the way
+        # at the foot of the page, the page margin from the bottom.
+        replay = Gtk.Button(label="Replay Welcome")
+        replay.add_css_class("footer-action")
+        replay.set_focus_on_click(False)
+        replay.set_halign(Gtk.Align.CENTER)
+        replay.set_valign(Gtk.Align.END)
+        replay.set_margin_bottom(PAGE_MARGIN)
+        replay.connect("clicked", lambda *_: self._replay_onboarding())
+        page.add_overlay(replay)
 
     def _build_manage(self) -> None:
         overlay, self.header, body = self._scroll_page("manage", "Face Approval", "", bottom_fade=BOTTOM_BAR)
@@ -2440,6 +2453,15 @@ class SettingsPanel(Gtk.Overlay):
     def _highlight_step(self, step: int) -> None:
         for index, row in enumerate(self.steps, start=1):
             (row.remove_css_class if step in (0, index) else row.add_css_class)("dim")
+
+    def _replay_onboarding(self) -> None:
+        """Walk through the welcome again, in the same island."""
+        if self.run:
+            return
+        self.enroll_phase = None
+        self.flow.go("welcome", animate=False)
+        self._show_page("flow", direction=0)
+        self._render()
 
     def _finish_onboarding(self) -> None:
         self.settings = preferences.update(onboarded=True)
