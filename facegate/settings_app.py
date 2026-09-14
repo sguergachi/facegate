@@ -2089,7 +2089,7 @@ class SettingsPanel(Gtk.Overlay):
         for key, row in self.choices.items():
             row.indicator.set_selected(key == (mode, connector))
         self._update_home()
-        self.hud.apply_monitor_placement()
+        self.hud.relocate_config()
 
     # State -----------------------------------------------------------------
 

@@ -460,7 +460,10 @@ or scan it started returns to it.)
 By default, each time the island appears it asks KWin for the active output
 (`org.kde.KWin.activeOutputName`, which follows the pointer) and pins itself to
 the top center of that monitor. View Options can instead persist one output's
-connector and pin every appearance there. If that output is disconnected,
+connector and pin every appearance there. Choosing another monitor while
+configuration is open never slides the island across the gap: it retracts
+into its notch (the panel fades in 160 ms, the island collapses without
+bounce), then grows open from the new monitor's notch as if just opened. If that output is disconnected,
 FaceGate follows the pointer until it returns. Without KWin it falls back to
 the output the compositor chooses.
 

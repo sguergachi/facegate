@@ -837,6 +837,9 @@ class EdgeHud:
         self.config_active = False
         self.config_suspended = False
         self.config_requested: bool | None = None
+        # The monitor the open configuration is retracting from, on its way to this one.
+        self.relocating: Gdk.Monitor | None = None
+        self.monitor = ""
         self.approval_timeout: int | None = None
         self.dismiss_timeout: int | None = None
         self.silenced = False
@@ -959,12 +962,30 @@ class EdgeHud:
         return self._monitor_under_pointer()
 
     def apply_monitor_placement(self) -> bool:
-        """Apply View Options now, including while configuration is open."""
+        """Pin to the monitor View Options chooses, before the island appears."""
         monitor = self._monitor_for_island()
         if not monitor:
             return False
         self._pin_to(monitor)
         return True
+
+    def relocate_config(self) -> None:
+        """Move open configuration to a newly chosen monitor.
+
+        The island never slides across the gap between monitors: it retracts
+        into the notch it grew from, then grows again from the new monitor's.
+        """
+        monitor = self._monitor_for_island()
+        if not monitor or monitor.get_connector() == self.monitor:
+            return
+        if not (self.visible and self.config_active and not self.config_suspended and not self.departing):
+            self._pin_to(monitor)
+            return
+        self.relocating = monitor
+        self.scheduled.clear()
+        self.config_host.set_can_target(False)
+        self.config_item.alpha.to(0, self.now, 0.16)
+        self._at(0.08, lambda _now: self._collapse())
 
     @staticmethod
     def _monitor_under_pointer() -> Gdk.Monitor | None:
@@ -988,6 +1009,7 @@ class EdgeHud:
         Gtk4LayerShell.set_anchor(self.window, Gtk4LayerShell.Edge.LEFT, True)
         Gtk4LayerShell.set_margin(self.window, Gtk4LayerShell.Edge.LEFT, margin)
         self.positioned = True
+        self.monitor = monitor.get_connector() or ""
         print("[facegate] showing on %s (%dx%d, left margin %d)" % (monitor.get_connector(), geometry.width, geometry.height, margin), flush=True)
 
     def _position_on_mapped_monitor(self, *_args: Any) -> None:
@@ -1263,16 +1285,17 @@ class EdgeHud:
         for item in self.items:
             item.alpha.to(0, self.now, 0.16)
 
-        def collapse(_now: float) -> None:
-            self.width.configure(0.42, 1.0)
-            self.height.configure(0.4, 1.0)
-            self.radius.configure(0.42, 1.0)
-            self.width.target = COLLAPSED_WIDTH
-            self.height.target = 0.0
-            self.radius.target = ISLAND_RADIUS
-
-        self._at(0.08, collapse)
+        self._at(0.08, lambda _now: self._collapse())
         return False
+
+    def _collapse(self) -> None:
+        """Retract into the notch, without bounce."""
+        self.width.configure(0.42, 1.0)
+        self.height.configure(0.4, 1.0)
+        self.radius.configure(0.42, 1.0)
+        self.width.target = COLLAPSED_WIDTH
+        self.height.target = 0.0
+        self.radius.target = ISLAND_RADIUS
 
     def _on_frame(self, _widget: Gtk.Widget, clock: Gdk.FrameClock) -> bool:
         now = clock.get_frame_time() / 1_000_000
@@ -1301,6 +1324,22 @@ class EdgeHud:
             self._place(item)
         self.backdrop.queue_draw()
         self._update_input_region()
+
+        if self.relocating and not (self.config_active and not self.config_suspended and not self.departing):
+            # A prompt or a close took over mid-move; the choice applies next time.
+            self.relocating = None
+        elif self.relocating and not self.scheduled and self.height.value < 4 and self.config_item.alpha.done(now):
+            monitor, self.relocating = self.relocating, None
+            # Remapped on the new monitor; grow from its notch as when opening.
+            self._pin_to(monitor)
+            self.width.configure(0.54, 0.82)
+            self.height.configure(0.58, 0.84)
+            self.radius.configure(0.54, 0.9)
+            self.width.target = CONFIG_WIDTH
+            self.height.target = CONFIG_HEIGHT
+            self.radius.target = CONFIG_RADIUS
+            self.config_item.alpha.to(1, now, 0.3, 0.12)
+            self.config_host.set_can_target(True)
 
         if (
             self.departing
