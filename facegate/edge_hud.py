@@ -427,26 +427,35 @@ PREVIEW_TO_TITLE = 16
 TRACE_INSET = 2
 PREVIEW_BLEED = 6
 IR_TINT = (0.84, 0.94, 1.0)
-# The camera is shown as a halftone of dots, never as the raw IR picture,
-# which lights skin from within and makes a face look like a ghost. Dots sit
-# on a hexagonal grid; each one's size carries the brightness beneath it.
-# They are drawn as render nodes on the GPU (see halftone.py).
-DOT_STYLE = {
-    "pitch": 6.0,
-    "max_radius": 6.0 * 0.44,
-    # Levels are stretched between these brightness percentiles of each frame,
-    # then shaped: the dimmest fifth (camera noise, background) draws nothing,
-    # and a steep curve keeps skin from flattening into one bright mass, so
-    # eyes, nose and mouth still read.
+# The camera is never shown as a picture: the raw IR image lights skin from
+# within and makes a face look like a ghost. Instead, starlight: particles
+# that form the face (see starlight.py), drawn as render nodes on the GPU.
+STAR_STYLE = {
+    "pitch": 5.0,
+    # A star's core grows to `core` points (distances are encoded up to
+    # `reach`); its light blooms through two blurs, a tight glow and a wide one.
+    "core": 1.0,
+    "reach": 3.0,
+    "glow": 1.6,
+    "glow_alpha": 1.0,
+    "bloom": 5.0,
+    "bloom_alpha": 0.8,
+    "twinkle": 0.35,
+    # Brightness is stretched between these percentiles of each frame, then
+    # shaped: the dimmest fifth (noise, background) lights nothing, and a steep
+    # curve keeps eyes, nose and mouth from washing into one bright mass.
     "low_share": 0.04,
     "high_share": 0.97,
     "floor": 0.18,
     "gamma": 2.2,
+    "follow_seconds": 0.06,
+    "appear_seconds": 0.9,
+    "vanish_seconds": 0.7,
     "corner": PREVIEW_RADIUS,
     "feather": PREVIEW_FEATHER,
 }
-# While scanning, a soft cyan band of light drifts down through the dots.
-SWEEP_SECONDS = 2.4
+# A result holds the finished face this long before its stars wink out.
+STARS_HOLD_SECONDS = 0.45
 PREVIEW_COLORS = {"scanning": MARK_PROFILES["scanning"][:3], "success": MARK_PROFILES["success"][:3], "failure": MARK_PROFILES["failure"][:3]}
 
 
@@ -500,30 +509,29 @@ class PreviewModel:
     state_elapsed: float = 0.0
 
 
-def preview_look(model: PreviewModel, height: float) -> tuple[tuple[float, float, float], tuple[float, float, float], float, float, float]:
-    """The dots' tint, the band's colour, middle and strength, and the shake."""
+def preview_look(model: PreviewModel) -> tuple[tuple[float, float, float], tuple[float, float, float], float]:
+    """The stars' core and halo colours, and the shake."""
     color = PREVIEW_COLORS.get(model.state, PREVIEW_COLORS["scanning"])
-    # Cool white while looking, taking on the result's colour at the end;
-    # each captured sample brightens the dots for a moment.
-    dim = 0.82 + 0.18 * model.pulse
-    tint = tuple(mix(IR_TINT[index], color[index], 0.6 * model.result) * dim for index in range(3))
-    # Constant motion, so linear: the band enters above and leaves below.
-    middle = (((model.elapsed / SWEEP_SECONDS) % 1.0) * 1.4 - 0.2) * height
-    strength = 0.75 * (1 - model.progress * 0.5) if model.state == "scanning" else 0.0
+    # Starlight white while looking, taking on the result's colour at the end;
+    # each captured sample brightens the stars for a moment.
+    bright = 0.86 + 0.14 * model.pulse
+    tint = tuple(min(1.0, mix(IR_TINT[index], color[index], 0.55 * model.result) * bright) for index in range(3))
+    # Halos lean toward the state's colour: cyan while looking.
+    glow = tuple(mix(IR_TINT[index], color[index], 0.5 + 0.4 * model.result) for index in range(3))
     shake = 6 * math.sin(model.state_elapsed * math.tau * 5.5) * math.exp(-model.state_elapsed * 6.5) if model.state == "failure" else 0.0
-    return tint, color, middle, strength, shake
+    return tint, glow, shake
 
 
 class PreviewArea(Gtk.Widget):
-    """The camera as a halftone, with the progress trace around its rim.
+    """The face as starlight, with the progress trace around its rim.
 
     Everything is recorded as render nodes, so GTK's renderer (Vulkan for the
-    island) draws the dots, the feather, the sweep and the trace on the GPU.
+    island) draws the stars, the feather and the trace on the GPU.
     """
 
     def __init__(self) -> None:
         super().__init__()
-        from .halftone import Halftone, Look
+        from .starlight import Look, Starlight
 
         self.set_size_request(PREVIEW_WIDTH + 2 * PREVIEW_BLEED, PREVIEW_HEIGHT + 2 * PREVIEW_BLEED)
         self.model = PreviewModel()
@@ -531,7 +539,7 @@ class PreviewArea(Gtk.Widget):
         self.progress.configure(0.45, 0.9)
         # Written by the socket thread or the panel, picked up on the frame clock.
         self.latest: bytes | None = None
-        self.halftone = Halftone(PREVIEW_WIDTH, PREVIEW_HEIGHT, DOT_STYLE)
+        self.stars = Starlight(PREVIEW_WIDTH, PREVIEW_HEIGHT, STAR_STYLE)
         self.look = Look()
         self.rim = rim_path(TRACE_INSET, TRACE_INSET, PREVIEW_WIDTH - 2 * TRACE_INSET, PREVIEW_HEIGHT - 2 * TRACE_INSET, PREVIEW_RADIUS - TRACE_INSET)
         self.rim_length = Gsk.PathMeasure.new(self.rim).get_length()
@@ -551,7 +559,7 @@ class PreviewArea(Gtk.Widget):
         self.model = PreviewModel()
         self.progress.value = self.progress.target = self.progress.velocity = 0.0
         self.latest = None
-        self.halftone.reset()
+        self.stars.reset()
 
     def set_progress(self, value: float) -> None:
         value = clamp(value)
@@ -571,7 +579,7 @@ class PreviewArea(Gtk.Widget):
         model = self.model
         latest, self.latest = self.latest, None
         if latest is not None:
-            self.halftone.submit(latest)
+            self.stars.submit(latest)
         model.elapsed += elapsed
         model.state_elapsed += elapsed
         self.progress.step(elapsed)
@@ -579,8 +587,11 @@ class PreviewArea(Gtk.Widget):
         model.pulse = max(0.0, model.pulse - elapsed / 0.45)
         target = 0.0 if model.state == "scanning" else 1.0
         model.result += (target - model.result) * (1 - math.exp(-elapsed * 8))
+        if model.state != "scanning" and model.state_elapsed > STARS_HOLD_SECONDS:
+            self.stars.fade_out()
+        self.stars.advance(elapsed)
         look = self.look
-        look.tint, look.band_color, look.band_middle, look.band_alpha, look.shake = preview_look(model, PREVIEW_HEIGHT)
+        look.tint, look.glow, look.shake = preview_look(model)
         self.queue_draw()
 
     def _stroke(self, snapshot: Gtk.Snapshot, width: float, color: tuple[float, float, float], alpha: float, dash: list[float] | None = None, offset: float = 0.0) -> None:
@@ -598,8 +609,8 @@ class PreviewArea(Gtk.Widget):
         scale = surface.get_scale() if surface else float(self.get_scale_factor())
         snapshot.save()
         snapshot.translate(Graphene.Point().init(PREVIEW_BLEED + look.shake, PREVIEW_BLEED))
-        self.halftone.snapshot(snapshot, scale, look)
-        color = look.band_color
+        self.stars.snapshot(snapshot, scale, look)
+        color = PREVIEW_COLORS.get(model.state, PREVIEW_COLORS["scanning"])
         searching = (1 - model.progress) * (1 - model.result)
         if searching > 0.01:
             # A short comet circles until the first sample lands.

@@ -8,7 +8,7 @@ import unittest
 import cairo
 
 from facegate import faces, faces_helper
-from facegate.edge_hud import DOT_STYLE, PREVIEW_FEATHER, HudServer, preview_look, PreviewModel
+from facegate.edge_hud import PREVIEW_FEATHER, STAR_STYLE, HudServer, PreviewModel, preview_look
 from facegate.protocol import MAX_STREAM_BYTES, PREVIEW_HEIGHT, PREVIEW_WIDTH, decode, encode
 
 
@@ -200,64 +200,83 @@ class HelperTests(unittest.TestCase):
 
 class PreviewTests(unittest.TestCase):
     def setUp(self):
-        from facegate import halftone
+        from facegate import starlight
 
-        self.halftone = halftone
+        self.starlight = starlight
+        self.frame = bytes(range(256)) * (PREVIEW_WIDTH * PREVIEW_HEIGHT // 256) + bytes(PREVIEW_WIDTH * PREVIEW_HEIGHT % 256)
 
     def test_feather_is_opaque_inside_and_clear_at_the_rim(self):
-        alpha = self.halftone.feather_alpha(PREVIEW_WIDTH, PREVIEW_HEIGHT, 30, PREVIEW_FEATHER)
-        texels = self.halftone.FEATHER_TEXELS
+        alpha = self.starlight.feather_alpha(PREVIEW_WIDTH, PREVIEW_HEIGHT, 30, PREVIEW_FEATHER)
+        texels = self.starlight.FEATHER_TEXELS
         middle = alpha.shape[0] // 2
         self.assertEqual(alpha[middle, alpha.shape[1] // 2], 255)
         self.assertEqual(alpha[0, 0], 0)
         self.assertEqual(alpha[middle, 0], 0)
         self.assertLess(alpha[middle, PREVIEW_FEATHER * texels // 2], 255)
 
-    def test_dots_fill_the_field_on_a_hexagonal_grid(self):
-        grid = self.halftone.dot_grid(PREVIEW_WIDTH, PREVIEW_HEIGHT, DOT_STYLE["pitch"])
-        centres = self.halftone.dot_centres(grid)
-        radius = DOT_STYLE["max_radius"]
-        self.assertGreater(len(centres), 1000)
-        self.assertTrue(all(radius <= x <= PREVIEW_WIDTH - radius for x, _y in centres))
-        ys = sorted({y for _x, y in centres})
-        self.assertAlmostEqual(ys[1] - ys[0], ys[2] - ys[1])
-        # Odd rows sit exactly half a pitch across, so one tile repeats the grid.
+    def test_stars_fill_the_field_and_one_tile_repeats_it(self):
+        grid = self.starlight.star_grid(PREVIEW_WIDTH, PREVIEW_HEIGHT, STAR_STYLE["pitch"])
+        cells = self.starlight.star_cells(grid)
+        self.assertGreater(len(cells), 2000)
+        xs = [self.starlight.cell_centre(grid, row, column)[0] for row, column in cells]
+        self.assertTrue(all(0 < x < PREVIEW_WIDTH for x in xs))
+        # Odd rows sit exactly half a pitch across, so the jittered tile repeats the grid.
         self.assertAlmostEqual(grid["left_odd"] - grid["left_even"], grid["pitch"] / 2)
 
-    def test_the_distance_tile_is_zero_at_every_dot_and_rises_between(self):
-        grid = self.halftone.dot_grid(PREVIEW_WIDTH, PREVIEW_HEIGHT, DOT_STYLE["pitch"])
-        tile = self.halftone.distance_tile(grid["pitch"], grid["row_height"], DOT_STYLE["max_radius"])
-        height, width = tile.shape
-        self.assertLess(tile[height // 4, width // 2], 20)
-        self.assertLess(tile[3 * height // 4, 0], 20)
-        self.assertEqual(tile[height // 2, width // 4], 255)
+    def test_every_star_is_near_its_cell_centre_in_the_distance_tile(self):
+        grid = self.starlight.star_grid(PREVIEW_WIDTH, PREVIEW_HEIGHT, STAR_STYLE["pitch"])
+        jitter = self.starlight.jitter_pattern(grid["pitch"], grid["row_height"])
+        tile = self.starlight.distance_tile(grid["pitch"], grid["row_height"], STAR_STYLE["reach"], jitter)
+        texels = self.starlight.TILE_TEXELS
+        # The star of the first even cell, found where its jitter puts it.
+        x = grid["pitch"] / 2 + jitter[0, 0, 0]
+        y = grid["row_height"] / 2 + jitter[0, 0, 1]
+        self.assertLess(tile[int(y * texels), int(x * texels)], 10)
+        # Cores stay inside their cells, however they're scattered; the glow is a blur.
+        self.assertLess(abs(jitter[..., 1]).max() + STAR_STYLE["core"], grid["row_height"] / 2)
+        self.assertLess(abs(jitter[..., 0]).max() + STAR_STYLE["core"], grid["pitch"] / 2)
 
-    def test_brighter_pixels_make_bigger_dots_whatever_the_exposure(self):
-        halftone = self.halftone.Halftone(PREVIEW_WIDTH, PREVIEW_HEIGHT, DOT_STYLE)
+    def test_brighter_pixels_make_bigger_stars_whatever_the_exposure(self):
+        stars = self.starlight.Starlight(PREVIEW_WIDTH, PREVIEW_HEIGHT, STAR_STYLE)
         pixels = bytes(20 if x < PREVIEW_WIDTH // 2 else 60 for _y in range(PREVIEW_HEIGHT) for x in range(PREVIEW_WIDTH))
-        sizes = halftone.sizes(pixels)
-        centres = self.halftone.dot_centres(halftone.grid)
-        left = [size for (x, _y), size in zip(centres, sizes) if x < PREVIEW_WIDTH / 2 - 8]
-        right = [size for (x, _y), size in zip(centres, sizes) if x > PREVIEW_WIDTH / 2 + 8]
+        brightness = stars.brightness(pixels)
+        rows, columns, _parity = stars.slots
+        xs = [self.starlight.cell_centre(stars.grid, row, column)[0] for row, column in zip(rows, columns)]
+        left = [value for x, value in zip(xs, brightness) if x < PREVIEW_WIDTH / 2 - 8]
+        right = [value for x, value in zip(xs, brightness) if x > PREVIEW_WIDTH / 2 + 8]
         self.assertEqual(max(left), 0)
         self.assertGreater(min(right), 0.95)
         with self.assertRaises(ValueError):
-            halftone.submit(b"\x00" * 10)
+            stars.submit(b"\x00" * 10)
 
-    def test_frames_become_render_nodes_in_every_state(self):
+    def test_stars_materialize_then_wink_out(self):
+        stars = self.starlight.Starlight(PREVIEW_WIDTH, PREVIEW_HEIGHT, STAR_STYLE)
+        self.assertFalse(stars.visible)
+        stars.submit(self.frame)
+        stars.advance(0.1)
+        early = stars.presence
+        for _ in range(60):
+            stars.advance(1 / 30)
+        self.assertLess(early, 0.2)
+        self.assertEqual(stars.presence, 1.0)
+        stars.fade_out()
+        for _ in range(60):
+            stars.advance(1 / 30)
+        self.assertEqual(stars.presence, 0.0)
+        self.assertFalse(stars.visible)
+
+    def test_stars_become_render_nodes_in_every_state(self):
         from gi.repository import Gtk
 
-        halftone = self.halftone.Halftone(PREVIEW_WIDTH, PREVIEW_HEIGHT, DOT_STYLE)
-        self.assertIsNone(halftone.dots(1.0, (1, 1, 1)))
-        frame = bytes(range(256)) * (PREVIEW_WIDTH * PREVIEW_HEIGHT // 256) + bytes(PREVIEW_WIDTH * PREVIEW_HEIGHT % 256)
-        halftone.submit(frame)
-        halftone.submit(frame)
+        stars = self.starlight.Starlight(PREVIEW_WIDTH, PREVIEW_HEIGHT, STAR_STYLE)
+        self.assertIsNone(stars.stars(1.0, self.starlight.Look()))
+        stars.submit(self.frame)
+        stars.advance(0.5)
         for state in ("scanning", "success", "failure"):
-            model = PreviewModel(state=state, progress=0.5, result=0.5, pulse=0.5, elapsed=1.3, state_elapsed=0.1)
-            look = self.halftone.Look()
-            look.tint, look.band_color, look.band_middle, look.band_alpha, look.shake = preview_look(model, PREVIEW_HEIGHT)
+            look = self.starlight.Look()
+            look.tint, look.glow, look.shake = preview_look(PreviewModel(state=state, result=0.5, pulse=0.5, state_elapsed=0.1))
             snapshot = Gtk.Snapshot()
-            halftone.snapshot(snapshot, 2.0, look)
+            stars.snapshot(snapshot, 2.0, look)
             self.assertIsNotNone(snapshot.to_node())
 
 

@@ -61,8 +61,9 @@ Rules:
 - Primary buttons are white with black text. Secondary buttons are `#1c1c1e`
   with white text. There is no blue accent button.
 - The camera preview is the only imagery, and it is never the raw IR
-  picture, which lights skin from within and looks ghostly. It is a halftone
-  of cool (`#d6f0ff`) dots that takes on the result colour only at a result.
+  picture, which lights skin from within and looks ghostly. It is starlight:
+  cool (`#d6f0ff`) particles that form the face, taking on the result colour
+  only at a result.
 
 ### Typography
 
@@ -530,15 +531,21 @@ title. The island narrows from its configuration width to the compact 344
 width and hugs the enrollment content.
 
 - **Preview:** the camera crop follows the face (eased; the face is about half
-  the height, eyes a little above center). It's drawn as a halftone: dots 6
-  apart on a hexagonal grid, each one's size set by the brightness beneath it
-  (radius up to 2.6). Each frame is stretched between its 4th and 97th
-  brightness percentiles, the dimmest 18% (noise, background) draws nothing,
-  and a 2.2 curve keeps eyes, nose and mouth readable instead of one bright
-  mass. Cool `#d6f0ff` at 82%, masked by a rounded rectangle (radius 30)
-  whose last 36 pt feather to nothing, so the dots dissolve into the black
-  island. While scanning, a soft cyan band of light sweeps down through the
-  dots every 2.4 s (linear); each captured sample brightens them briefly.
+  the height, eyes a little above center). It's drawn as starlight, after
+  Apple Watch pairing: about 2,900 stars scattered through a field (5 apart,
+  jittered), each a sharp core up to 1 pt whose size follows the brightness
+  of the face beneath it in real time (60 ms), bloomed by a tight 1.6 and a
+  wide 5 pt glow. Each frame is stretched between its 4th and 97th brightness
+  percentiles, the dimmest 18% (noise, background) lights nothing, and a 2.2
+  curve keeps eyes, nose and mouth readable. Every star twinkles on its own
+  phase and rate (0.6–1.8 Hz, down to 65%). Cores are cool `#d6f0ff`, glows
+  lean cyan; a rounded rectangle (radius 30) whose last 36 pt feather to
+  nothing dissolves the field into the black island. Each captured sample
+  brightens the stars briefly.
+- **Materialize and vanish:** with the first frame the field comes alive over
+  0.9 s, each star appearing at its own random moment and swelling into
+  place, so the face sparkles into being. 0.45 s after a result the stars,
+  already in the result's colour, wink out in random order over 0.7 s.
 - **Fluidity:** the preview runs at the camera's own rate. In the root
   helper a camera thread reads every frame (OpenCV's buffer held to one, so
   nothing queues) and sends a cropped preview of each lit one at once, while
@@ -549,19 +556,18 @@ width and hugs the enrollment content.
   skipped.
 - **Rendering:** the preview is recorded entirely as GSK render nodes, which
   GTK's Vulkan renderer draws on the GPU; there is no GL and no CPU
-  rasterising. Each frame, NumPy gathers one size per dot into two tiny
-  textures (even and odd rows), drawn nearest-neighbour so each fills its
-  dot's cell. A repeated tile holds the distance to the nearest dot; a screen
-  blend and a colour matrix turn size minus distance into each dot's
-  anti-aliased edge in device pixels. A cross-fade blends the last two
-  frames over the measured frame interval, a mask feathers the rounded
-  rectangle, a gradient through the dots makes the sweep, and the progress
-  trace is a path stroke. Python records a couple of dozen nodes per display
-  frame (about 0.06 ms).
+  rasterising. Each display frame, NumPy writes one core radius and a lit
+  flag per star into two tiny textures (even and odd rows), drawn
+  nearest-neighbour so each fills its star's cell. A repeated, jittered tile
+  holds the distance to each cell's star; a screen blend and a colour matrix
+  turn radius minus distance into each core's anti-aliased edge in device
+  pixels, two GPU blurs of the cores are the glow, a mask feathers the
+  rounded rectangle, and the progress trace is a path stroke. Python's share
+  is under a millisecond per frame.
 - **Progress:** a trace on the preview's rim, clockwise from top center. A
   short comet circles until the first sample. Each of the five samples springs
-  the trace forward with a brief glow. Success closes it green and tints the
-  image green. Failure turns it red with the mark's decaying shake.
+  the trace forward with a brief glow. Success closes it green and turns the
+  stars green. Failure turns it red with the mark's decaying shake.
 - **Copy:** "Adding your face", with the detail line as the scan's live hint.
   The hint cross-fades (100 ms out, 240 ms in) while the island eases to the
   new height. A single full-width **Cancel** replaces the Deny/Approve pair.

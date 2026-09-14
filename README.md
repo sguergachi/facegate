@@ -92,7 +92,8 @@ until it is turned on again. Saved faces and preferences are kept.
 
 - **Add a Face** reshapes the same island into admin approval. Once approved,
   that same surface transitions directly into a live, face-following preview, drawn from the IR
-  camera as a halftone of dots rather than the ghostly raw IR image,
+  camera as starlight, particles that form your face, rather than the ghostly
+  raw IR image,
   feathered into its rounded
   rectangle. A trace fills its rim clockwise as samples are captured, while the
   island says what it needs ("Move a little closer"), then closes green.
