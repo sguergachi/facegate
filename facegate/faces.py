@@ -15,6 +15,7 @@ import base64
 import json
 import math
 import os
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterator
@@ -218,91 +219,203 @@ class Scanner:
         self.encode = encode
         self.clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
 
-    def _hint(self, state: ScanState, key: str) -> Iterator[dict[str, Any]]:
-        if state.hint != key:
-            state.hint = key
-            yield {"event": "hint", "text": HINTS[key]}
-
     def scan(self, width: int, height: int, stopped: Callable[[], bool], clock: Callable[[], float] = time.monotonic) -> Iterator[dict[str, Any]]:
-        """Yield frame/hint/progress events, then one `captured` event."""
-        cv2 = self.cv2
-        state = ScanState()
-        follow = Follow()
-        aspect = width / height
-        started = last = clock()
-        yield from self._hint(state, "camera")
-        while not stopped():
-            now = clock()
+        """Yield frame/hint/progress events, then one `captured` event.
+
+        The preview runs at the camera's own rate. A camera thread reads every
+        frame and publishes a cropped preview of each lit one at once; an
+        analysis thread takes the newest lit frame whenever it is free, finds
+        the face (which the crop follows) and collects samples. Face detection
+        and recognition take far longer than a frame, but never hold the
+        preview up. Only the newest preview is ever sent, so a slow reader
+        sees the present rather than a backlog.
+        """
+        scan = _Scan(self, width, height, clock)
+        workers = [threading.Thread(target=scan.read_camera, daemon=True), threading.Thread(target=scan.analyse, daemon=True)]
+        yield {"event": "hint", "text": HINTS["camera"]}
+        for worker in workers:
+            worker.start()
+        try:
+            while not stopped():
+                preview, events, failure = scan.take()
+                if preview is not None:
+                    yield preview
+                for event in events:
+                    yield event
+                    if event["event"] == "captured":
+                        return
+                if failure:
+                    raise EnrollError(failure)
+        finally:
+            scan.finish()
+            for worker in workers:
+                worker.join(timeout=2)
+
+
+class _Scan:
+    """What the camera and analysis threads share during one scan."""
+
+    def __init__(self, scanner: Scanner, width: int, height: int, clock: Callable[[], float]) -> None:
+        self.scanner, self.width, self.height, self.clock = scanner, width, height, clock
+        self.aspect = width / height
+        # The scan opens by saying it's waiting for the camera.
+        self.state = ScanState(hint="camera")
+        self.follow = Follow()
+        self.changed = threading.Condition()
+        self.stop = False
+        self.started = clock()
+        # The newest lit frame for analysis (frame, grey, number), and the face in it.
+        self.latest: tuple[Any, Any, int] | None = None
+        self.face_box: tuple[float, float, float, float] | None = None
+        self.preview: dict[str, Any] | None = None
+        self.events: list[dict[str, Any]] = []
+        self.failure = ""
+
+    # Shared ---------------------------------------------------------------------
+
+    def post(self, event: dict[str, Any]) -> None:
+        with self.changed:
+            self.events.append(event)
+            self.changed.notify_all()
+
+    def hint(self, key: str) -> None:
+        with self.changed:
+            if self.state.hint != key:
+                self.state.hint = key
+                self.events.append({"event": "hint", "text": HINTS[key]})
+                self.changed.notify_all()
+
+    def fail(self, message: str) -> None:
+        with self.changed:
+            self.failure = self.failure or message
+            self.changed.notify_all()
+
+    def take(self) -> tuple[dict[str, Any] | None, list[dict[str, Any]], str]:
+        """Wait briefly for anything new, then hand it all over."""
+        with self.changed:
+            self.changed.wait_for(lambda: self.preview is not None or self.events or self.failure or self.stop, timeout=0.05)
+            preview, self.preview = self.preview, None
+            events, self.events = self.events, []
+            failure = self.failure
+            if not failure and self.clock() - self.started > SCAN_SECONDS:
+                state = self.state
+                failure = FAILURES["black"] if state.frames and state.black_frames == state.frames else FAILURES[state.trouble]
+        return preview, events, failure
+
+    def finish(self) -> None:
+        with self.changed:
+            self.stop = True
+            self.changed.notify_all()
+
+    # Camera thread ------------------------------------------------------------------
+
+    def read_camera(self) -> None:
+        cv2 = self.scanner.cv2
+        last = self.clock()
+        while not self.stop:
+            frame = self.scanner.read_frame()
+            now = self.clock()
             elapsed, last = now - last, now
-            if now - started > SCAN_SECONDS:
-                if state.frames and state.black_frames == state.frames:
-                    raise EnrollError(FAILURES["black"])
-                raise EnrollError(FAILURES[state.trouble])
-            frame = self.read_frame()
             if frame is None:
-                raise EnrollError("The camera stopped sending frames.")
-            state.frames += 1
-            gray = self.clahe.apply(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
-            frame_height, frame_width = gray.shape[:2]
+                self.fail("The camera stopped sending frames.")
+                return
+            gray = self.scanner.clahe.apply(frame if frame.ndim == 2 else cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
             hist = cv2.calcHist([gray], [0], None, [8], [0, 256])
             total = float(hist.sum())
             darkness = float(hist.ravel()[0]) / total * 100 if total else 100.0
-            if darkness >= 100 or darkness > self.dark_threshold:
-                # Many IR emitters strobe, lighting every other frame: skip the
-                # unlit ones silently, and only complain when the light is gone.
-                black = darkness >= 100
-                state.black_frames += black
-                if now - (state.last_lit or started) > UNLIT_GRACE:
-                    state.trouble = "black" if black else "dark"
-                    yield from self._hint(state, state.trouble)
+            state = self.state
+            with self.changed:
+                state.frames += 1
+                lit = darkness < 100 and darkness <= self.scanner.dark_threshold
+                if not lit:
+                    # Many IR emitters strobe, lighting every other frame: skip the
+                    # unlit ones silently, and only complain when the light is gone.
+                    state.black_frames += darkness >= 100
+                    unlit_for = now - (state.last_lit or self.started)
+                else:
+                    state.last_lit = now
+                    self.latest = (frame, gray, state.frames)
+                face_box = self.face_box
+            if not lit:
+                if unlit_for > UNLIT_GRACE:
+                    state.trouble = "black" if darkness >= 100 else "dark"
+                    self.hint(state.trouble)
                 continue
-            state.last_lit = now
+            frame_height, frame_width = gray.shape[:2]
+            self.follow.step(crop_target(frame_width, frame_height, face_box, self.aspect), elapsed)
+            x, y, crop_width, crop_height = crop_rect(self.follow.center_x, self.follow.center_y, self.follow.height, frame_width, frame_height, self.aspect)
+            preview = cv2.resize(gray[y:y + crop_height, x:x + crop_width], (self.width, self.height), interpolation=cv2.INTER_AREA)
+            event = {"event": "frame", "w": self.width, "h": self.height, "data": base64.b64encode(preview.tobytes()).decode("ascii")}
+            with self.changed:
+                self.preview = event
+                self.changed.notify_all()
 
-            scale = (self.max_height / frame_height) if self.max_height and frame_height > self.max_height else 1.0
-            small = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA) if scale != 1 else gray
-            faces = list(self.detector(small, 0)) or list(self.detector(small, 1))
+    # Analysis thread ----------------------------------------------------------------
 
-            face_box = None
-            if len(faces) == 1:
-                rect = faces[0]
-                face_box = (rect.left() / scale, rect.top() / scale, rect.right() / scale, rect.bottom() / scale)
-                state.last_face = now
-            follow.step(crop_target(frame_width, frame_height, face_box, aspect), elapsed)
-            x, y, crop_width, crop_height = crop_rect(follow.center_x, follow.center_y, follow.height, frame_width, frame_height, aspect)
-            preview = cv2.resize(gray[y:y + crop_height, x:x + crop_width], (width, height), interpolation=cv2.INTER_AREA)
-            yield {"event": "frame", "w": width, "h": height, "data": base64.b64encode(preview.tobytes()).decode("ascii")}
-
-            if len(faces) > 1:
-                state.trouble = "many"
-                yield from self._hint(state, "many")
-                continue
-            if not faces:
-                if now - state.last_face > NO_FACE_GRACE:
-                    state.trouble = "none"
-                    yield from self._hint(state, "none")
-                continue
-            rect = faces[0]
-            if rect.height() < MIN_FACE_FRACTION * small.shape[0]:
-                state.trouble = "far"
-                yield from self._hint(state, "far")
-                continue
-            yield from self._hint(state, "move" if state.samples else "hold")
-            if now - state.last_sample < SAMPLE_SPACING:
-                continue
-            if self.encode:
-                color = cv2.resize(frame, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA) if scale != 1 else frame
-                encoding = self.encode(color, rect)
-            else:
-                # Test mode: identical samples, so they arrive at the patient pace.
-                encoding = [0.0]
-            if not accepts(state, encoding, now):
-                continue
-            state.samples.append(encoding)
-            state.last_sample = now
-            yield {"event": "progress", "value": len(state.samples) / SAMPLES}
-            if len(state.samples) >= SAMPLES:
-                yield {"event": "captured", "encodings": state.samples}
+    def analyse(self) -> None:
+        scanner, cv2, state = self.scanner, self.scanner.cv2, self.state
+        seen = 0
+        while True:
+            with self.changed:
+                self.changed.wait_for(lambda: self.stop or (self.latest is not None and self.latest[2] != seen), timeout=0.5)
+                if self.stop:
+                    return
+                if self.latest is None or self.latest[2] == seen:
+                    continue
+                frame, gray, seen = self.latest
+            try:
+                if self._analyse_frame(scanner, cv2, state, frame, gray):
+                    return
+            except EnrollError as error:
+                self.fail(str(error))
                 return
+
+    def _analyse_frame(self, scanner: Scanner, cv2: Any, state: ScanState, frame: Any, gray: Any) -> bool:
+        """Find the face and maybe take a sample; True once enough are captured."""
+        now = self.clock()
+        frame_height = gray.shape[0]
+        scale = (scanner.max_height / frame_height) if scanner.max_height and frame_height > scanner.max_height else 1.0
+        small = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA) if scale != 1 else gray
+        faces = list(scanner.detector(small, 0)) or list(scanner.detector(small, 1))
+        if len(faces) == 1:
+            rect = faces[0]
+            self.face_box = (rect.left() / scale, rect.top() / scale, rect.right() / scale, rect.bottom() / scale)
+            state.last_face = now
+        else:
+            self.face_box = None
+        if len(faces) > 1:
+            state.trouble = "many"
+            self.hint("many")
+            return False
+        if not faces:
+            if now - state.last_face > NO_FACE_GRACE:
+                state.trouble = "none"
+                self.hint("none")
+            return False
+        rect = faces[0]
+        if rect.height() < MIN_FACE_FRACTION * small.shape[0]:
+            state.trouble = "far"
+            self.hint("far")
+            return False
+        self.hint("move" if state.samples else "hold")
+        if now - state.last_sample < SAMPLE_SPACING:
+            return False
+        if scanner.encode:
+            color = frame if frame.ndim == 3 else cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+            color = cv2.resize(color, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA) if scale != 1 else color
+            encoding = scanner.encode(color, rect)
+        else:
+            # Test mode: identical samples, so they arrive at the patient pace.
+            encoding = [0.0]
+        if not accepts(state, encoding, now):
+            return False
+        state.samples.append(encoding)
+        state.last_sample = now
+        self.post({"event": "progress", "value": len(state.samples) / SAMPLES})
+        if len(state.samples) >= SAMPLES:
+            self.post({"event": "captured", "encodings": state.samples})
+            return True
+        return False
 
 
 def howdy_scanner(howdy_dir: str = HOWDY_DIR) -> tuple[Scanner, Callable[[], None]]:
@@ -333,6 +446,11 @@ def howdy_scanner(howdy_dir: str = HOWDY_DIR) -> tuple[Scanner, Callable[[], Non
         capture = VideoCapture(config)
     except SystemExit as error:
         raise EnrollError("Howdy couldn't open the camera.") from error
+
+    # Read frames as they arrive rather than from a queue of stale ones.
+    import cv2
+
+    capture.internal.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
     def read_frame() -> Any:
         ok, frame = capture.internal.read()

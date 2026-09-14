@@ -69,6 +69,53 @@ class FramingTests(unittest.TestCase):
         self.assertTrue(faces.accepts(state, [0.01, 0.0], 10.0 + faces.SAMPLE_PATIENCE + 0.1))
 
 
+class ThreadedScanTests(unittest.TestCase):
+    def test_preview_keeps_the_camera_rate_while_detection_is_slow(self):
+        import threading
+        import time as clock
+
+        import numpy
+
+        scanner = faces.Scanner.__new__(faces.Scanner)
+        import cv2
+
+        scanner.cv2 = cv2
+        scanner.clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        scanner.max_height = 320
+        scanner.dark_threshold = 100
+        scanner.encode = None
+        lit = numpy.full((340, 340), 120, numpy.uint8)
+
+        def read_frame():
+            clock.sleep(1 / 30)
+            return lit
+
+        class Face:
+            def left(self): return 110
+            def top(self): return 90
+            def right(self): return 230
+            def bottom(self): return 230
+            def height(self): return 140
+
+        detections = []
+
+        def detector(image, _upsample):
+            # A detector far slower than the camera.
+            detections.append(threading.get_ident())
+            clock.sleep(0.12)
+            return [Face()]
+
+        scanner.detector = detector
+        scanner.read_frame = read_frame
+        started = clock.monotonic()
+        frames = 0
+        for event in scanner.scan(PREVIEW_WIDTH, PREVIEW_HEIGHT, lambda: clock.monotonic() - started > 1.0):
+            frames += event["event"] == "frame"
+        self.assertGreaterEqual(frames, 24)
+        self.assertLessEqual(len(detections), 10)
+        self.assertNotIn(threading.get_ident(), detections)
+
+
 class FakeScanner:
     def __init__(self, events):
         self.events = events

@@ -539,8 +539,14 @@ width and hugs the enrollment content.
   whose last 36 pt feather to nothing, so the dots dissolve into the black
   island. While scanning, a soft cyan band of light sweeps down through the
   dots every 2.4 s (linear); each captured sample brightens them briefly.
-- **Fluidity:** IR emitters often light only every other frame, so unlit
-  frames are skipped. The dots are drawn on the GPU by one fragment shader in
+- **Fluidity:** the preview runs at the camera's own rate. In the root
+  helper a camera thread reads every frame (OpenCV's buffer held to one, so
+  nothing queues) and sends a cropped preview of each lit one at once, while
+  an analysis thread takes the newest frame whenever it is free to find the
+  face, which the crop follows, and collect samples; detection and
+  recognition never hold the preview up, and only the newest preview is
+  sent. IR emitters often light only every other frame, so unlit frames are
+  skipped. The dots are drawn on the GPU by one fragment shader in
   a GL area (OpenGL 3.2 or GL ES 3.0): a camera frame is one small texture
   upload, and the shader blends from the previous frame to the newest over
   the measured time between frames, so the dots move continuously. The
