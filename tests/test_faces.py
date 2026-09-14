@@ -8,7 +8,7 @@ import unittest
 import cairo
 
 from facegate import faces, faces_helper
-from facegate.edge_hud import DOT_MAX_RADIUS, PREVIEW_FEATHER, DotField, HudServer, PreviewModel, feather_mask, paint_preview
+from facegate.edge_hud import DOT_STYLE, PREVIEW_FEATHER, HudServer, preview_look, PreviewModel
 from facegate.protocol import MAX_STREAM_BYTES, PREVIEW_HEIGHT, PREVIEW_WIDTH, decode, encode
 
 
@@ -199,73 +199,66 @@ class HelperTests(unittest.TestCase):
 
 
 class PreviewTests(unittest.TestCase):
+    def setUp(self):
+        from facegate import halftone
+
+        self.halftone = halftone
+
     def test_feather_is_opaque_inside_and_clear_at_the_rim(self):
-        mask = feather_mask(PREVIEW_WIDTH, PREVIEW_HEIGHT)
-        data, stride = mask.get_data(), mask.get_stride()
-        self.assertEqual(data[(PREVIEW_HEIGHT // 2) * stride + PREVIEW_WIDTH // 2], 255)
-        self.assertEqual(data[0], 0)
-        self.assertEqual(data[(PREVIEW_HEIGHT // 2) * stride], 0)
-        self.assertLess(data[(PREVIEW_HEIGHT // 2) * stride + PREVIEW_FEATHER // 2], 255)
+        alpha = self.halftone.feather_alpha(PREVIEW_WIDTH, PREVIEW_HEIGHT, 30, PREVIEW_FEATHER)
+        texels = self.halftone.FEATHER_TEXELS
+        middle = alpha.shape[0] // 2
+        self.assertEqual(alpha[middle, alpha.shape[1] // 2], 255)
+        self.assertEqual(alpha[0, 0], 0)
+        self.assertEqual(alpha[middle, 0], 0)
+        self.assertLess(alpha[middle, PREVIEW_FEATHER * texels // 2], 255)
 
     def test_dots_fill_the_field_on_a_hexagonal_grid(self):
-        field = DotField()
-        xs = [x for x, _y in field.centres]
-        ys = sorted({y for _x, y in field.centres})
-        self.assertGreater(len(field.centres), 1000)
-        self.assertTrue(all(DOT_MAX_RADIUS <= x <= PREVIEW_WIDTH - DOT_MAX_RADIUS for x in xs))
+        grid = self.halftone.dot_grid(PREVIEW_WIDTH, PREVIEW_HEIGHT, DOT_STYLE["pitch"])
+        centres = self.halftone.dot_centres(grid)
+        radius = DOT_STYLE["max_radius"]
+        self.assertGreater(len(centres), 1000)
+        self.assertTrue(all(radius <= x <= PREVIEW_WIDTH - radius for x, _y in centres))
+        ys = sorted({y for _x, y in centres})
         self.assertAlmostEqual(ys[1] - ys[0], ys[2] - ys[1])
+        # Odd rows sit exactly half a pitch across, so one tile repeats the grid.
+        self.assertAlmostEqual(grid["left_odd"] - grid["left_even"], grid["pitch"] / 2)
+
+    def test_the_distance_tile_is_zero_at_every_dot_and_rises_between(self):
+        grid = self.halftone.dot_grid(PREVIEW_WIDTH, PREVIEW_HEIGHT, DOT_STYLE["pitch"])
+        tile = self.halftone.distance_tile(grid["pitch"], grid["row_height"], DOT_STYLE["max_radius"])
+        height, width = tile.shape
+        self.assertLess(tile[height // 4, width // 2], 20)
+        self.assertLess(tile[3 * height // 4, 0], 20)
+        self.assertEqual(tile[height // 2, width // 4], 255)
 
     def test_brighter_pixels_make_bigger_dots_whatever_the_exposure(self):
-        # A dim frame, dark left and a little lighter right: levels still span 0..1.
+        halftone = self.halftone.Halftone(PREVIEW_WIDTH, PREVIEW_HEIGHT, DOT_STYLE)
         pixels = bytes(20 if x < PREVIEW_WIDTH // 2 else 60 for _y in range(PREVIEW_HEIGHT) for x in range(PREVIEW_WIDTH))
-        field = DotField()
-        field.sample(pixels)
-        left = [level for (x, _y), level in zip(field.centres, field.levels) if x < PREVIEW_WIDTH / 2 - 8]
-        right = [level for (x, _y), level in zip(field.centres, field.levels) if x > PREVIEW_WIDTH / 2 + 8]
-        self.assertLess(max(left), 0.05)
+        sizes = halftone.sizes(pixels)
+        centres = self.halftone.dot_centres(halftone.grid)
+        left = [size for (x, _y), size in zip(centres, sizes) if x < PREVIEW_WIDTH / 2 - 8]
+        right = [size for (x, _y), size in zip(centres, sizes) if x > PREVIEW_WIDTH / 2 + 8]
+        self.assertEqual(max(left), 0)
         self.assertGreater(min(right), 0.95)
         with self.assertRaises(ValueError):
-            field.sample(b"\x00" * 10)
+            halftone.submit(b"\x00" * 10)
 
-    def test_dots_ease_toward_a_new_frame(self):
-        field = DotField()
-        field.sample(bytes(PREVIEW_WIDTH * PREVIEW_HEIGHT))
-        field.sample(bytes(range(256)) * (PREVIEW_WIDTH * PREVIEW_HEIGHT // 256) + bytes(PREVIEW_WIDTH * PREVIEW_HEIGHT % 256))
-        before = sum(field.levels)
-        field.advance(1 / 60)
-        self.assertGreater(sum(field.levels), before)
-        self.assertLess(sum(field.levels), sum(field.targets))
+    def test_frames_become_render_nodes_in_every_state(self):
+        from gi.repository import Gtk
 
-    def test_the_gpu_grid_describes_the_same_dots(self):
-        field = DotField()
-        grid = field.grid
-        rebuilt = [
-            (grid["left_odd" if row % 2 else "left_even"] + column * grid["pitch"], grid["top"] + row * grid["row_height"])
-            for row in range(grid["rows"])
-            for column in range(grid["columns_odd" if row % 2 else "columns_even"])
-        ]
-        self.assertEqual(rebuilt, field.centres)
-
-    def test_frame_levels_find_the_exposure_range(self):
-        from facegate.halftone import frame_levels
-
-        dim = bytes([20] * 5000 + [60] * 5000)
-        low, high = frame_levels(dim, 0.04, 0.97)
-        self.assertAlmostEqual(low, 20 / 255)
-        self.assertAlmostEqual(high, 60 / 255)
-        # A flat frame keeps a minimum span rather than dividing by nothing.
-        low, high = frame_levels(bytes([90] * 9000), 0.04, 0.97)
-        self.assertGreater(high, low)
-
-    def test_every_state_paints_with_and_without_frames(self):
-        field = DotField()
-        field.sample(bytes(range(256)) * (PREVIEW_WIDTH * PREVIEW_HEIGHT // 256) + bytes(PREVIEW_WIDTH * PREVIEW_HEIGHT % 256))
+        halftone = self.halftone.Halftone(PREVIEW_WIDTH, PREVIEW_HEIGHT, DOT_STYLE)
+        self.assertIsNone(halftone.dots(1.0, (1, 1, 1)))
+        frame = bytes(range(256)) * (PREVIEW_WIDTH * PREVIEW_HEIGHT // 256) + bytes(PREVIEW_WIDTH * PREVIEW_HEIGHT % 256)
+        halftone.submit(frame)
+        halftone.submit(frame)
         for state in ("scanning", "success", "failure"):
-            for progress in (0.0, 0.6, 1.0):
-                for current in (None, DotField(), field):
-                    surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, PREVIEW_WIDTH, PREVIEW_HEIGHT)
-                    model = PreviewModel(state=state, progress=progress, result=progress, pulse=progress, elapsed=1.3)
-                    paint_preview(cairo.Context(surface), PREVIEW_WIDTH, PREVIEW_HEIGHT, current, model)
+            model = PreviewModel(state=state, progress=0.5, result=0.5, pulse=0.5, elapsed=1.3, state_elapsed=0.1)
+            look = self.halftone.Look()
+            look.tint, look.band_color, look.band_middle, look.band_alpha, look.shake = preview_look(model, PREVIEW_HEIGHT)
+            snapshot = Gtk.Snapshot()
+            halftone.snapshot(snapshot, 2.0, look)
+            self.assertIsNotNone(snapshot.to_node())
 
 
 class StreamTests(unittest.TestCase):

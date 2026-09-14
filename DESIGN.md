@@ -546,13 +546,18 @@ width and hugs the enrollment content.
   face, which the crop follows, and collect samples; detection and
   recognition never hold the preview up, and only the newest preview is
   sent. IR emitters often light only every other frame, so unlit frames are
-  skipped. The dots are drawn on the GPU by one fragment shader in
-  a GL area (OpenGL 3.2 or GL ES 3.0): a camera frame is one small texture
-  upload, and the shader blends from the previous frame to the newest over
-  the measured time between frames, so the dots move continuously. The
-  per-dot work (softening, levels, curve, anti-aliased circles, feather,
-  tint, sweep) never touches Python; a display frame costs it well under a
-  tenth of a millisecond. Without GL the same look is drawn on the CPU.
+  skipped.
+- **Rendering:** the preview is recorded entirely as GSK render nodes, which
+  GTK's Vulkan renderer draws on the GPU; there is no GL and no CPU
+  rasterising. Each frame, NumPy gathers one size per dot into two tiny
+  textures (even and odd rows), drawn nearest-neighbour so each fills its
+  dot's cell. A repeated tile holds the distance to the nearest dot; a screen
+  blend and a colour matrix turn size minus distance into each dot's
+  anti-aliased edge in device pixels. A cross-fade blends the last two
+  frames over the measured frame interval, a mask feathers the rounded
+  rectangle, a gradient through the dots makes the sweep, and the progress
+  trace is a path stroke. Python records a couple of dozen nodes per display
+  frame (about 0.06 ms).
 - **Progress:** a trace on the preview's rim, clockwise from top center. A
   short comet circles until the first sample. Each of the five samples springs
   the trace forward with a brief glow. Success closes it green and tints the

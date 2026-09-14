@@ -430,126 +430,24 @@ IR_TINT = (0.84, 0.94, 1.0)
 # The camera is shown as a halftone of dots, never as the raw IR picture,
 # which lights skin from within and makes a face look like a ghost. Dots sit
 # on a hexagonal grid; each one's size carries the brightness beneath it.
-DOT_PITCH = 6.0
-DOT_ROW = DOT_PITCH * math.sqrt(3) / 2
-DOT_MAX_RADIUS = DOT_PITCH * 0.44
-# Dots ease toward each new frame, so lit IR frames arriving at half the
-# camera rate read as motion rather than flicker.
-DOT_EASE_SECONDS = 0.09
-# Levels are stretched between these brightness percentiles of each frame,
-# then shaped: the dimmest fifth (camera noise, background) draws nothing,
-# and a steep curve keeps skin from flattening into one bright mass, so
-# eyes, nose and mouth still read.
-DOT_LEVELS = (0.04, 0.97)
-DOT_FLOOR = 0.18
-DOT_GAMMA = 2.2
-# The dots are redrawn at most this often (the camera's own rate); every
-# display frame only tints and composites them.
-DOT_LAYER_SECONDS = 1 / 30
+# They are drawn as render nodes on the GPU (see halftone.py).
+DOT_STYLE = {
+    "pitch": 6.0,
+    "max_radius": 6.0 * 0.44,
+    # Levels are stretched between these brightness percentiles of each frame,
+    # then shaped: the dimmest fifth (camera noise, background) draws nothing,
+    # and a steep curve keeps skin from flattening into one bright mass, so
+    # eyes, nose and mouth still read.
+    "low_share": 0.04,
+    "high_share": 0.97,
+    "floor": 0.18,
+    "gamma": 2.2,
+    "corner": PREVIEW_RADIUS,
+    "feather": PREVIEW_FEATHER,
+}
 # While scanning, a soft cyan band of light drifts down through the dots.
 SWEEP_SECONDS = 2.4
 PREVIEW_COLORS = {"scanning": MARK_PROFILES["scanning"][:3], "success": MARK_PROFILES["success"][:3], "failure": MARK_PROFILES["failure"][:3]}
-
-_feather_masks: dict[tuple[int, int], cairo.ImageSurface] = {}
-
-
-def feather_mask(width: int, height: int) -> cairo.ImageSurface:
-    """An A8 rounded rectangle whose last PREVIEW_FEATHER pixels fade to nothing."""
-    key = (width, height)
-    if key in _feather_masks:
-        return _feather_masks[key]
-    stride = cairo.ImageSurface.format_stride_for_width(cairo.FORMAT_A8, width)
-    data = bytearray(stride * height)
-    radius = min(PREVIEW_RADIUS, width / 2, height / 2)
-    half_width, half_height = width / 2 - radius, height / 2 - radius
-    for y in range(height):
-        qy = abs(y + 0.5 - height / 2) - half_height
-        row = y * stride
-        for x in range(width):
-            qx = abs(x + 0.5 - width / 2) - half_width
-            # Signed distance to the rounded rectangle, negative inside.
-            outside = math.hypot(max(qx, 0.0), max(qy, 0.0))
-            edge = outside + min(max(qx, qy), 0.0) - radius
-            data[row + x] = round(255 * smoothstep(clamp(-edge / PREVIEW_FEATHER)))
-    mask = cairo.ImageSurface.create_for_data(data, cairo.FORMAT_A8, width, height, stride)
-    _feather_masks[key] = mask
-    return mask
-
-
-class DotField:
-    """A hexagonal halftone of the newest greyscale frame, easing between frames."""
-
-    def __init__(self, width: int = PREVIEW_WIDTH, height: int = PREVIEW_HEIGHT) -> None:
-        self.width, self.height = width, height
-        rows = int((height - DOT_PITCH) // DOT_ROW) + 1
-        top = (height - (rows - 1) * DOT_ROW) / 2
-        # Every other row shifts half a pitch; each row is centred on its own.
-        columns = [int((width - DOT_PITCH - (DOT_PITCH / 2 if parity else 0)) // DOT_PITCH) + 1 for parity in (0, 1)]
-        lefts = [(width - (count - 1) * DOT_PITCH) / 2 for count in columns]
-        # The same grid, as the GPU draws it.
-        self.grid = {
-            "pitch": DOT_PITCH, "row_height": DOT_ROW, "top": top, "rows": rows,
-            "left_even": lefts[0], "left_odd": lefts[1], "columns_even": columns[0], "columns_odd": columns[1],
-        }
-        self.centres: list[tuple[float, float]] = [
-            (lefts[row % 2] + column * DOT_PITCH, top + row * DOT_ROW) for row in range(rows) for column in range(columns[row % 2])
-        ]
-        self.levels = [0.0] * len(self.centres)
-        self.targets = [0.0] * len(self.centres)
-        self.has_frame = False
-        self.layer: cairo.ImageSurface | None = None
-        self.layer_time = 0.0
-        self.dirty = False
-
-    def sample(self, pixels: bytes) -> None:
-        """Read the brightness under each dot, stretched to the frame's own range."""
-        width, height = self.width, self.height
-        if len(pixels) != width * height:
-            raise ValueError("frame size does not match its dimensions")
-        values = []
-        for x, y in self.centres:
-            # Five taps across the cell soften the camera's grain.
-            column, row = int(x), int(y)
-            left, right = max(0, column - 2), min(width - 1, column + 2)
-            above, below = max(0, row - 2), min(height - 1, row + 2)
-            values.append(pixels[row * width + column] + pixels[row * width + left] + pixels[row * width + right] + pixels[above * width + column] + pixels[below * width + column])
-        ordered = sorted(values)
-        low = ordered[int(DOT_LEVELS[0] * (len(ordered) - 1))]
-        high = max(low + 25, ordered[int(DOT_LEVELS[1] * (len(ordered) - 1))])
-        span = float(high - low)
-        stretched = (clamp((value - low) / span) for value in values)
-        self.targets = [clamp((level - DOT_FLOOR) / (1 - DOT_FLOOR)) ** DOT_GAMMA for level in stretched]
-        if not self.has_frame:
-            self.levels = list(self.targets)
-            self.has_frame = True
-        self.dirty = True
-
-    def advance(self, elapsed: float) -> None:
-        amount = 1 - math.exp(-elapsed / DOT_EASE_SECONDS)
-        levels = [level + (target - level) * amount for level, target in zip(self.levels, self.targets)]
-        if not self.dirty:
-            self.dirty = any(abs(new - old) > 0.002 for new, old in zip(levels, self.levels))
-        self.levels = levels
-
-    def trace(self, context: Any) -> None:
-        """Add every visible dot to the current path."""
-        for (x, y), level in zip(self.centres, self.levels):
-            radius = DOT_MAX_RADIUS * math.sqrt(level)
-            if radius >= 0.45:
-                context.new_sub_path()
-                context.arc(x, y, radius, 0, math.tau)
-
-    def surface(self, now: float) -> cairo.ImageSurface:
-        """The dots as feathered coverage, redrawn only when they've moved."""
-        if self.layer is None or (self.dirty and abs(now - self.layer_time) >= DOT_LAYER_SECONDS):
-            layer = cairo.ImageSurface(cairo.FORMAT_A8, self.width, self.height)
-            context = cairo.Context(layer)
-            self.trace(context)
-            context.fill()
-            context.set_operator(cairo.OPERATOR_DEST_IN)
-            context.mask_surface(feather_mask(self.width, self.height), 0, 0)
-            self.layer, self.layer_time, self.dirty = layer, now, False
-        return self.layer
 
 
 def rounded_rect_path(context: Any, x: float, y: float, width: float, height: float, radius: float) -> float:
@@ -568,6 +466,24 @@ def rounded_rect_path(context: Any, x: float, y: float, width: float, height: fl
     context.arc(x + radius, y + radius, radius, math.pi, 3 * math.pi / 2)
     context.close_path()
     return 2 * (width - 2 * radius) + 2 * (height - 2 * radius) + math.tau * radius
+
+
+def rim_path(x: float, y: float, width: float, height: float, radius: float) -> Gsk.Path:
+    """The same rounded rectangle as a GSK path: clockwise from top centre."""
+    builder = Gsk.PathBuilder.new()
+    right, bottom = x + width, y + height
+    corner = math.sqrt(0.5)
+    builder.move_to(x + width / 2, y)
+    builder.line_to(right - radius, y)
+    builder.conic_to(right, y, right, y + radius, corner)
+    builder.line_to(right, bottom - radius)
+    builder.conic_to(right, bottom, right - radius, bottom, corner)
+    builder.line_to(x + radius, bottom)
+    builder.conic_to(x, bottom, x, bottom - radius, corner)
+    builder.line_to(x, y + radius)
+    builder.conic_to(x, y, x + radius, y, corner)
+    builder.close()
+    return builder.to_path()
 
 
 @dataclass
@@ -598,58 +514,16 @@ def preview_look(model: PreviewModel, height: float) -> tuple[tuple[float, float
     return tint, color, middle, strength, shake
 
 
-def paint_preview(context: Any, width: float, height: float, field: DotField | None, model: PreviewModel) -> None:
-    """The progress trace, over the dots when they are drawn on the CPU."""
-    tint, color, middle, strength, shake = preview_look(model, height)
-    context.save()
-    context.translate(shake, 0)
-    if field is not None and field.has_frame:
-        layer = field.surface(model.elapsed)
-        context.save()
-        context.scale(width / field.width, height / field.height)
-        context.set_source_rgb(*tint)
-        context.mask_surface(layer, 0, 0)
-        if strength > 0:
-            band = cairo.LinearGradient(0, middle - 36, 0, middle + 36)
-            band.add_color_stop_rgba(0, *color, 0)
-            band.add_color_stop_rgba(0.5, *color, strength)
-            band.add_color_stop_rgba(1, *color, 0)
-            context.set_source(band)
-            context.mask_surface(layer, 0, 0)
-        context.restore()
+class PreviewArea(Gtk.Widget):
+    """The camera as a halftone, with the progress trace around its rim.
 
-    length = rounded_rect_path(context, TRACE_INSET, TRACE_INSET, width - 2 * TRACE_INSET, height - 2 * TRACE_INSET, PREVIEW_RADIUS - TRACE_INSET)
-    context.set_line_cap(cairo.LINE_CAP_ROUND)
-    searching = (1 - model.progress) * (1 - model.result)
-    if searching > 0.01:
-        # A short comet circles until the first sample lands.
-        phase = (model.elapsed * 0.4) % 1.0
-        context.set_dash([length * 0.12, length * 0.88], (1 - phase) * length)
-        context.set_source_rgba(*color, 0.55 * searching)
-        context.set_line_width(2.0)
-        context.stroke_preserve()
-    progress = max(model.progress, model.result if model.state == "success" else 0.0)
-    if progress > 0.002:
-        # Captured samples fill the rim clockwise from the top.
-        context.set_dash([] if progress >= 0.999 else [length * progress, length * 2], 0)
-        for line_width, alpha in ((7.0, 0.14 + 0.22 * model.pulse), (2.0, 0.95)):
-            context.set_line_width(line_width)
-            context.set_source_rgba(*color, alpha)
-            context.stroke_preserve()
-    context.new_path()
-    context.restore()
-
-
-class PreviewArea(Gtk.Overlay):
-    """The camera preview: dots drawn on the GPU, the progress trace above them.
-
-    Without OpenGL 3.3 the dots are drawn on the CPU instead, in the trace's
-    own drawing area.
+    Everything is recorded as render nodes, so GTK's renderer (Vulkan for the
+    island) draws the dots, the feather, the sweep and the trace on the GPU.
     """
 
     def __init__(self) -> None:
         super().__init__()
-        from .halftone import HalftoneArea
+        from .halftone import Halftone, Look
 
         self.set_size_request(PREVIEW_WIDTH + 2 * PREVIEW_BLEED, PREVIEW_HEIGHT + 2 * PREVIEW_BLEED)
         self.model = PreviewModel()
@@ -657,28 +531,10 @@ class PreviewArea(Gtk.Overlay):
         self.progress.configure(0.45, 0.9)
         # Written by the socket thread or the panel, picked up on the frame clock.
         self.latest: bytes | None = None
-        self.field = DotField()
-        style = {
-            "max_radius": DOT_MAX_RADIUS, "corner": PREVIEW_RADIUS, "feather": PREVIEW_FEATHER,
-            "floor": DOT_FLOOR, "gamma": DOT_GAMMA,
-            "low_share": DOT_LEVELS[0], "high_share": DOT_LEVELS[1],
-        }
-        self.dots = HalftoneArea(PREVIEW_WIDTH, PREVIEW_HEIGHT, self.field.grid, style)
-        self.dots.set_margin_start(PREVIEW_BLEED)
-        self.dots.set_margin_top(PREVIEW_BLEED)
-        self.dots.set_halign(Gtk.Align.START)
-        self.dots.set_valign(Gtk.Align.START)
-        self.set_child(self.dots)
-        self.trace = Gtk.DrawingArea()
-        self.trace.set_content_width(PREVIEW_WIDTH + 2 * PREVIEW_BLEED)
-        self.trace.set_content_height(PREVIEW_HEIGHT + 2 * PREVIEW_BLEED)
-        self.trace.set_can_target(False)
-        self.trace.set_draw_func(self._draw)
-        self.add_overlay(self.trace)
-
-    def _draw(self, _area: Gtk.DrawingArea, context: Any, _width: int, _height: int) -> None:
-        context.translate(PREVIEW_BLEED, PREVIEW_BLEED)
-        paint_preview(context, PREVIEW_WIDTH, PREVIEW_HEIGHT, self.field if self.dots.failed else None, self.model)
+        self.halftone = Halftone(PREVIEW_WIDTH, PREVIEW_HEIGHT, DOT_STYLE)
+        self.look = Look()
+        self.rim = rim_path(TRACE_INSET, TRACE_INSET, PREVIEW_WIDTH - 2 * TRACE_INSET, PREVIEW_HEIGHT - 2 * TRACE_INSET, PREVIEW_RADIUS - TRACE_INSET)
+        self.rim_length = Gsk.PathMeasure.new(self.rim).get_length()
 
     def take_frame(self, message: dict[str, Any]) -> None:
         """Keep the newest greyscale preview frame; bad frames are ignored."""
@@ -695,8 +551,7 @@ class PreviewArea(Gtk.Overlay):
         self.model = PreviewModel()
         self.progress.value = self.progress.target = self.progress.velocity = 0.0
         self.latest = None
-        self.field = DotField()
-        self.dots.reset()
+        self.halftone.reset()
 
     def set_progress(self, value: float) -> None:
         value = clamp(value)
@@ -715,12 +570,8 @@ class PreviewArea(Gtk.Overlay):
     def advance(self, elapsed: float) -> None:
         model = self.model
         latest, self.latest = self.latest, None
-        if self.dots.failed:
-            if latest is not None:
-                self.field.sample(latest)
-            self.field.advance(elapsed)
-        elif latest is not None:
-            self.dots.submit(latest)
+        if latest is not None:
+            self.halftone.submit(latest)
         model.elapsed += elapsed
         model.state_elapsed += elapsed
         self.progress.step(elapsed)
@@ -728,11 +579,39 @@ class PreviewArea(Gtk.Overlay):
         model.pulse = max(0.0, model.pulse - elapsed / 0.45)
         target = 0.0 if model.state == "scanning" else 1.0
         model.result += (target - model.result) * (1 - math.exp(-elapsed * 8))
-        if not self.dots.failed:
-            look = self.dots.look
-            look.tint, look.band_color, look.band_middle, look.band_alpha, look.shake = preview_look(model, PREVIEW_HEIGHT)
-            self.dots.queue_render()
-        self.trace.queue_draw()
+        look = self.look
+        look.tint, look.band_color, look.band_middle, look.band_alpha, look.shake = preview_look(model, PREVIEW_HEIGHT)
+        self.queue_draw()
+
+    def _stroke(self, snapshot: Gtk.Snapshot, width: float, color: tuple[float, float, float], alpha: float, dash: list[float] | None = None, offset: float = 0.0) -> None:
+        stroke = Gsk.Stroke.new(width)
+        stroke.set_line_cap(Gsk.LineCap.ROUND)
+        if dash:
+            stroke.set_dash(dash)
+            stroke.set_dash_offset(offset)
+        snapshot.append_stroke(self.rim, stroke, Gdk.RGBA(red=color[0], green=color[1], blue=color[2], alpha=alpha))
+
+    def do_snapshot(self, snapshot: Gtk.Snapshot) -> None:
+        model, look, length = self.model, self.look, self.rim_length
+        native = self.get_native()
+        surface = native.get_surface() if native else None
+        scale = surface.get_scale() if surface else float(self.get_scale_factor())
+        snapshot.save()
+        snapshot.translate(Graphene.Point().init(PREVIEW_BLEED + look.shake, PREVIEW_BLEED))
+        self.halftone.snapshot(snapshot, scale, look)
+        color = look.band_color
+        searching = (1 - model.progress) * (1 - model.result)
+        if searching > 0.01:
+            # A short comet circles until the first sample lands.
+            phase = (model.elapsed * 0.4) % 1.0
+            self._stroke(snapshot, 2.0, color, 0.55 * searching, [length * 0.12, length * 0.88], (1 - phase) * length)
+        progress = max(model.progress, model.result if model.state == "success" else 0.0)
+        if progress > 0.002:
+            # Captured samples fill the rim clockwise from the top.
+            dash = None if progress >= 0.999 else [length * progress, length * 2]
+            for width, alpha in ((7.0, 0.14 + 0.22 * model.pulse), (2.0, 0.95)):
+                self._stroke(snapshot, width, color, alpha, dash)
+        snapshot.restore()
 
 
 @dataclass(frozen=True)

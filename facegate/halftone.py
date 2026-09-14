@@ -1,159 +1,104 @@
-"""The enrollment preview's halftone, drawn on the GPU.
+"""The enrollment preview's halftone, as GSK render nodes for the Vulkan renderer.
 
-The camera arrives as a small greyscale frame at up to 30 per second. Drawing
-thousands of dots for it on the CPU, in Python, stalls GTK's frame clock, so
-this module hands the whole effect to one fragment shader in a Gtk.GLArea.
+The camera arrives as a small greyscale frame. The dots are never drawn in
+Python: each frame becomes two tiny textures holding one value per dot, and
+everything per pixel is expressed as render nodes that GTK's renderer runs on
+the GPU (Vulkan, for FaceGate's island):
 
-Each camera frame costs one 312 x 208 texture upload. The last two frames are
-kept, and the shader blends from the older to the newer over the time frames
-actually take to arrive, so the dots move continuously rather than stepping.
-For every device pixel it finds the nearest dot on the hexagonal grid, reads
-that dot's brightness (softened, auto-levelled, noise-floored and curved),
-and covers the pixel with an anti-aliased circle, feathered into a rounded
-rectangle, tinted, with a sweeping band of light.
+- Each dot's size lives in a texture with one texel per dot, one texture for
+  even rows and one for odd, drawn with nearest-neighbour scaling so every
+  texel fills its dot's cell.
+- A small tile holding the distance to the nearest dot centre repeats across
+  the whole preview.
+- A screen blend puts size and distance into separate channels, and a colour
+  matrix turns (size - distance) into each dot's anti-aliased edge, in device
+  pixels.
+- A cross-fade blends the last two frames over the time frames really take,
+  a mask feathers the rounded rectangle, and a gradient through the dots makes
+  the sweep of light.
 
-The Python side does no per-dot or per-pixel work. GL is reached through
-ctypes, for OpenGL or OpenGL ES, whichever GTK's context uses, so there is no
-new dependency; without either, the widget reports `failed` and the preview
-falls back to drawing on the CPU.
+Per camera frame NumPy gathers about 2,000 values; per display frame Python
+only records a couple of dozen nodes.
 """
 
 from __future__ import annotations
 
-import ctypes
-import ctypes.util
+import math
 import time
 from dataclasses import dataclass
 
 import gi
 
 gi.require_version("Gdk", "4.0")
+gi.require_version("Graphene", "1.0")
+gi.require_version("Gsk", "4.0")
 gi.require_version("Gtk", "4.0")
-from gi.repository import Gdk, Gtk  # noqa: E402
+import numpy  # noqa: E402
+from gi.repository import Gdk, GLib, Graphene, Gsk, Gtk  # noqa: E402
 
-try:
-    import numpy
-except ImportError:  # Howdy depends on NumPy; this only guards odd installs.
-    numpy = None
+# The distance tile and the feather are drawn this many texels per point.
+TILE_TEXELS = 12
+FEATHER_TEXELS = 2
 
-GL_TRIANGLES = 0x0004
-GL_BLEND = 0x0BE2
-GL_VIEWPORT = 0x0BA2
-GL_UNPACK_ALIGNMENT = 0x0CF5
-GL_TEXTURE_2D = 0x0DE1
-GL_UNSIGNED_BYTE = 0x1401
-GL_RED = 0x1903
-GL_LINEAR = 0x2601
-GL_TEXTURE_MAG_FILTER = 0x2800
-GL_TEXTURE_MIN_FILTER = 0x2801
-GL_TEXTURE_WRAP_S = 0x2802
-GL_TEXTURE_WRAP_T = 0x2803
-GL_COLOR_BUFFER_BIT = 0x4000
-GL_CLAMP_TO_EDGE = 0x812F
-GL_R8 = 0x8229
-GL_TEXTURE0 = 0x84C0
-GL_FRAGMENT_SHADER = 0x8B30
-GL_VERTEX_SHADER = 0x8B31
-GL_COMPILE_STATUS = 0x8B81
-GL_LINK_STATUS = 0x8B82
 
-# The same shaders serve desktop GL and GL ES; only the first lines differ.
-HEADERS = {False: "#version 150\n", True: "#version 300 es\nprecision highp float;\n"}
+def rect(x: float, y: float, width: float, height: float) -> Graphene.Rect:
+    return Graphene.Rect().init(x, y, width, height)
 
-# One triangle that covers the whole target, with no vertex buffer at all.
-VERTEX = """
-void main() {
-    vec2 corner = vec2(float((gl_VertexID & 1) * 4 - 1), float((gl_VertexID & 2) * 2 - 1));
-    gl_Position = vec4(corner, 0.0, 1.0);
-}
-"""
 
-FRAGMENT = """
-out vec4 color;
-uniform sampler2D older;
-uniform sampler2D newer;
-uniform vec4 ranges;
-uniform float blend;
-uniform vec2 size;
-uniform vec2 viewport;
-uniform float shake;
-uniform float pitch;
-uniform float row_height;
-uniform float top;
-uniform float rows;
-uniform vec2 lefts;
-uniform vec2 columns;
-uniform float max_radius;
-uniform float corner;
-uniform float feather;
-uniform float floor_level;
-uniform float gamma;
-uniform vec3 tint;
-uniform vec3 band_color;
-uniform float band_middle;
-uniform float band_alpha;
-
-// A dot's brightness in one frame: five taps across its cell soften the
-// camera's grain, then the frame's own range, a noise floor and a curve.
-float level(sampler2D frame, vec2 uv, float low, float high) {
-    vec2 texel = 2.0 / size;
-    float value = texture(frame, uv).r * 0.4
-        + (texture(frame, uv + vec2(texel.x, 0.0)).r + texture(frame, uv - vec2(texel.x, 0.0)).r
-         + texture(frame, uv + vec2(0.0, texel.y)).r + texture(frame, uv - vec2(0.0, texel.y)).r) * 0.15;
-    float stretched = clamp((value - low) / max(high - low, 0.02), 0.0, 1.0);
-    return pow(clamp((stretched - floor_level) / (1.0 - floor_level), 0.0, 1.0), gamma);
-}
-
-void main() {
-    // This pixel in the preview's own points, y down, following any shake.
-    vec2 point = vec2(gl_FragCoord.x, viewport.y - gl_FragCoord.y) * size / viewport - vec2(shake, 0.0);
-    float device = size.x / viewport.x;
-    // The nearest dot is the nearest column in one of the two rows around it.
-    float first = floor((point.y - top) / row_height);
-    float nearest = 1e9;
-    vec2 centre = vec2(0.0);
-    for (int step = 0; step < 2; step++) {
-        float row = clamp(first + float(step), 0.0, rows - 1.0);
-        int odd = int(mod(row, 2.0));
-        float column = clamp(floor((point.x - lefts[odd]) / pitch + 0.5), 0.0, columns[odd] - 1.0);
-        vec2 candidate = vec2(lefts[odd] + column * pitch, top + row * row_height);
-        float away = distance(point, candidate);
-        if (away < nearest) {
-            nearest = away;
-            centre = candidate;
-        }
+def dot_grid(width: int, height: int, pitch: float) -> dict[str, float]:
+    """A hexagonal grid centred in the frame: every other row shifts half a pitch."""
+    row_height = pitch * math.sqrt(3) / 2
+    rows = int((height - pitch) // row_height) + 1
+    columns = [int((width - pitch - (pitch / 2 if parity else 0)) // pitch) + 1 for parity in (0, 1)]
+    lefts = [(width - (count - 1) * pitch) / 2 for count in columns]
+    return {
+        "pitch": pitch, "row_height": row_height, "top": (height - (rows - 1) * row_height) / 2, "rows": rows,
+        "left_even": lefts[0], "left_odd": lefts[1], "columns_even": columns[0], "columns_odd": columns[1],
     }
-    vec2 uv = centre / size;
-    float lit = mix(level(older, uv, ranges.x, ranges.y), level(newer, uv, ranges.z, ranges.w), blend);
-    float radius = max_radius * sqrt(lit);
-    float cover = radius < 0.45 ? 0.0 : clamp((radius - nearest) / device + 0.5, 0.0, 1.0);
-    // The rounded rectangle's last `feather` points fade to nothing.
-    vec2 inset = abs(point - size * 0.5) - (size * 0.5 - corner);
-    float edge = length(max(inset, 0.0)) + min(max(inset.x, inset.y), 0.0) - corner;
-    float fade = smoothstep(0.0, 1.0, clamp(-edge / feather, 0.0, 1.0));
-    float band = max(0.0, 1.0 - abs(point.y - band_middle) / 36.0) * band_alpha;
-    float alpha = cover * fade;
-    color = vec4(mix(tint, band_color, band) * alpha, alpha);
-}
-"""
 
 
-def frame_levels(pixels: bytes, low_share: float, high_share: float) -> tuple[float, float]:
-    """The brightness (0..1) at two percentiles of a greyscale frame."""
-    if numpy is not None:
-        counts = numpy.cumsum(numpy.bincount(numpy.frombuffer(pixels, numpy.uint8)[::3], minlength=256))
-        total = counts[-1]
-        low = int(numpy.searchsorted(counts, low_share * total))
-        high = int(numpy.searchsorted(counts, high_share * total))
-    else:
-        ordered = sorted(pixels[::17])
-        low, high = ordered[int(low_share * (len(ordered) - 1))], ordered[int(high_share * (len(ordered) - 1))]
-    return low / 255, max(low + 5, high) / 255
+def dot_centres(grid: dict[str, float]) -> list[tuple[float, float]]:
+    return [
+        (grid["left_odd" if row % 2 else "left_even"] + column * grid["pitch"], grid["top"] + row * grid["row_height"])
+        for row in range(grid["rows"])
+        for column in range(grid["columns_odd" if row % 2 else "columns_even"])
+    ]
+
+
+def memory_texture(pixels: numpy.ndarray, memory_format: Gdk.MemoryFormat, channels: int) -> Gdk.Texture:
+    height, width = pixels.shape[:2]
+    data = numpy.ascontiguousarray(pixels, dtype=numpy.uint8)
+    return Gdk.MemoryTexture.new(width, height, memory_format, GLib.Bytes.new(data.tobytes()), width * channels)
+
+
+def feather_alpha(width: int, height: int, radius: float, feather: float, texels: int = FEATHER_TEXELS) -> numpy.ndarray:
+    """A rounded rectangle whose last `feather` points fade to nothing, as 0..255."""
+    ys, xs = numpy.mgrid[0:height * texels, 0:width * texels].astype(numpy.float32)
+    x = (xs + 0.5) / texels - width / 2
+    y = (ys + 0.5) / texels - height / 2
+    qx, qy = numpy.abs(x) - (width / 2 - radius), numpy.abs(y) - (height / 2 - radius)
+    edge = numpy.hypot(numpy.maximum(qx, 0), numpy.maximum(qy, 0)) + numpy.minimum(numpy.maximum(qx, qy), 0) - radius
+    amount = numpy.clip(-edge / feather, 0, 1)
+    return numpy.round(255 * amount * amount * (3 - 2 * amount)).astype(numpy.uint8)
+
+
+def distance_tile(pitch: float, row_height: float, max_radius: float, texels: int = TILE_TEXELS) -> numpy.ndarray:
+    """One repeat of the grid: distance to its row's nearest dot, over max_radius, clamped."""
+    width, height = round(pitch * texels), round(2 * row_height * texels)
+    ys, xs = numpy.mgrid[0:height, 0:width].astype(numpy.float32)
+    x = (xs + 0.5) / width * pitch
+    y = (ys + 0.5) / height * 2 * row_height
+    # Tile origin sits half a pitch left and half a row above an even dot: an
+    # even dot at (pitch/2, row/2), and odd dots at the corners of the next row.
+    even = numpy.hypot(x - pitch / 2, y - row_height / 2)
+    odd = numpy.minimum(numpy.hypot(x, y - 1.5 * row_height), numpy.hypot(x - pitch, y - 1.5 * row_height))
+    distance = numpy.where(y < row_height, even, odd)
+    return numpy.round(255 * numpy.clip(distance / max_radius, 0, 1)).astype(numpy.uint8)
 
 
 @dataclass
 class Look:
-    """Everything the draw pass needs that changes from frame to frame."""
+    """What changes from frame to frame: colours, the sweep, the shake."""
 
     tint: tuple[float, float, float] = (1.0, 1.0, 1.0)
     band_color: tuple[float, float, float] = (0.0, 0.0, 0.0)
@@ -162,233 +107,131 @@ class Look:
     shake: float = 0.0
 
 
-class _GL:
-    """The few GL entry points the shader uses, bound through ctypes."""
+class Halftone:
+    """Turns frames into dot-size textures, and records the dots as render nodes."""
 
-    SIGNATURES = {
-        "glCreateShader": (ctypes.c_uint, [ctypes.c_uint]),
-        "glShaderSource": (None, [ctypes.c_uint, ctypes.c_int, ctypes.POINTER(ctypes.c_char_p), ctypes.c_void_p]),
-        "glCompileShader": (None, [ctypes.c_uint]),
-        "glGetShaderiv": (None, [ctypes.c_uint, ctypes.c_uint, ctypes.POINTER(ctypes.c_int)]),
-        "glGetShaderInfoLog": (None, [ctypes.c_uint, ctypes.c_int, ctypes.c_void_p, ctypes.c_char_p]),
-        "glDeleteShader": (None, [ctypes.c_uint]),
-        "glCreateProgram": (ctypes.c_uint, []),
-        "glAttachShader": (None, [ctypes.c_uint, ctypes.c_uint]),
-        "glLinkProgram": (None, [ctypes.c_uint]),
-        "glGetProgramiv": (None, [ctypes.c_uint, ctypes.c_uint, ctypes.POINTER(ctypes.c_int)]),
-        "glGetProgramInfoLog": (None, [ctypes.c_uint, ctypes.c_int, ctypes.c_void_p, ctypes.c_char_p]),
-        "glDeleteProgram": (None, [ctypes.c_uint]),
-        "glUseProgram": (None, [ctypes.c_uint]),
-        "glGetUniformLocation": (ctypes.c_int, [ctypes.c_uint, ctypes.c_char_p]),
-        "glUniform1i": (None, [ctypes.c_int, ctypes.c_int]),
-        "glUniform1f": (None, [ctypes.c_int, ctypes.c_float]),
-        "glUniform2f": (None, [ctypes.c_int, ctypes.c_float, ctypes.c_float]),
-        "glUniform3f": (None, [ctypes.c_int, ctypes.c_float, ctypes.c_float, ctypes.c_float]),
-        "glUniform4f": (None, [ctypes.c_int, ctypes.c_float, ctypes.c_float, ctypes.c_float, ctypes.c_float]),
-        "glGenVertexArrays": (None, [ctypes.c_int, ctypes.POINTER(ctypes.c_uint)]),
-        "glBindVertexArray": (None, [ctypes.c_uint]),
-        "glDeleteVertexArrays": (None, [ctypes.c_int, ctypes.POINTER(ctypes.c_uint)]),
-        "glGenTextures": (None, [ctypes.c_int, ctypes.POINTER(ctypes.c_uint)]),
-        "glDeleteTextures": (None, [ctypes.c_int, ctypes.POINTER(ctypes.c_uint)]),
-        "glBindTexture": (None, [ctypes.c_uint, ctypes.c_uint]),
-        "glActiveTexture": (None, [ctypes.c_uint]),
-        "glTexParameteri": (None, [ctypes.c_uint, ctypes.c_uint, ctypes.c_int]),
-        "glTexImage2D": (None, [ctypes.c_uint, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_uint, ctypes.c_uint, ctypes.c_void_p]),
-        "glTexSubImage2D": (None, [ctypes.c_uint, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_uint, ctypes.c_uint, ctypes.c_char_p]),
-        "glPixelStorei": (None, [ctypes.c_uint, ctypes.c_int]),
-        "glGetIntegerv": (None, [ctypes.c_uint, ctypes.POINTER(ctypes.c_int)]),
-        "glDisable": (None, [ctypes.c_uint]),
-        "glClearColor": (None, [ctypes.c_float, ctypes.c_float, ctypes.c_float, ctypes.c_float]),
-        "glClear": (None, [ctypes.c_uint]),
-        "glDrawArrays": (None, [ctypes.c_uint, ctypes.c_int, ctypes.c_int]),
-    }
-
-    def __init__(self, es: bool) -> None:
-        # glvnd dispatches each API through its own library.
-        name = ctypes.util.find_library("GLESv2" if es else "OpenGL") or ("libGLESv2.so.2" if es else "libOpenGL.so.0")
-        library = ctypes.CDLL(name)
-        self.header = HEADERS[es]
-        for symbol, (result, arguments) in self.SIGNATURES.items():
-            function = getattr(library, symbol)
-            function.restype, function.argtypes = result, arguments
-            setattr(self, symbol[2:], function)
-
-    def compile(self, kind: int, source: str) -> int:
-        shader = self.CreateShader(kind)
-        text = ctypes.c_char_p((self.header + source).encode())
-        self.ShaderSource(shader, 1, ctypes.byref(text), None)
-        self.CompileShader(shader)
-        status = ctypes.c_int()
-        self.GetShaderiv(shader, GL_COMPILE_STATUS, ctypes.byref(status))
-        if not status.value:
-            log = ctypes.create_string_buffer(4096)
-            self.GetShaderInfoLog(shader, 4096, None, log)
-            raise RuntimeError(log.value.decode(errors="replace"))
-        return shader
-
-    def program(self) -> int:
-        program = self.CreateProgram()
-        shaders = (self.compile(GL_VERTEX_SHADER, VERTEX), self.compile(GL_FRAGMENT_SHADER, FRAGMENT))
-        for shader in shaders:
-            self.AttachShader(program, shader)
-        self.LinkProgram(program)
-        for shader in shaders:
-            self.DeleteShader(shader)
-        status = ctypes.c_int()
-        self.GetProgramiv(program, GL_LINK_STATUS, ctypes.byref(status))
-        if not status.value:
-            log = ctypes.create_string_buffer(4096)
-            self.GetProgramInfoLog(program, 4096, None, log)
-            raise RuntimeError(log.value.decode(errors="replace"))
-        return program
-
-    def texture(self, width: int, height: int) -> int:
-        name = ctypes.c_uint()
-        self.GenTextures(1, ctypes.byref(name))
-        self.BindTexture(GL_TEXTURE_2D, name.value)
-        for parameter, value in ((GL_TEXTURE_MIN_FILTER, GL_LINEAR), (GL_TEXTURE_MAG_FILTER, GL_LINEAR), (GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE), (GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)):
-            self.TexParameteri(GL_TEXTURE_2D, parameter, value)
-        self.TexImage2D(GL_TEXTURE_2D, 0, GL_R8, width, height, 0, GL_RED, GL_UNSIGNED_BYTE, None)
-        return name.value
-
-
-class HalftoneArea(Gtk.GLArea):
-    """The dots, for a frame of `width` x `height` on a given hexagonal grid."""
-
-    def __init__(self, width: int, height: int, grid: dict[str, float], style: dict[str, float]) -> None:
-        super().__init__()
-        self.width, self.height = width, height
-        self.grid, self.style = grid, style
-        self.set_size_request(width, height)
-        self.set_has_depth_buffer(False)
-        self.set_auto_render(False)
-        self.set_can_target(False)
-        self.look = Look()
-        self.failed = False
-        self.ready = False
-        self.gl: _GL | None = None
-        # Frames arrive on any thread; they are uploaded on the next render.
-        self.pending: bytes | None = None
-        self.pending_range = (0.0, 1.0)
+    def __init__(self, width: int, height: int, style: dict[str, float]) -> None:
+        self.width, self.height, self.style = width, height, style
+        self.grid = grid = dot_grid(width, height, style["pitch"])
+        centres = numpy.array(dot_centres(grid), numpy.float32)
+        rows = numpy.round((centres[:, 1] - grid["top"]) / grid["row_height"]).astype(int)
+        parity = rows % 2
+        columns = numpy.round((centres[:, 0] - numpy.where(parity, grid["left_odd"], grid["left_even"])) / grid["pitch"]).astype(int)
+        self.slots = (rows, columns, parity)
+        # Five taps across each dot's cell soften the camera's grain.
+        column, row = centres[:, 0].astype(int), centres[:, 1].astype(int)
+        taps = [(0, 0), (-2, 0), (2, 0), (0, -2), (0, 2)]
+        self.taps = numpy.stack([
+            numpy.clip(row + dy, 0, height - 1) * width + numpy.clip(column + dx, 0, width - 1) for dx, dy in taps
+        ])
+        self.weights = numpy.array([0.4, 0.15, 0.15, 0.15, 0.15], numpy.float32)[:, None]
+        tile = distance_tile(grid["pitch"], grid["row_height"], style["max_radius"])
+        rgba = numpy.zeros(tile.shape + (4,), numpy.uint8)
+        rgba[..., 1], rgba[..., 3] = tile, 255
+        self.tile = memory_texture(rgba, Gdk.MemoryFormat.R8G8B8A8, 4)
+        self.feather = memory_texture(feather_alpha(width, height, style["corner"], style["feather"]), Gdk.MemoryFormat.A8, 1)
         self.reset()
-        self.connect("realize", self._realize)
-        self.connect("unrealize", self._unrealize)
-        self.connect("render", self._render)
-
-    # Feeding --------------------------------------------------------------------
-
-    def submit(self, pixels: bytes) -> None:
-        """Take the newest frame; it is uploaded on the next render."""
-        self.pending_range = frame_levels(pixels, self.style["low_share"], self.style["high_share"])
-        self.pending = pixels
-        self.queue_render()
 
     def reset(self) -> None:
-        self.pending = None
-        self.frames = 0
-        # The older and newer frames' brightness ranges, and when the newer came.
-        self.ranges = [(0.0, 1.0), (0.0, 1.0)]
+        self.frames: list[tuple[Gdk.Texture, Gdk.Texture]] = []
         self.arrived = 0.0
         self.interval = 1 / 30
-        self.queue_render()
 
-    # GL lifecycle ---------------------------------------------------------------
+    # Frames ---------------------------------------------------------------------
 
-    def _realize(self, _area: Gtk.GLArea) -> None:
-        self.make_current()
-        error = self.get_error()
-        if error is not None:
-            self._fail(error.message)
-            return
-        try:
-            gl = self.gl = _GL(self.get_context().get_use_es())
-            self.program = gl.program()
-            vao = ctypes.c_uint()
-            gl.GenVertexArrays(1, ctypes.byref(vao))
-            self.vao = vao.value
-            gl.PixelStorei(GL_UNPACK_ALIGNMENT, 1)
-            # The two most recent frames take turns being the newer one.
-            self.textures = [gl.texture(self.width, self.height) for _ in range(2)]
-            self.newer = 0
-            self.uniforms: dict[str, int] = {}
-            self.ready = True
-        except (OSError, AttributeError, RuntimeError) as error:
-            self._fail(str(error))
+    def sizes(self, pixels: bytes) -> numpy.ndarray:
+        """Each dot's radius as a share of the largest: levels, noise floor, curve."""
+        frame = numpy.frombuffer(pixels, numpy.uint8).astype(numpy.float32)
+        values = (frame[self.taps] * self.weights).sum(axis=0)
+        low, high = numpy.percentile(values, (self.style["low_share"] * 100, self.style["high_share"] * 100))
+        stretched = numpy.clip((values - low) / max(high - low, 5.0), 0, 1)
+        level = numpy.clip((stretched - self.style["floor"]) / (1 - self.style["floor"]), 0, 1) ** self.style["gamma"]
+        size = numpy.sqrt(level)
+        # Specks smaller than a device pixel only shimmer.
+        size[size * self.style["max_radius"] < 0.45] = 0
+        return size
 
-    def _fail(self, reason: str) -> None:
-        self.failed = True
-        self.ready = False
-        print("[facegate] preview falls back to CPU drawing: %s" % reason.strip(), flush=True)
-
-    def _unrealize(self, _area: Gtk.GLArea) -> None:
-        if not self.ready or self.gl is None:
-            return
-        self.make_current()
-        gl = self.gl
-        gl.DeleteTextures(2, (ctypes.c_uint * 2)(*self.textures))
-        gl.DeleteVertexArrays(1, ctypes.byref(ctypes.c_uint(self.vao)))
-        gl.DeleteProgram(self.program)
-        self.ready = False
-
-    # Rendering ------------------------------------------------------------------
-
-    def _uniform(self, name: str) -> int:
-        if name not in self.uniforms:
-            self.uniforms[name] = self.gl.GetUniformLocation(self.program, name.encode())
-        return self.uniforms[name]
-
-    def _render(self, _area: Gtk.GLArea, _context: Gdk.GLContext) -> bool:
-        if not self.ready:
-            return False
-        gl = self.gl
+    def submit(self, pixels: bytes) -> None:
+        if len(pixels) != self.width * self.height:
+            raise ValueError("frame size does not match its dimensions")
+        size = self.sizes(pixels)
+        rows, columns, parity = self.slots
+        textures = []
+        for odd, key in ((0, "columns_even"), (1, "columns_odd")):
+            chosen = parity == odd
+            # Rows of the other parity stay transparent, so both textures stack.
+            texels = numpy.zeros((self.grid["rows"], int(self.grid[key]), 4), numpy.uint8)
+            texels[rows[chosen], columns[chosen], 0] = numpy.round(size[chosen] * 255)
+            texels[rows[chosen], columns[chosen], 3] = 255
+            textures.append(memory_texture(texels, Gdk.MemoryFormat.R8G8B8A8, 4))
         now = time.monotonic()
-        pixels, self.pending = self.pending, None
-        if pixels is not None:
-            # The newest frame replaces the older one, which the blend had left.
-            self.newer = 1 - self.newer
-            gl.BindTexture(GL_TEXTURE_2D, self.textures[self.newer])
-            gl.TexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, self.width, self.height, GL_RED, GL_UNSIGNED_BYTE, pixels)
-            self.ranges = [self.ranges[1], self.pending_range]
-            if self.frames:
-                # Blend over the time frames really take, so each blend ends as the next frame lands.
-                self.interval += (min(max(now - self.arrived, 1 / 120), 0.25) - self.interval) * 0.3
-            self.arrived = now
-            self.frames += 1
+        if self.frames:
+            # Blend over the time frames really take, so each blend ends as the next frame lands.
+            self.interval += (min(max(now - self.arrived, 1 / 120), 0.25) - self.interval) * 0.3
+        self.arrived = now
+        self.frames = (self.frames + [tuple(textures)])[-2:]
 
-        viewport = (ctypes.c_int * 4)()
-        gl.GetIntegerv(GL_VIEWPORT, viewport)
-        gl.Disable(GL_BLEND)
-        gl.ClearColor(0, 0, 0, 0)
-        gl.Clear(GL_COLOR_BUFFER_BIT)
+    # Nodes ----------------------------------------------------------------------
+
+    def _sizes(self, snapshot: Gtk.Snapshot, textures: tuple[Gdk.Texture, Gdk.Texture]) -> None:
+        grid = self.grid
+        pitch, row_height = grid["pitch"], grid["row_height"]
+        snapshot.append_color(Gdk.RGBA(red=0, green=0, blue=0, alpha=1), rect(0, 0, self.width, self.height))
+        for texture, left, key in ((textures[0], grid["left_even"], "columns_even"), (textures[1], grid["left_odd"], "columns_odd")):
+            bounds = rect(left - pitch / 2, grid["top"] - row_height / 2, grid[key] * pitch, grid["rows"] * row_height)
+            snapshot.append_scaled_texture(texture, Gsk.ScalingFilter.NEAREST, bounds)
+
+    def dots(self, device_scale: float, tint: tuple[float, float, float]) -> Gsk.RenderNode | None:
+        """The dots in `tint`, with edges anti-aliased at `device_scale`."""
         if not self.frames:
-            return True
-        grid, style, look = self.grid, self.style, self.look
-        uniform = self._uniform
-        gl.UseProgram(self.program)
-        gl.BindVertexArray(self.vao)
-        older = 1 - self.newer if self.frames > 1 else self.newer
-        for unit, texture in ((0, self.textures[older]), (1, self.textures[self.newer])):
-            gl.ActiveTexture(GL_TEXTURE0 + unit)
-            gl.BindTexture(GL_TEXTURE_2D, texture)
-        gl.Uniform1i(uniform("older"), 0)
-        gl.Uniform1i(uniform("newer"), 1)
-        older_range = self.ranges[0] if self.frames > 1 else self.ranges[1]
-        gl.Uniform4f(uniform("ranges"), *older_range, *self.ranges[1])
-        gl.Uniform1f(uniform("blend"), min(1.0, (now - self.arrived) / self.interval))
-        gl.Uniform2f(uniform("size"), self.width, self.height)
-        gl.Uniform2f(uniform("viewport"), viewport[2], viewport[3])
-        gl.Uniform2f(uniform("lefts"), grid["left_even"], grid["left_odd"])
-        gl.Uniform2f(uniform("columns"), grid["columns_even"], grid["columns_odd"])
-        for name in ("pitch", "row_height", "top", "rows"):
-            gl.Uniform1f(uniform(name), grid[name])
-        for name, key in (("max_radius", "max_radius"), ("corner", "corner"), ("feather", "feather"), ("floor_level", "floor"), ("gamma", "gamma")):
-            gl.Uniform1f(uniform(name), style[key])
-        gl.Uniform3f(uniform("tint"), *look.tint)
-        gl.Uniform3f(uniform("band_color"), *look.band_color)
-        gl.Uniform1f(uniform("band_middle"), look.band_middle)
-        gl.Uniform1f(uniform("band_alpha"), look.band_alpha)
-        gl.Uniform1f(uniform("shake"), look.shake)
-        gl.DrawArrays(GL_TRIANGLES, 0, 3)
-        gl.UseProgram(0)
-        gl.BindVertexArray(0)
-        return True
+            return None
+        grid, style = self.grid, self.style
+        snapshot = Gtk.Snapshot()
+        # alpha = (size - distance) in device pixels, centred on the edge.
+        gain = style["max_radius"] * device_scale
+        matrix = Graphene.Matrix().init_from_float([0, 0, 0, gain, 0, 0, 0, -gain, 0, 0, 0, 0, 0, 0, 0, 0])
+        snapshot.push_color_matrix(matrix, Graphene.Vec4().init(tint[0], tint[1], tint[2], 0.5))
+        snapshot.push_blend(Gsk.BlendMode.SCREEN)
+        older, newer = self.frames[0], self.frames[-1]
+        blend = min(1.0, (time.monotonic() - self.arrived) / self.interval) if older is not newer else 1.0
+        snapshot.push_cross_fade(blend)
+        self._sizes(snapshot, older)
+        snapshot.pop()
+        self._sizes(snapshot, newer)
+        snapshot.pop()
+        snapshot.pop()
+        tile = rect(grid["left_even"] - grid["pitch"] / 2, grid["top"] - grid["row_height"] / 2, grid["pitch"], 2 * grid["row_height"])
+        snapshot.push_repeat(rect(0, 0, self.width, self.height), tile)
+        snapshot.append_texture(self.tile, tile)
+        snapshot.pop()
+        snapshot.pop()
+        snapshot.pop()
+        return snapshot.to_node()
+
+    def snapshot(self, snapshot: Gtk.Snapshot, device_scale: float, look: Look) -> None:
+        dots = self.dots(device_scale, look.tint)
+        if dots is None:
+            return
+        bounds = rect(0, 0, self.width, self.height)
+        snapshot.push_mask(Gsk.MaskMode.ALPHA)
+        snapshot.append_texture(self.feather, bounds)
+        snapshot.pop()
+        snapshot.append_node(dots)
+        if look.band_alpha > 0.002:
+            # The sweep: a band of colour seen only through the dots.
+            snapshot.push_mask(Gsk.MaskMode.ALPHA)
+            snapshot.append_node(dots)
+            snapshot.pop()
+            r, g, b = look.band_color
+            stops = []
+            for offset, alpha in ((0.0, 0.0), (0.5, look.band_alpha), (1.0, 0.0)):
+                stop = Gsk.ColorStop()
+                stop.offset, stop.color = offset, Gdk.RGBA(red=r, green=g, blue=b, alpha=alpha)
+                stops.append(stop)
+            middle = look.band_middle
+            snapshot.append_linear_gradient(
+                rect(0, middle - 36, self.width, 72),
+                Graphene.Point().init(0, middle - 36), Graphene.Point().init(0, middle + 36), stops,
+            )
+            snapshot.pop()
+        snapshot.pop()
