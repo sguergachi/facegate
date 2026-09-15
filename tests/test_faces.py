@@ -193,6 +193,52 @@ class PreviewTests(unittest.TestCase):
         self.assertEqual(context.iterations, 32)
         self.assertFalse(context.asserted_may_block)
 
+    @staticmethod
+    def jpeg(width=640, height=480, rgba=0x4080C0FF):
+        from gi.repository import GdkPixbuf
+
+        pixbuf = GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB, False, 8, width, height)
+        pixbuf.fill(rgba)
+        return bytes(pixbuf.save_to_bufferv("jpeg", [], [])[1])
+
+    def test_jpeg_preview_becomes_a_greyscale_frame(self):
+        grey = faces._jpeg_to_greyscale(self.jpeg(), PREVIEW_WIDTH, PREVIEW_HEIGHT)
+        self.assertEqual(len(grey), PREVIEW_WIDTH * PREVIEW_HEIGHT)
+        self.assertEqual(len(set(grey)), 1)
+        self.assertLess(abs(grey[0] - 0x74), 8)
+
+    def test_a_flood_of_previews_keeps_only_the_newest_and_never_delays_progress(self):
+        from gi.repository import GLib
+
+        jpeg = self.jpeg()
+
+        class FloodBus:
+            def __init__(self):
+                self.handlers = {}
+
+            def signal_subscribe(self, _sender, _interface, member, _path, _arg0, _flags, callback):
+                self.handlers[member] = callback
+                return len(self.handlers)
+
+            def signal_unsubscribe(self, _subscription):
+                pass
+
+            def emit(self, member, variant):
+                self.handlers[member](None, "", "", "", member, variant)
+
+            def call_sync(self, _service, _path, _interface, method, *_rest):
+                if method == "EnrollStart":
+                    for _ in range(200):
+                        self.emit("PreviewFrame", GLib.Variant("(ay)", (jpeg,)))
+                    self.emit("EnrollStatus", GLib.Variant("(suubsd)", ("Face", 5, 5, True, "completed", 0.0)))
+                return GLib.Variant("()", ())
+
+        client = faces.GazeClient(bus=FloodBus())
+        events = list(client.enroll("someone", "Face", lambda: False))
+        kinds = [event["event"] for event in events]
+        self.assertEqual(kinds.count("frame"), 1)
+        self.assertEqual(kinds[-2:], ["progress", "completed"])
+
 class StreamTests(unittest.TestCase):
     def test_a_frame_line_fits_the_stream_limit(self):
         line = encode({"frame": "A" * (PREVIEW_WIDTH * PREVIEW_HEIGHT * 4 // 3 + 4), "w": PREVIEW_WIDTH, "h": PREVIEW_HEIGHT})

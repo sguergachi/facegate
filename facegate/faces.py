@@ -147,28 +147,28 @@ def _normal(value: object) -> str:
 
 
 def _jpeg_to_greyscale(jpeg: bytes, width: int, height: int) -> bytes:
-    """Decode Gaze's preview and resize it for the existing island renderer."""
+    """Decode Gaze's preview and resize it for the existing island renderer.
+
+    Every per-pixel step stays in C: libjpeg scales while decoding and GdkPixbuf
+    desaturates, so Python only slices one channel per row. A pure-Python pixel
+    loop cannot keep up with a live camera.
+    """
     loader = GdkPixbuf.PixbufLoader.new_with_type("jpeg")
+    loader.connect("size-prepared", lambda source, _w, _h: source.set_size(width, height))
     loader.write(jpeg)
     loader.close()
     pixbuf = loader.get_pixbuf()
     if pixbuf is None:
         raise GazeError("Gaze sent an unreadable camera preview.")
-    scaled = pixbuf.scale_simple(width, height, GdkPixbuf.InterpType.BILINEAR)
-    if scaled is None:
-        raise GazeError("Gaze couldn't resize the camera preview.")
-    pixels = bytes(scaled.get_pixels())
-    channels = scaled.get_n_channels()
-    stride = scaled.get_rowstride()
-    grey = bytearray(width * height)
-    for y in range(height):
-        row = y * stride
-        target = y * width
-        for x in range(width):
-            offset = row + x * channels
-            red, green, blue = pixels[offset], pixels[offset + 1], pixels[offset + 2]
-            grey[target + x] = (77 * red + 150 * green + 29 * blue) >> 8
-    return bytes(grey)
+    if (pixbuf.get_width(), pixbuf.get_height()) != (width, height):
+        pixbuf = pixbuf.scale_simple(width, height, GdkPixbuf.InterpType.BILINEAR)
+        if pixbuf is None:
+            raise GazeError("Gaze couldn't resize the camera preview.")
+    pixbuf.saturate_and_pixelate(pixbuf, 0.0, False)
+    pixels = pixbuf.get_pixels()
+    channels = pixbuf.get_n_channels()
+    stride = pixbuf.get_rowstride()
+    return b"".join(pixels[y * stride : y * stride + width * channels : channels] for y in range(height))
 
 
 def drain_main_context(context: GLib.MainContext, limit: int = 32) -> int:
@@ -246,7 +246,7 @@ class GazeClient:
     def _void(self, method: str, parameters: GLib.Variant | None = None) -> None:
         self._call(method, parameters or GLib.Variant("()", ()), "()")
 
-    def _subscribe(self, member: str, callback: Callable[[tuple[Any, ...]], None]) -> int:
+    def _subscribe(self, member: str, callback: Callable[[GLib.Variant], None]) -> int:
         def receive(
             _connection: Gio.DBusConnection,
             _sender: str,
@@ -256,7 +256,7 @@ class GazeClient:
             parameters: GLib.Variant,
             *_data: object,
         ) -> None:
-            callback(parameters.unpack())
+            callback(parameters)
 
         return self.bus.signal_subscribe(
             GAZE_SERVICE,
@@ -277,10 +277,19 @@ class GazeClient:
         height: int = PREVIEW_HEIGHT,
     ) -> Iterator[dict[str, Any]]:
         events: deque[tuple[str, tuple[Any, ...]]] = deque()
+        # Preview frames arrive faster than they can be shown, so only the
+        # newest is kept: a queue of stale frames would grow without bound and
+        # hold enrollment progress behind it. The JPEG is read straight from
+        # the variant; unpack() would build a Python int per byte.
+        latest_preview: list[GLib.Variant | None] = [None]
+
+        def keep_preview(parameters: GLib.Variant) -> None:
+            latest_preview[0] = parameters
+
         subscriptions = [
-            self._subscribe("EnrollStatus", lambda args: events.append(("enroll", args))),
-            self._subscribe("FaceStatus", lambda args: events.append(("face", args))),
-            self._subscribe("PreviewFrame", lambda args: events.append(("preview", args))),
+            self._subscribe("EnrollStatus", lambda parameters: events.append(("enroll", parameters.unpack()))),
+            self._subscribe("FaceStatus", lambda parameters: events.append(("face", parameters.unpack()))),
+            self._subscribe("PreviewFrame", keep_preview),
         ]
         claimed = False
         completed = False
@@ -294,21 +303,23 @@ class GazeClient:
             yield {"event": "hint", "text": "Waiting for the camera…"}
             while not completed:
                 drain_main_context(context)
-                while events:
-                    kind, values = events.popleft()
-                    if kind == "preview":
-                        try:
-                            jpeg = bytes(values[0])
-                            raw = _jpeg_to_greyscale(jpeg, width, height)
-                        except (GLib.Error, GazeError, IndexError, TypeError, ValueError):
-                            continue
+                preview, latest_preview[0] = latest_preview[0], None
+                if preview is not None:
+                    try:
+                        jpeg = preview.get_child_value(0).get_data_as_bytes().get_data()
+                        raw = _jpeg_to_greyscale(jpeg, width, height)
+                    except (GLib.Error, GazeError, TypeError, ValueError):
+                        raw = None
+                    if raw is not None:
                         yield {
                             "event": "frame",
                             "w": width,
                             "h": height,
                             "data": base64.b64encode(raw).decode("ascii"),
                         }
-                    elif kind == "face":
+                while events:
+                    kind, values = events.popleft()
+                    if kind == "face":
                         status = _normal(values[0] if values else "")
                         yield {
                             "event": "hint",
