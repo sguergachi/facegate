@@ -50,7 +50,8 @@ MESH_DECODE_WIDTH = 640
 # A face missing for this long, not just one frame, sends the stars back to the cloud.
 MESH_HOLD_SECONDS = 0.6
 DBUS_TIMEOUT_MS = 35_000
-ENROLL_TIMEOUT_SECONDS = 90
+# Enrollment gives up after this long without capturing a pose.
+ENROLL_TIMEOUT_SECONDS = 60
 LABEL_CHARS = 24
 
 
@@ -404,14 +405,16 @@ class GazeClient:
         events.
         """
         from .facemesh import Framing
+        from .guidance import Guide
 
         framing = Framing(width, height)
+        guide = Guide() if mesh is not None else None
         face_seen = time.monotonic()
         face_shown = False
         pose_hint = ""
         shown_hint = ""
 
-        def hint(text: str) -> Iterator[dict[str, Any]]:
+        def hint(text: str | None) -> Iterator[dict[str, Any]]:
             nonlocal shown_hint
             if text and text != shown_hint:
                 shown_hint = text
@@ -433,14 +436,20 @@ class GazeClient:
             self._subscribe("PreviewFrame", keep_preview),
         ]
         claimed = False
+        started = False
         completed = False
-        cancelled = False
         context = GLib.MainContext.default()
         deadline = time.monotonic() + ENROLL_TIMEOUT_SECONDS
         try:
             self._void("Claim", GLib.Variant("(s)", (username,)))
             claimed = True
             self._void("EnrollStart", GLib.Variant("(s)", (face_name,)))
+            started = True
+            # Authorizing EnrollStart can run a face check, whose root claim
+            # replaces this one and is then released; Gaze would then refuse
+            # this client's EnrollStop and leave the camera on. Claiming again
+            # keeps the enrollment ours to stop.
+            self._void("Claim", GLib.Variant("(s)", (username,)))
             yield from hint("Waiting for the camera…")
             while not completed:
                 drain_main_context(context)
@@ -451,6 +460,7 @@ class GazeClient:
                         points = mesh.find(_decode_rgb(jpeg))
                     except Exception:  # noqa: BLE001 - one bad frame must not end enrollment
                         points = None
+                    guide.pose(points)
                     now = time.monotonic()
                     if points is not None:
                         face_seen, face_shown = now, True
@@ -482,22 +492,29 @@ class GazeClient:
                     kind, values = events.popleft()
                     if kind == "face":
                         status = _normal(values[0] if values else "")
-                        yield from hint(CAPTURE_HINTS.get(status) or pose_hint or POSE_HOLD)
+                        if guide is not None:
+                            guide.status(status)
+                        else:
+                            yield from hint(CAPTURE_HINTS.get(status) or pose_hint or POSE_HOLD)
                     elif kind == "enroll" and len(values) >= 6:
                         _name, progress, maximum, is_done, prompt, _remaining = values[:6]
                         prompt_key = _normal(prompt)
+                        if guide is not None:
+                            guide.prompt(prompt_key)
                         if maximum:
                             yield {
                                 "event": "progress",
                                 "value": min(1.0, float(progress) / float(maximum)),
                             }
-                        if prompt_key in ENROLL_HINTS:
+                        if prompt_key in {"captured", "face captured"}:
+                            # Each captured pose earns the next one its own time.
+                            deadline = time.monotonic() + ENROLL_TIMEOUT_SECONDS
+                        if prompt_key in ENROLL_HINTS and guide is None:
                             pose_hint = ENROLL_HINTS[prompt_key]
                             yield from hint(pose_hint)
                         if prompt_key in FAILED_PROMPTS:
                             raise GazeError(FAILED_PROMPTS[prompt_key])
                         if prompt_key in {"cancelled", "enrollment cancelled"}:
-                            cancelled = True
                             yield {"event": "cancelled"}
                             return
                         if bool(is_done):
@@ -507,11 +524,11 @@ class GazeClient:
                             break
                 if completed:
                     break
+                if guide is not None:
+                    yield from hint(guide.hint())
                 if time.monotonic() >= deadline:
-                    cancelled = True
                     raise GazeError("Gaze timed out while adding your face.")
                 if stopped():
-                    cancelled = True
                     return
                 time.sleep(0.03)
             yield {"event": "completed"}
@@ -519,12 +536,23 @@ class GazeClient:
             for subscription in subscriptions:
                 self.bus.signal_unsubscribe(subscription)
             if claimed:
-                if cancelled and not completed:
-                    try:
-                        self._void("EnrollStop")
-                    except GazeError:
-                        pass
+                if started and not completed:
+                    self._stop_enrollment(username)
                 try:
                     self._void("Release")
                 except GazeError:
                     pass
+
+    def _stop_enrollment(self, username: str) -> None:
+        """Stop Gaze's enrollment, and with it the camera, whoever holds the claim now."""
+        try:
+            self._void("EnrollStop")
+            return
+        except GazeError:
+            pass
+        # A face check may have taken and released the claim since.
+        try:
+            self._void("Claim", GLib.Variant("(s)", (username,)))
+            self._void("EnrollStop")
+        except GazeError:
+            pass

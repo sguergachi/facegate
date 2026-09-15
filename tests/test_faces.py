@@ -316,6 +316,103 @@ class EnrollHintTests(unittest.TestCase):
         ])
 
 
+class ClaimTests(unittest.TestCase):
+    def test_a_face_check_taking_the_claim_cannot_leave_the_camera_on(self):
+        class PreemptedBus(ScriptedBus):
+            def __init__(self):
+                super().__init__([])
+                self.owner = None
+                self.calls = []
+                self.enrolling = False
+
+            def call_sync(self, service, path, interface, method, *rest):
+                self.calls.append(method)
+                if method == "Claim":
+                    self.owner = "helper"
+                elif method == "EnrollStart":
+                    # Polkit's face check claims as root and releases.
+                    self.owner = None
+                    self.enrolling = True
+                elif method in ("EnrollStop", "Release"):
+                    if self.owner != "helper":
+                        raise GLib.Error("GDBus.Error:org.freedesktop.DBus.Error.Failed: Daemon is not claimed")
+                    if method == "EnrollStop":
+                        self.enrolling = False
+                    else:
+                        self.owner = None
+                return GLib.Variant("()", ())
+
+        bus = PreemptedBus()
+        list(faces.GazeClient(bus=bus).enroll("someone", "Face", lambda: True))
+        self.assertFalse(bus.enrolling)
+        self.assertEqual(bus.calls, ["Claim", "EnrollStart", "Claim", "EnrollStop", "Release"])
+
+
+class GuidanceTests(unittest.TestCase):
+    @staticmethod
+    def face(yaw=0.0, pitch=0.5):
+        import numpy
+
+        points = numpy.zeros((478, 3), numpy.float32)
+        points[468, :2] = (100, 100)
+        points[473, :2] = (140, 100)
+        points[61, :2] = (110, 140)
+        points[291, :2] = (130, 140)
+        points[1, :2] = (120 + yaw * 40, 100 + pitch * 40)
+        return points
+
+    def guide(self):
+        from facegate import guidance
+
+        self.now = 100.0
+        return guidance.Guide(clock=lambda: self.now)
+
+    def test_head_pose_measures_what_gaze_measures(self):
+        from facegate import guidance
+
+        yaw, pitch = guidance.head_pose(self.face(yaw=-0.2, pitch=0.3))
+        self.assertAlmostEqual(yaw, -0.2, places=4)
+        self.assertAlmostEqual(pitch, 0.3, places=4)
+
+    def test_it_says_which_way_to_turn_until_the_pose_is_reached(self):
+        guide = self.guide()
+        guide.prompt("look-straight")
+        guide.pose(self.face(yaw=0.3))
+        self.assertEqual(guide.hint(), "Turn a little to the left, to face the camera.")
+        guide.pose(self.face())
+        self.assertIsNone(guide.hint())  # waits to be sure
+        self.now += 0.5
+        self.assertEqual(guide.hint(), "Hold still…")
+        guide.prompt("captured")
+        self.assertEqual(guide.hint(), "Got it.")
+        self.assertEqual(guide.baseline, (0.0, 0.5))
+        self.now += 1
+        guide.prompt("look-left")
+        guide.pose(None)
+        guide.hint()
+        self.now += 0.5
+        guide.hint()
+        self.assertEqual(guide.shown, "Slowly turn your head to the left.")
+        guide.pose(self.face(yaw=-0.1))
+        self.assertEqual(guide.advice(), "A little more to the left…")
+        guide.pose(self.face(yaw=-0.2))
+        self.assertEqual(guide.advice(), "Hold it there…")
+        guide.status("too-dark")
+        self.assertEqual(guide.hint(), "Too dark. Face a light, or move closer.")
+
+    def test_tilting_asks_to_keep_facing_forward(self):
+        guide = self.guide()
+        guide.prompt("look-straight")
+        guide.pose(self.face())
+        guide.prompt("captured")
+        self.now += 1
+        guide.prompt("look-up")
+        guide.pose(self.face(yaw=0.3, pitch=0.4))
+        self.assertEqual(guide.advice(), "Keep your head facing forward as you tilt.")
+        guide.pose(self.face(pitch=0.42))
+        self.assertEqual(guide.advice(), "Hold it there…")
+
+
 class MeshPreviewTests(unittest.TestCase):
     class FakeMesh:
         def __init__(self, answers):

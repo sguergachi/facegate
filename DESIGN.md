@@ -482,9 +482,15 @@ and grows to fit (surface height 440).
   instead (colour frames inverted under a head-and-shoulders spotlight). All
   of it is tinted a cool `#d6f0ff` and masked by a rounded rectangle
   (radius 30) whose last 36 pt feather to nothing.
-- **Hints:** the pose instruction ("Slowly turn your head to the left.") stays
-  up for the whole pose; the camera's status replaces it only while something
-  is wrong (too dark, too close, off-centre), then the pose returns.
+- **Hints:** live coaching. Gaze names each pose once and never says how
+  close you are, so FaceGate measures the same head yaw and pitch Gaze does
+  (nose against the eye line, from the face mesh) and says what to change:
+  which way to turn to face the camera, "Slowly turn your head to the left.",
+  then "A little more to the left…" past 40% of the way, then "Hold it
+  there…" once Gaze's threshold is met, and "Got it." as each pose lands.
+  Camera problems (too dark, clipped, off-centre, distance) outrank pose
+  advice. A new instruction must hold 0.4 s before it replaces the one
+  showing, so a wavering head doesn't make the words flicker.
 - **Fluidity:** IR emitters often light only every other frame, so unlit
   frames are skipped and each lit frame cross-fades into the next over 70 ms
   on the frame clock.
