@@ -80,8 +80,13 @@ NOSE_TIP = 1
 # face's dust, which is everything else.
 ARROW_MOTES = 420
 AMBIENT_MOTES = 240
-# Of the face's dust, this share lies along the features.
-FEATURE_SHARE = 0.14
+# Of the face's dust, this share lies along the features, and this share on
+# slices across the surface every `SLICE_STEP` face heights, which bend over
+# the nose, cheeks and lips and show the face's form.
+FEATURE_SHARE = 0.08
+SLICE_SHARE = 0.24
+SLICE_STEP = 0.034
+SLICE_SCATTER = 0.0025
 
 # The face, lit, in screen axes (y down, z toward the viewer). Shade mixes a
 # key light from above and in front with nearness (as IR light falls off), a
@@ -89,15 +94,15 @@ FEATURE_SHARE = 0.14
 # times `DEPTH`. Shade is then stretched over `SHADE_RANGE` for contrast, and
 # every face mote's light scaled by `GRAIN`. Feature strokes are brightened by
 # `FEATURE_GAIN`, never below `FEATURE_FLOOR`, and always shown.
-KEY_LIGHT = (-0.12, -0.45, 0.88)
-KEY_SHARE = 0.55
+KEY_LIGHT = (-0.65, -0.45, 0.60)
+KEY_SHARE = 0.85
 AMBIENT_LIGHT = 0.04
-RIM_LIGHT = 0.35
-DEPTH = 0.5
-SHADE_RANGE = (0.48, 1.02)
-GRAIN = 0.52
+RIM_LIGHT = 0.12
+DEPTH = 0.32
+SHADE_RANGE = (0.12, 0.95)
+GRAIN = 0.82
 FEATURE_GAIN = 1.2
-FEATURE_FLOOR = 0.6
+FEATURE_FLOOR = 0.3
 
 # Condensing: a mote starts after its delay, earlier near the nose, and
 # settles over `ARRIVE_SECONDS`, swirling up to `SWIRL` points off its path.
@@ -107,7 +112,7 @@ SWIRL = 18.0
 LEAVE_SPEED = 1.8
 # How bright the nebula is, and on the face how far a mote drifts, in points.
 NEBULA_LIGHT = 0.45
-DRIFT = 0.45
+DRIFT = 0.22
 
 # The scene around the face, back to front, in preview points. A deep field of
 # faint distant stars shifts `PARALLAX` points against the head's turn (the
@@ -116,7 +121,7 @@ DRIFT = 0.45
 # few large out-of-focus motes drift past the lens.
 PARALLAX = 7.0
 BREATH_SECONDS = 7.0
-HALO = (220.0, 260.0, 0.1)
+HALO = (220.0, 260.0, 0.035)
 HAZE_MOTES = 90
 BOKEH = ((0.12, 0.2, 13.0), (0.86, 0.14, 9.0), (0.93, 0.78, 16.0), (0.06, 0.84, 11.0), (0.7, 0.95, 7.0))
 BOKEH_ALPHA = 0.07
@@ -127,7 +132,7 @@ SCAN_SWEEP = 1.6
 SCAN_GAIN = 0.9
 SCAN_WIDTH = 5.0
 # When the guide speaks the face steps back, so one thing leads at a time.
-GUIDE_DIMS_FACE = 0.3
+GUIDE_DIMS_FACE = 0.12
 
 # The coaching guide, in preview points, drawn twice: a hairline of precise
 # geometry that carries the reading, and dust that carries the life.
@@ -148,9 +153,9 @@ GUIDE_VIEW = 0.42
 GUIDE_FOCAL = 420.0
 GUIDE_LENGTH = 62.0
 GUIDE_ASIDE = 98.0
-GUIDE_HEAD_WIDTH = 9.0
-GUIDE_HEAD_LENGTH = 11.0
-GUIDE_TAIL_SPREAD = 6.0
+GUIDE_HEAD_WIDTH = 5.0
+GUIDE_HEAD_LENGTH = 8.0
+GUIDE_TAIL_SPREAD = 3.0
 GUIDE_FLOW = 0.45
 GUIDE_NUDGE_SECONDS = 1.6
 GUIDE_FADE_SECONDS = 0.3
@@ -159,7 +164,7 @@ BRACKET_BOX = (62.0, 68.0)
 BRACKET_TRAVEL = 10.0
 BRACKET_ARM = 13.0
 BRACKET_SECONDS = 1.5
-ARROW_WING_SHARE = 0.3
+ARROW_WING_SHARE = 0.16
 ARROWS = {
     "turn-left", "turn-right", "tilt-up", "tilt-down",
     "move-left", "move-right", "move-up", "move-down", "closer", "back",
@@ -316,6 +321,7 @@ class Starlight:
         # Seconds the face has been condensing, eased back down when it's lost.
         self.formed = 0.0
         self.arrow = ""
+        self.pending_arrow = ""
         self.arrow_target = 0.0
         self.arrow_amount = 0.0
         self.guide_lines: list[tuple[numpy.ndarray, numpy.ndarray]] = []
@@ -368,15 +374,19 @@ class Starlight:
 
     def set_arrow(self, name: str) -> None:
         """Show the coaching arrow ("turn-left", "tilt-up", "move-right", …), or none."""
-        if name in ARROWS:
-            self.arrow = name
+        self.pending_arrow = name if name in ARROWS else ""
+        if self.pending_arrow and (not self.arrow or self.arrow == self.pending_arrow):
+            self.arrow = self.pending_arrow
             self.arrow_target = 1.0
         else:
+            # Let the old geometry dissolve before the new direction gathers.
             self.arrow_target = 0.0
 
     def fade_out(self) -> None:
         """The scan is over: the dust winks out."""
         self.presence_target = 0.0
+        self.face = False
+        self.set_arrow("")
 
     # The face's dust --------------------------------------------------------------
 
@@ -392,16 +402,56 @@ class Starlight:
         features = int(count * FEATURE_SHARE)
         xy = points[:, :2]
 
+        slices = int(count * SLICE_SHARE)
+        surface = count - features - slices
         corners = xy[self.triangles]
         a, b = corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0]
         areas = numpy.abs(a[:, 0] * b[:, 1] - a[:, 1] * b[:, 0]) / 2
-        triangle = random.choice(len(self.triangles), count - features, p=areas / areas.sum())
+        triangle = random.choice(len(self.triangles), surface, p=areas / areas.sum())
         # Uniform over each triangle.
-        first, second = random.uniform(0, 1, (2, count - features))
+        first, second = random.uniform(0, 1, (2, surface))
         flip = first + second > 1
         first[flip], second[flip] = 1 - first[flip], 1 - second[flip]
         surface_corners = self.triangles[triangle]
         surface_weights = numpy.stack([1 - first - second, first, second], axis=1)
+
+        # Slices: where each level across the face (in its first frame's height)
+        # crosses each triangle, a segment; dust spread along them by length.
+        if slices:
+            height = (xy[:, 1] - xy[:468, 1].min()) / max(float(numpy.ptp(xy[:468, 1])), 1.0)
+            level = height[self.triangles]
+            pieces_corners, pieces_from, pieces_to, pieces_length = [], [], [], []
+            for value in numpy.arange(SLICE_STEP / 2, 1.0, SLICE_STEP):
+                crossings = []
+                for a_index, b_index in ((0, 1), (1, 2), (2, 0)):
+                    va, vb = level[:, a_index], level[:, b_index]
+                    t = (value - va) / numpy.where(vb == va, 1e-9, vb - va)
+                    crossings.append(((va - value) * (vb - value) < 0, a_index, b_index, t))
+                for i, (hit_a, a0, a1, ta) in enumerate(crossings):
+                    for hit_b, b0, b1, tb in crossings[i + 1:]:
+                        both = hit_a & hit_b
+                        if not both.any():
+                            continue
+                        start = numpy.zeros((both.sum(), 3))
+                        end = numpy.zeros((both.sum(), 3))
+                        rows = numpy.arange(both.sum())
+                        start[rows, a0] = 1 - ta[both]
+                        start[rows, a1] = ta[both]
+                        end[rows, b0] = 1 - tb[both]
+                        end[rows, b1] = tb[both]
+                        tri = self.triangles[both]
+                        length = numpy.linalg.norm((start[:, :, None] * xy[tri]).sum(1) - (end[:, :, None] * xy[tri]).sum(1), axis=1)
+                        pieces_corners.append(tri)
+                        pieces_from.append(start)
+                        pieces_to.append(end)
+                        pieces_length.append(length)
+            piece_corners = numpy.concatenate(pieces_corners)
+            lengths = numpy.concatenate(pieces_length) + 1e-6
+            piece = random.choice(len(lengths), slices, p=lengths / lengths.sum())
+            along = random.uniform(0, 1, slices)[:, None]
+            slice_weights = numpy.concatenate(pieces_from)[piece] * (1 - along) + numpy.concatenate(pieces_to)[piece] * along
+            surface_corners = numpy.concatenate([surface_corners, piece_corners[piece]])
+            surface_weights = numpy.concatenate([surface_weights, slice_weights])
 
         # Strokes: a point along one segment of a feature, by the feature's share
         # and each segment's length within it.
@@ -437,7 +487,7 @@ class Starlight:
         feature = numpy.concatenate([numpy.zeros(count - features, bool), numpy.ones(features, bool)])
         glinting = numpy.concatenate([numpy.zeros(count - glint_count, bool), numpy.ones(glint_count, bool)])
         # Feature dust scatters a little off its stroke, in face heights; glints stay put.
-        spread = numpy.concatenate([numpy.zeros(count - features), spreads[segment], numpy.full(glint_count, 0.002)])
+        spread = numpy.concatenate([numpy.zeros(surface), numpy.full(slices, SLICE_SCATTER), spreads[segment], numpy.full(glint_count, 0.002)])
         scatter = (random.normal(0, 1, (count, 2)) * spread[:, None]).astype(numpy.float32)
         rest = (weights[:, :, None] * xy[corners_of]).sum(axis=1)
         span = float(numpy.ptp(xy[:, 1])) or 1.0
@@ -578,7 +628,7 @@ class Starlight:
             + normal * (side * run * GUIDE_HEAD_WIDTH)[:, None]
             + scatter * (0.35 + 0.9 * run)[:, None]
         )
-        wing_light = 0.85 * smoothstep(0.0, 0.08, run + 0.04) * (1 - smoothstep(0.8, 1.0, run))
+        wing_light = 0.45 * smoothstep(0.0, 0.08, run + 0.04) * (1 - smoothstep(0.8, 1.0, run))
 
         wing = self.arrow_wing_star
         points = numpy.where(wing[:, None], wings, stream).astype(numpy.float32)
@@ -591,7 +641,7 @@ class Starlight:
         left = tip - heading * GUIDE_HEAD_LENGTH + normal * GUIDE_HEAD_WIDTH
         right = tip - heading * GUIDE_HEAD_LENGTH - normal * GUIDE_HEAD_WIDTH
         chevron = numpy.array([left, tip, right], numpy.float32)
-        self.guide_lines = [(path, path_alpha), (chevron, numpy.full(3, 0.9, numpy.float32))]
+        self.guide_lines = [(path, path_alpha), (chevron, numpy.full(3, 0.72, numpy.float32))]
         return points, numpy.clip(light, 0, 1.3).astype(numpy.float32)
 
     def _brackets(self, name: str, clock: float) -> tuple[numpy.ndarray, numpy.ndarray]:
@@ -644,7 +694,7 @@ class Starlight:
             target, light = self._advance_dust(elapsed, cloud)
             # Sparks glint now and then.
             glint = numpy.maximum(numpy.sin(self.glint_rate * self.clock + self.twinkle_phase), 0) ** 16
-            light = light * (1 - (1 - twinkle) * (1.2 - self.magnitude)) + glint * self.spark * 0.9 * min(1.0, self.formed)
+            light = light * (1 - (1 - twinkle) * (1.2 - self.magnitude)) + glint * self.spark * numpy.minimum(light * 2.0, 0.38) * min(1.0, self.formed)
         else:
             # A frame-lit face: light follows the camera closely; gathering eases.
             self.levels += (self.targets - self.levels) * (1 - math.exp(-elapsed / style["follow_seconds"]))
@@ -655,6 +705,9 @@ class Starlight:
             # for the dark around a face fade on the way.
             light = (NEBULA_LIGHT * self.cloud_light * (1 - self.gathered) ** 3 + numpy.sqrt(self.levels) * self.gathered) * twinkle
 
+        if self.arrow_target == 0.0 and self.arrow_amount < 0.08:
+            self.arrow = self.pending_arrow
+            self.arrow_target = 1.0 if self.arrow else 0.0
         self.arrow_amount += (self.arrow_target - self.arrow_amount) * (1 - math.exp(-elapsed / GUIDE_FADE_SECONDS))
         stars = self.arrow_stars
         arrow = self.arrow_amount > 0.01 and self.arrow in ARROWS
@@ -685,7 +738,9 @@ class Starlight:
             self.formed += elapsed
         else:
             self.formed = max(0.0, self.formed - elapsed * LEAVE_SPEED)
-        self.formed = min(self.formed, 4.0)
+        # Saturate at the final mote's arrival, so losing a long-held face
+        # starts releasing dust immediately instead of waiting seconds.
+        self.formed = min(self.formed, float(self.surface["delay"].max()) + ARRIVE_SECONDS)
         # Once spread back out, the next face condenses afresh.
         if not self.face and self.formed <= 0.0:
             self.vertices = None
@@ -709,9 +764,9 @@ class Starlight:
         settled = lit * eased
         # The scan: a band of light sweeping down the formed face.
         sweep = (self.clock % SCAN_SECONDS) / SCAN_SWEEP
-        if sweep < 1 and self.formed > 1.6:
+        if sweep < 1 and self.formed >= float(surface["delay"].max()) + ARRIVE_SECONDS - 0.01:
             band = -20 + (self.height + 40) * sweep
-            strength = SCAN_GAIN * min(1.0, self.formed - 1.6) * (1 - self.arrow_amount)
+            strength = SCAN_GAIN * min(1.0, self.formed) * (1 - self.arrow_amount)
             settled = settled * (1 + strength * numpy.exp(-(((rest[:, 1] - band) / SCAN_WIDTH) ** 2)))
         settled = settled * (1 - GUIDE_DIMS_FACE * self.arrow_amount)
         light[stars] = self.cloud_light[stars] * NEBULA_LIGHT * (1 - eased) ** 2 + settled + flare

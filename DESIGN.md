@@ -512,10 +512,11 @@ and grows to fit (surface height 440).
   second, each mote swirling in on its own curved path and flaring as it
   settles; a lost face spreads back out faster than it came.
   - *Never the mesh's grid:* each mote has its own place on the face's
-    surface, scattered over its triangles. About 14% trace soft strokes
-    along the upper lids, brows and mouth, plus a five-mote glint in each
+    surface, scattered over its triangles. About 8% trace soft strokes
+    along the upper lids, brows and mouth; 24% follow softly scattered
+    surface contours that bend over the nose and cheeks, plus a five-mote glint in each
     iris; outlines of eyes and lips read as a cartoon and are avoided.
-  - *Lit like a sculpture:* a key light from above and in front, mixed with
+  - *Lit like a sculpture:* a side key from above-left (85% of the diffuse light), mixed with
     nearness as IR falls off, a faint rim, and a dissolving silhouette. Light
     sets density as well as brightness, like stippling: shadowed planes keep
     only sparse dust.
@@ -545,11 +546,11 @@ and grows to fit (surface height 440).
   the scene, with a soft glow. A turn is an arc orbiting the head under the
   chin, from behind the head to just past its front, where the arc moves
   across the view; a tilt is that arc up beside the cheek; a move is a
-  straight arrow beside the face. Arrowheads are laid out flat on the screen,
+  straight arrow beside the face. Arrowheads are slim 8 × 10 pt chevrons laid out flat on the screen,
   so they read at any angle. "Move a little closer" and "farther away" are
   four corner brackets around the face, opening outward or closing in every
   1.5 s. The guide nudges its way every 1.6 s and fades over 300 ms; while it
-  shows, the face dims by 30% and the scan pauses, so one thing leads.
+  shows, the face dims by 12% and the scan pauses, so one thing leads.
 - **Distance coaching:** Gaze needs the face box to span 25–78% of the
   frame's short side. FaceGate measures it on whichever camera is sending
   previews and coaches closer or back from 15% and 8% inside those limits.
@@ -652,3 +653,17 @@ widens back when it doesn't. Only the step's title, body and content travel.
    (Not Now | Try Again).
 5. **Face added:** a green mark. → Add Another Look (for example with
    glasses) | Done.
+
+### Enrollment polish: volume and dissolution
+
+Keep the sockets dark and the cheek planes distinct: sparse shadows, a directional
+key, restrained rim, and crisp subpixel grains. Glints inherit surface light so
+they cannot fill dark sockets with unrelated sparks. Glow is 0.7 pt at 65%;
+bloom is 4 pt at 32%; the background halo is only 3.5%. The face stays readable
+while coaching. A changed direction dissolves its old guide before forming the
+next; losing tracking starts dispersal immediately, even after a long hold.
+Results also release the dust spatially as it fades.
+
+The optical atmosphere of [GMUNK's work](https://gmunk.com/GMUNK) complements
+the Apple Watch pairing reference: individual light, depth, and coherent motion.
+Use that as art direction, with the user's own face as the recognizable subject.

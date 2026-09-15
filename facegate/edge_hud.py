@@ -460,10 +460,10 @@ STAR_STYLE = {
     # tight glow and a wide one.
     "pitch": 4.0,
     "core": 2.4,
-    "glow": 1.2,
-    "glow_alpha": 1.0,
+    "glow": 0.7,
+    "glow_alpha": 0.65,
     "bloom": 4.0,
-    "bloom_alpha": 0.7,
+    "bloom_alpha": 0.32,
     "twinkle": 0.35,
     # Before a face, the cloud: an oval this big, each star wandering this far.
     "cloud_width": 150.0,
