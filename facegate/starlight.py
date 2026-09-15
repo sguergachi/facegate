@@ -5,7 +5,8 @@ picture. As soon as the preview opens, thousands of tiny stars drift in a slow,
 wandering cloud. When the camera finds a face, each star flies to its own spot
 and takes that spot's brightness, so the bright ones form the face and the
 rest dim away; they keep following the face as it moves, and fall back into
-the cloud if it's lost. When the scan ends they take the result's colour and
+the cloud if it's lost. Given the face's surface points instead of a frame,
+each point takes its own star, and the stars left over go dark. When the scan ends they take the result's colour and
 wink out, in random order.
 
 The camera gives a lit frame about every 70 ms, but the stars move on springs
@@ -102,6 +103,10 @@ class Starlight:
         self.twinkle_rate = random.uniform(0.6, 1.8, count).astype(numpy.float32) * math.tau
         self.twinkle_phase = random.uniform(0, math.tau, count).astype(numpy.float32)
         self.threshold = random.uniform(0, 1, count).astype(numpy.float32)
+        # Which star takes which surface point, and where a point's second and
+        # third stars sit around it, so the mesh reads as dense starlight.
+        self.mesh_order = random.permutation(count)
+        self.mesh_jitter = random.uniform(-1.3, 1.3, (count, 2)).astype(numpy.float32)
         self.reset()
 
     def reset(self) -> None:
@@ -113,6 +118,8 @@ class Starlight:
         self.levels = numpy.zeros(count, numpy.float32)
         self.targets = numpy.zeros(count, numpy.float32)
         self.face = False
+        # Where each star goes on the face's mesh, when there is one.
+        self.mesh: numpy.ndarray | None = None
         # 0..1 how gathered into the face the stars are, and how alive the field is.
         self.gathered = 0.0
         self.presence = 0.0
@@ -135,6 +142,29 @@ class Starlight:
         """A camera frame, and whether a face was found in it."""
         self.targets = self.brightness(pixels).astype(numpy.float32)
         self.face = face
+        self.mesh = None
+
+    def submit_mesh(self, points: numpy.ndarray) -> None:
+        """The face's surface points as (x, y, light) rows; none means no face."""
+        if len(points) == 0:
+            self.face = False
+            return
+        count, total = len(points), len(self.spots)
+        places = self.spots.copy()
+        targets = numpy.zeros(total, numpy.float32)
+        # Up to three stars per point: one on it at full light, the rest
+        # scattered just around it, dimmer.
+        taken = min(total, count * 3)
+        stars = self.mesh_order[:taken]
+        which = numpy.arange(taken) % count
+        extra = numpy.arange(taken) >= count
+        places[stars] = points[which, :2] + self.mesh_jitter[stars] * extra[:, None]
+        light = points[which, 2] * numpy.where(extra, 0.3, 1.0)
+        # Levels are drawn through a square root.
+        targets[stars] = light * light
+        self.mesh = places.astype(numpy.float32)
+        self.targets = targets
+        self.face = True
 
     def fade_out(self) -> None:
         """The scan is over: the stars wink out."""
@@ -160,7 +190,7 @@ class Starlight:
         self.presence = min(self.presence_target, self.presence + change) if self.presence_target > self.presence else max(self.presence_target, self.presence - change)
 
         # Stars spring toward the face's spots or back into the cloud.
-        target = self.spots if self.face else self._cloud()
+        target = (self.spots if self.mesh is None else self.mesh) if self.face else self._cloud()
         stiffness = self.stiffness[:, None]
         damping = 2 * 0.82 * numpy.sqrt(stiffness)
         self.velocity += ((target - self.position) * stiffness - self.velocity * damping) * elapsed

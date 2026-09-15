@@ -35,6 +35,10 @@ step "Installing FaceGate's dependencies"
 sudo pacman -S --needed --noconfirm \
   base-devel git pam python python-gobject python-cairo python-numpy \
   gtk4 gtk4-layer-shell libappindicator polkit
+# The enrollment preview's face mesh; any system ONNX Runtime will do.
+if ! python3 -I -c 'import onnxruntime' 2>/dev/null; then
+  sudo pacman -S --needed --noconfirm python-onnxruntime-cpu
+fi
 done_ "Packages from the official repositories"
 
 step "Installing Gaze (biometric security backend)"

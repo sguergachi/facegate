@@ -3,10 +3,17 @@ import json
 import os
 import socket
 import tempfile
+import base64
 import unittest
 from pathlib import Path
 
+import gi
+
+gi.require_version("GLib", "2.0")
+from gi.repository import GLib  # noqa: E402
+
 from facegate import cameras, faces, faces_helper
+from facegate import facemesh as faces_mesh
 from facegate.edge_hud import HudServer
 from facegate.protocol import MAX_STREAM_BYTES, PREVIEW_HEIGHT, PREVIEW_WIDTH, decode, encode
 
@@ -90,7 +97,7 @@ class FakeGazeClient:
         ]
         return True
 
-    def enroll(self, username, face_name, stopped, width, height):
+    def enroll(self, username, face_name, stopped, width, height, mesh=None):
         self.enrollments.append((username, face_name, width, height))
         if self.error:
             raise self.error
@@ -115,6 +122,9 @@ class HelperTests(unittest.TestCase):
             metadata_file=self.metadata,
         )
         self.helper.commands.read = lambda timeout: None
+        loader = faces.load_face_mesh
+        faces.load_face_mesh = lambda: None
+        self.addCleanup(setattr, faces, "load_face_mesh", loader)
 
     def tearDown(self):
         self.directory.cleanup()
@@ -256,6 +266,112 @@ class PreviewTests(unittest.TestCase):
         kinds = [event["event"] for event in events]
         self.assertEqual(kinds.count("frame"), 1)
         self.assertEqual(kinds[-2:], ["progress", "completed"])
+
+class ScriptedBus:
+    """A system bus whose EnrollStart plays back a list of Gaze signals."""
+
+    def __init__(self, signals):
+        self.handlers = {}
+        self.signals = signals
+
+    def signal_subscribe(self, _sender, _interface, member, _path, _arg0, _flags, callback):
+        self.handlers[member] = callback
+        return len(self.handlers)
+
+    def signal_unsubscribe(self, _subscription):
+        pass
+
+    def call_sync(self, _service, _path, _interface, method, *_rest):
+        if method == "EnrollStart":
+            for member, variant in self.signals:
+                self.handlers[member](None, "", "", "", member, variant)
+        return GLib.Variant("()", ())
+
+
+def enroll_status(prompt, done=False):
+    return ("EnrollStatus", GLib.Variant("(suubsd)", ("Face", 1, 5, done, prompt, 0.0)))
+
+
+def face_status(status):
+    return ("FaceStatus", GLib.Variant("(s)", (status,)))
+
+
+class EnrollHintTests(unittest.TestCase):
+    def test_the_pose_instruction_stays_up_until_something_is_wrong(self):
+        bus = ScriptedBus([
+            enroll_status("look-left"),
+            face_status("ready"),
+            face_status("usable"),
+            face_status("too-dark"),
+            face_status("ready"),
+            enroll_status("completed", done=True),
+        ])
+        events = faces.GazeClient(bus=bus).enroll("someone", "Face", lambda: False)
+        hints = [event["text"] for event in events if event["event"] == "hint"]
+        self.assertEqual(hints, [
+            "Waiting for the camera…",
+            "Slowly turn your head to the left.",
+            "Too dark. Move a little closer.",
+            "Slowly turn your head to the left.",
+        ])
+
+
+class MeshPreviewTests(unittest.TestCase):
+    class FakeMesh:
+        def __init__(self, answers):
+            self.answers = list(answers)
+
+        def find(self, image):
+            assert image.ndim == 3 and image.shape[2] == 3
+            return self.answers.pop(0)
+
+    def test_previews_become_face_mesh_points_in_preview_pixels(self):
+        import numpy
+
+        mesh = numpy.array([[100, 100, 0.0], [200, 300, 1.0], [150, 200, 0.5]], numpy.float32)
+        bus = ScriptedBus([
+            ("PreviewFrame", GLib.Variant("(ay)", (PreviewTests.jpeg(),))),
+            enroll_status("completed", done=True),
+        ])
+        events = list(faces.GazeClient(bus=bus).enroll("someone", "Face", lambda: False, mesh=self.FakeMesh([mesh])))
+        meshes = [event for event in events if event["event"] == "mesh"]
+        self.assertEqual(len(meshes), 1)
+        self.assertNotIn("frame", [event["event"] for event in events])
+        points = numpy.frombuffer(base64.b64decode(meshes[0]["points"]), numpy.float32).reshape(-1, 3)
+        # The face fills the preview's height, centred.
+        self.assertAlmostEqual(float(points[:, 1].max() - points[:, 1].min()), PREVIEW_HEIGHT / faces_mesh.Framing.ZOOM, places=3)
+        self.assertAlmostEqual(float(points[:, 0].mean()), PREVIEW_WIDTH / 2, places=3)
+        # Nearer points carry more light.
+        self.assertLess(points[0, 2], points[2, 2])
+        self.assertEqual(points[1, 2], 1.0)
+
+    def test_a_mirrored_eye_pair_is_not_a_face_upside_down(self):
+        import math
+
+        self.assertAlmostEqual(faces_mesh.upright(math.pi - 0.1), -0.1)
+        self.assertAlmostEqual(faces_mesh.upright(0.2), 0.2)
+        self.assertAlmostEqual(faces_mesh.upright(-math.pi + 0.3), 0.3)
+
+    def test_stars_gather_on_the_mesh_and_leave_the_rest_dark(self):
+        import numpy
+
+        from facegate.edge_hud import STAR_STYLE
+        from facegate.starlight import Starlight
+
+        stars = Starlight(PREVIEW_WIDTH, PREVIEW_HEIGHT, STAR_STYLE)
+        points = numpy.array([[40, 50, 1.0], [80, 90, 0.5]], numpy.float32)
+        stars.submit_mesh(points)
+        self.assertTrue(stars.face)
+        first = stars.mesh_order[0]
+        self.assertEqual(stars.mesh[first].tolist(), [40.0, 50.0])
+        self.assertEqual(stars.targets[first], 1.0)
+        self.assertEqual(int((stars.targets > 0).sum()), 6)
+        for _ in range(240):
+            stars.advance(1 / 60)
+        self.assertLess(float(numpy.abs(stars.position[first] - [40, 50]).max()), 0.5)
+        stars.submit_mesh(numpy.zeros((0, 3), numpy.float32))
+        self.assertFalse(stars.face)
+
 
 class CameraTests(unittest.TestCase):
     def setUp(self):

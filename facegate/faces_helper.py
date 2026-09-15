@@ -159,7 +159,8 @@ class Helper:
             return True
 
         try:
-            for event in self.client.enroll(self.user, label, stopped, width, height):
+            mesh = faces.load_face_mesh()
+            for event in self.client.enroll(self.user, label, stopped, width, height, mesh=mesh):
                 if event.get("event") == "completed":
                     metadata = faces.load_metadata(self.metadata_file)
                     metadata[label] = int(time.time())

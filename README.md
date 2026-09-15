@@ -86,7 +86,8 @@ Open **FaceGate** from the app menu or run `facegate-settings`. First-run
 onboarding is a top-edge layer-shell island; it yields that position to
 approval and enrollment, then returns. The normal face manager remains a
 standalone window. **Add a Face** shows enrollment hints,
-progress, and a preview when Gaze publishes one; **Remove** asks for confirmation
+progress, and Gaze's camera preview as starlight gathered on your face's shape
+(MediaPipe Face Mesh, run on the preview only, never stored or sent to Gaze); **Remove** asks for confirmation
 before requesting deletion.
 
 Face names and sample counts come from Gaze. Gaze owns all template storage and
@@ -106,7 +107,8 @@ cd facegate
 
 Run setup as your normal user. It installs:
 
-1. FaceGate's GTK/layer-shell and build dependencies.
+1. FaceGate's GTK/layer-shell and build dependencies, and ONNX Runtime for the
+   enrollment preview's face mesh.
 2. Gaze's prebuilt `gaze-bin` AUR package, including `gazed` and the official PAM
    module.
 3. FaceGate's native consent module and UI, then replaces standalone Howdy/Gaze
@@ -179,3 +181,7 @@ Face recognition, liveness detection, camera handling, template storage, D-Bus
 authorization, and the biometric PAM result are provided by
 [Gaze](https://github.com/GunduLabs/gaze) by Gundu Labs and its contributors.
 FaceGate is an independent consent/UI layer and is not affiliated with Gaze.
+
+The enrollment preview uses Google's MediaPipe face detector and Face Mesh
+models (Apache-2.0), converted to ONNX; see
+[facegate/models/NOTICE](facegate/models/NOTICE).

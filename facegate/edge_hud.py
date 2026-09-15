@@ -27,6 +27,7 @@ from typing import Any, Callable
 
 import cairo
 import gi
+import numpy
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Gdk", "4.0")
@@ -484,6 +485,8 @@ STAR_STYLE = {
     "corner": PREVIEW_RADIUS,
     "feather": PREVIEW_FEATHER,
 }
+# At most this many face mesh points are accepted; Face Mesh has 478.
+MESH_POINTS = 1_024
 # A result holds the finished face this long before its stars wink out.
 STARS_HOLD_SECONDS = 0.45
 PREVIEW_COLORS = {"scanning": MARK_PROFILES["scanning"][:3], "success": MARK_PROFILES["success"][:3], "failure": MARK_PROFILES["failure"][:3]}
@@ -570,6 +573,7 @@ class PreviewArea(Gtk.Widget):
         # Written by the socket thread or the panel, picked up on the frame clock:
         # the newest frame, and whether the camera found a face in it.
         self.latest: tuple[bytes, bool] | None = None
+        self.latest_mesh: numpy.ndarray | None = None
         self.stars = Starlight(PREVIEW_WIDTH, PREVIEW_HEIGHT, STAR_STYLE)
         self.look = Look()
         self.rim = rim_path(TRACE_INSET, TRACE_INSET, PREVIEW_WIDTH - 2 * TRACE_INSET, PREVIEW_HEIGHT - 2 * TRACE_INSET, PREVIEW_RADIUS - TRACE_INSET)
@@ -584,13 +588,29 @@ class PreviewArea(Gtk.Widget):
                 return
             # Older helpers don't say; their frames always show the face.
             self.latest = (pixels, message.get("face") is not False)
+            self.latest_mesh = None
+        except (KeyError, TypeError, ValueError):
+            pass
+
+    def take_mesh(self, message: dict[str, Any]) -> None:
+        """Keep the newest face mesh: float32 (x, y, light) rows, or none for no face."""
+        try:
+            width, height = int(message["w"]), int(message["h"])
+            data = base64.b64decode(message["mesh"])
+            if (width, height) != (PREVIEW_WIDTH, PREVIEW_HEIGHT) or len(data) % 12 or len(data) > MESH_POINTS * 12:
+                return
+            points = numpy.frombuffer(data, numpy.float32).reshape(-1, 3)
+            if not numpy.isfinite(points).all():
+                return
+            self.latest_mesh = numpy.clip(points, (-PREVIEW_WIDTH, -PREVIEW_HEIGHT, 0), (2 * PREVIEW_WIDTH, 2 * PREVIEW_HEIGHT, 1))
+            self.latest = None
         except (KeyError, TypeError, ValueError):
             pass
 
     def reset(self) -> None:
         self.model = PreviewModel()
         self.progress.value = self.progress.target = self.progress.velocity = 0.0
-        self.latest = None
+        self.latest = self.latest_mesh = None
         self.stars.reset()
 
     def set_progress(self, value: float) -> None:
@@ -612,6 +632,9 @@ class PreviewArea(Gtk.Widget):
         latest, self.latest = self.latest, None
         if latest is not None:
             self.stars.submit(*latest)
+        mesh, self.latest_mesh = self.latest_mesh, None
+        if mesh is not None:
+            self.stars.submit_mesh(mesh)
         model.elapsed += elapsed
         model.state_elapsed += elapsed
         self.progress.step(elapsed)
@@ -1811,6 +1834,8 @@ class EdgeHud:
             return False
         if "frame" in message:
             self.preview.take_frame(message)
+        if "mesh" in message:
+            self.preview.take_mesh(message)
         if "progress" in message:
             try:
                 self.preview.set_progress(float(message["progress"]))
@@ -2063,6 +2088,8 @@ class HudServer:
                     message = decode(line, MAX_STREAM_BYTES)
                     if "frame" in message:
                         self.hud.preview.take_frame(message)
+                    elif "mesh" in message:
+                        self.hud.preview.take_mesh(message)
                     else:
                         GLib.idle_add(self.hud.enrollment_message, connection, message)
                 if len(buffer) > MAX_STREAM_BYTES:

@@ -60,7 +60,7 @@ Rules:
   done, red means failed or destructive. Nothing else is coloured.
 - Primary buttons are white with black text. Secondary buttons are `#1c1c1e`
   with white text. There is no blue accent button.
-- The IR preview is the only imagery. It is shown as luminance, tinted cool
+- The enrollment starlight is the only imagery. It is tinted cool
   (`#d6f0ff`), and takes on the result colour only at a result.
 
 ### Typography
@@ -472,10 +472,19 @@ connection for the whole scan. The mark gives way to a 312 × 208 live IR
 preview at the top inset, 16 pt above the title. The island keeps its width
 and grows to fit (surface height 440).
 
-- **Preview:** the camera crop follows the face (eased; the face is about half
-  the height, eyes a little above center). It's shown as luminance tinted a
-  cool `#d6f0ff`, and masked by a rounded rectangle (radius 30) whose last
-  36 pt feather to nothing, so the image dissolves into the black island.
+- **Preview:** the camera is never shown as a picture, only as starlight.
+  The face's 478 surface points (MediaPipe Face Mesh, run on the preview in
+  the unprivileged helper) each take a star, lit by nearness (35% at the ears,
+  full at the nose), with two dimmer stars scattered just around each point;
+  the leftover stars go dark. The view follows the face, eased, with the mesh
+  filling 1 / 1.35 of the height. Without a face the stars wander in their
+  cloud. Where the mesh can't run, the stars take the frame's brightness
+  instead (colour frames inverted under a head-and-shoulders spotlight). All
+  of it is tinted a cool `#d6f0ff` and masked by a rounded rectangle
+  (radius 30) whose last 36 pt feather to nothing.
+- **Hints:** the pose instruction ("Slowly turn your head to the left.") stays
+  up for the whole pose; the camera's status replaces it only while something
+  is wrong (too dark, too close, off-centre), then the pose returns.
 - **Fluidity:** IR emitters often light only every other frame, so unlit
   frames are skipped and each lit frame cross-fades into the next over 70 ms
   on the frame clock.

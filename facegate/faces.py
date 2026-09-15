@@ -45,6 +45,10 @@ SPOTLIGHT_WIDTH = 0.6
 SPOTLIGHT_HEIGHT = 1.3
 SPOTLIGHT_CENTRE = 0.62
 SPOTLIGHT_EDGE = (0.3, 0.85)
+# Colour previews are decoded no wider than this for the face mesh.
+MESH_DECODE_WIDTH = 640
+# A face missing for this long, not just one frame, sends the stars back to the cloud.
+MESH_HOLD_SECONDS = 0.6
 DBUS_TIMEOUT_MS = 35_000
 ENROLL_TIMEOUT_SECONDS = 90
 LABEL_CHARS = 24
@@ -118,6 +122,8 @@ def summarize(
     ]
 
 
+# Gaze's face status, only when something is wrong; otherwise the current pose
+# instruction stays up, since Gaze sends that only once per pose.
 CAPTURE_HINTS = {
     "unused": "Waiting for the camera…",
     "camera is not in use...": "Waiting for the camera…",
@@ -133,23 +139,22 @@ CAPTURE_HINTS = {
     "please come closer...": "Move a little closer.",
     "too-close": "Move a little farther away.",
     "please back up...": "Move a little farther away.",
-    "ready": "Hold still and look at the camera.",
-    "usable": "Hold still and look at the camera.",
-    "hold still...": "Hold still and look at the camera.",
 }
 
+# Gaze mirrors its previews, so left and right are as the user sees themself.
 ENROLL_HINTS = {
-    "look-straight": "Hold still and look at the camera.",
-    "face the camera": "Hold still and look at the camera.",
-    "look-up": "Tilt your face slightly up.",
-    "tilt your face slightly up": "Tilt your face slightly up.",
-    "look-down": "Tilt your face slightly down.",
-    "tilt your face slightly down": "Tilt your face slightly down.",
-    "look-left": "Turn your face slightly left.",
-    "turn your face slightly left": "Turn your face slightly left.",
-    "look-right": "Turn your face slightly right.",
-    "turn your face slightly right": "Turn your face slightly right.",
+    "look-straight": "Look straight at the camera and hold still.",
+    "face the camera": "Look straight at the camera and hold still.",
+    "look-up": "Slowly tilt your chin up.",
+    "tilt your face slightly up": "Slowly tilt your chin up.",
+    "look-down": "Slowly tilt your chin down.",
+    "tilt your face slightly down": "Slowly tilt your chin down.",
+    "look-left": "Slowly turn your head to the left.",
+    "turn your face slightly left": "Slowly turn your head to the left.",
+    "look-right": "Slowly turn your head to the right.",
+    "turn your face slightly right": "Slowly turn your head to the right.",
 }
+POSE_HOLD = "Hold still…"
 
 FAILED_PROMPTS = {
     "db-failed": "Gaze couldn't save your face.",
@@ -161,6 +166,38 @@ FAILED_PROMPTS = {
 
 def _normal(value: object) -> str:
     return str(value or "").strip().casefold()
+
+
+def _decode_rgb(jpeg: bytes, width: int | None = None, height: int | None = None) -> numpy.ndarray:
+    """A JPEG as an RGB array, scaled by libjpeg while decoding.
+
+    Without a size, the frame keeps its aspect and is at most
+    ``MESH_DECODE_WIDTH`` wide.
+    """
+    loader = GdkPixbuf.PixbufLoader.new_with_type("jpeg")
+
+    def prepared(source: GdkPixbuf.PixbufLoader, native_width: int, native_height: int) -> None:
+        if width and height:
+            source.set_size(width, height)
+        elif native_width > MESH_DECODE_WIDTH:
+            source.set_size(MESH_DECODE_WIDTH, max(1, round(native_height * MESH_DECODE_WIDTH / native_width)))
+
+    loader.connect("size-prepared", prepared)
+    loader.write(jpeg)
+    loader.close()
+    pixbuf = loader.get_pixbuf()
+    if pixbuf is None:
+        raise GazeError("Gaze sent an unreadable camera preview.")
+    if width and height and (pixbuf.get_width(), pixbuf.get_height()) != (width, height):
+        pixbuf = pixbuf.scale_simple(width, height, GdkPixbuf.InterpType.BILINEAR)
+        if pixbuf is None:
+            raise GazeError("Gaze couldn't resize the camera preview.")
+    columns, rows_count = pixbuf.get_width(), pixbuf.get_height()
+    channels = pixbuf.get_n_channels()
+    stride = pixbuf.get_rowstride()
+    rows = numpy.frombuffer(pixbuf.get_pixels(), numpy.uint8)
+    rows = numpy.pad(rows, (0, stride * rows_count - len(rows))).reshape(rows_count, stride)
+    return rows[:, : columns * channels].reshape(rows_count, columns, channels)[:, :, :3]
 
 
 def _jpeg_to_greyscale(jpeg: bytes, width: int, height: int) -> bytes:
@@ -176,22 +213,7 @@ def _jpeg_to_greyscale(jpeg: bytes, width: int, height: int) -> bytes:
     NumPy weighs the channels. A pure-Python pixel loop cannot keep up with a
     live camera.
     """
-    loader = GdkPixbuf.PixbufLoader.new_with_type("jpeg")
-    loader.connect("size-prepared", lambda source, _w, _h: source.set_size(width, height))
-    loader.write(jpeg)
-    loader.close()
-    pixbuf = loader.get_pixbuf()
-    if pixbuf is None:
-        raise GazeError("Gaze sent an unreadable camera preview.")
-    if (pixbuf.get_width(), pixbuf.get_height()) != (width, height):
-        pixbuf = pixbuf.scale_simple(width, height, GdkPixbuf.InterpType.BILINEAR)
-        if pixbuf is None:
-            raise GazeError("Gaze couldn't resize the camera preview.")
-    channels = pixbuf.get_n_channels()
-    stride = pixbuf.get_rowstride()
-    rows = numpy.frombuffer(pixbuf.get_pixels(), numpy.uint8)
-    rows = numpy.pad(rows, (0, stride * height - len(rows))).reshape(height, stride)
-    rgb = rows[:, : width * channels].reshape(height, width, channels)[:, :, :3].astype(numpy.int32)
+    rgb = _decode_rgb(jpeg, width, height).astype(numpy.int32)
     colour = numpy.abs(rgb[:, :, 0] - rgb[:, :, 1]).mean() + numpy.abs(rgb[:, :, 1] - rgb[:, :, 2]).mean()
     luma = (77 * rgb[:, :, 0] + 150 * rgb[:, :, 1] + 29 * rgb[:, :, 2]) >> 8
     if colour > COLOUR_SPREAD:
@@ -220,6 +242,16 @@ def _spotlight(width: int, height: int) -> numpy.ndarray:
         amount = numpy.clip((outer - distance) / (outer - inner), 0, 1)
         _spotlights[key] = amount * amount * (3 - 2 * amount)
     return _spotlights[key]
+
+
+def load_face_mesh() -> Any:
+    """MediaPipe's face mesh for the preview, or None where it can't run."""
+    try:
+        from .facemesh import FaceMesh
+
+        return FaceMesh()
+    except Exception:  # noqa: BLE001 - any missing runtime or model means the fallback
+        return None
 
 
 def drain_main_context(context: GLib.MainContext, limit: int = 32) -> int:
@@ -363,7 +395,28 @@ class GazeClient:
         stopped: Callable[[], bool],
         width: int = PREVIEW_WIDTH,
         height: int = PREVIEW_HEIGHT,
+        mesh: Any = None,
     ) -> Iterator[dict[str, Any]]:
+        """Gaze's enrollment as events: hint, progress, frame or mesh, then the result.
+
+        With a face mesh (see ``facemesh.FaceMesh``) previews become ``mesh``
+        events of the face's surface points; without one, greyscale ``frame``
+        events.
+        """
+        from .facemesh import Framing
+
+        framing = Framing(width, height)
+        face_seen = time.monotonic()
+        face_shown = False
+        pose_hint = ""
+        shown_hint = ""
+
+        def hint(text: str) -> Iterator[dict[str, Any]]:
+            nonlocal shown_hint
+            if text and text != shown_hint:
+                shown_hint = text
+                yield {"event": "hint", "text": text}
+
         events: deque[tuple[str, tuple[Any, ...]]] = deque()
         # Preview frames arrive faster than they can be shown, so only the
         # newest is kept: a queue of stale frames would grow without bound and
@@ -388,11 +441,31 @@ class GazeClient:
             self._void("Claim", GLib.Variant("(s)", (username,)))
             claimed = True
             self._void("EnrollStart", GLib.Variant("(s)", (face_name,)))
-            yield {"event": "hint", "text": "Waiting for the camera…"}
+            yield from hint("Waiting for the camera…")
             while not completed:
                 drain_main_context(context)
                 preview, latest_preview[0] = latest_preview[0], None
-                if preview is not None:
+                if preview is not None and mesh is not None:
+                    try:
+                        jpeg = preview.get_child_value(0).get_data_as_bytes().get_data()
+                        points = mesh.find(_decode_rgb(jpeg))
+                    except Exception:  # noqa: BLE001 - one bad frame must not end enrollment
+                        points = None
+                    now = time.monotonic()
+                    if points is not None:
+                        face_seen, face_shown = now, True
+                        placed = framing.place(points)
+                        yield {
+                            "event": "mesh",
+                            "w": width,
+                            "h": height,
+                            "points": base64.b64encode(placed.tobytes()).decode("ascii"),
+                        }
+                    elif face_shown and now - face_seen > MESH_HOLD_SECONDS:
+                        face_shown = False
+                        framing.view = None
+                        yield {"event": "mesh", "w": width, "h": height, "points": ""}
+                elif preview is not None:
                     try:
                         jpeg = preview.get_child_value(0).get_data_as_bytes().get_data()
                         raw = _jpeg_to_greyscale(jpeg, width, height)
@@ -409,10 +482,7 @@ class GazeClient:
                     kind, values = events.popleft()
                     if kind == "face":
                         status = _normal(values[0] if values else "")
-                        yield {
-                            "event": "hint",
-                            "text": CAPTURE_HINTS.get(status, "Hold still and look at the camera."),
-                        }
+                        yield from hint(CAPTURE_HINTS.get(status) or pose_hint or POSE_HOLD)
                     elif kind == "enroll" and len(values) >= 6:
                         _name, progress, maximum, is_done, prompt, _remaining = values[:6]
                         prompt_key = _normal(prompt)
@@ -422,7 +492,8 @@ class GazeClient:
                                 "value": min(1.0, float(progress) / float(maximum)),
                             }
                         if prompt_key in ENROLL_HINTS:
-                            yield {"event": "hint", "text": ENROLL_HINTS[prompt_key]}
+                            pose_hint = ENROLL_HINTS[prompt_key]
+                            yield from hint(pose_hint)
                         if prompt_key in FAILED_PROMPTS:
                             raise GazeError(FAILED_PROMPTS[prompt_key])
                         if prompt_key in {"cancelled", "enrollment cancelled"}:
