@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 import gi
+import numpy
 
 gi.require_version("Gio", "2.0")
 gi.require_version("GLib", "2.0")
@@ -34,6 +35,9 @@ PROPERTIES_INTERFACE = "org.freedesktop.DBus.Properties"
 CONFIG_PREFIX = "((ss)(sssdds)(ssbys)"
 CAMERAS_INDEX = 2
 CAMERA_FIELDS = ("rgb", "ir", "emitter_enabled", "dark_luma", "parallel")
+# Mean channel difference above which a preview is a colour frame; a grey IR
+# frame only differs by JPEG rounding.
+COLOUR_SPREAD = 3.0
 DBUS_TIMEOUT_MS = 35_000
 ENROLL_TIMEOUT_SECONDS = 90
 LABEL_CHARS = 24
@@ -153,11 +157,17 @@ def _normal(value: object) -> str:
 
 
 def _jpeg_to_greyscale(jpeg: bytes, width: int, height: int) -> bytes:
-    """Decode Gaze's preview and resize it for the existing island renderer.
+    """Decode Gaze's preview into the island's luma, the way IR sees a face.
 
-    Every per-pixel step stays in C: libjpeg scales while decoding and GdkPixbuf
-    desaturates, so Python only slices one channel per row. A pure-Python pixel
-    loop cannot keep up with a live camera.
+    Starlight puts its bright stars where the frame is bright. The IR emitter
+    lights the face against a dark room, which is what it's drawn for; a colour
+    camera sees the opposite, a darker face against a bright room, so colour
+    frames are inverted. Gaze sends IR frames as grey JPEGs, which tells the
+    two apart.
+
+    Every per-pixel step stays in C or NumPy: libjpeg scales while decoding and
+    GdkPixbuf desaturates. A pure-Python pixel loop cannot keep up with a live
+    camera.
     """
     loader = GdkPixbuf.PixbufLoader.new_with_type("jpeg")
     loader.connect("size-prepared", lambda source, _w, _h: source.set_size(width, height))
@@ -170,11 +180,16 @@ def _jpeg_to_greyscale(jpeg: bytes, width: int, height: int) -> bytes:
         pixbuf = pixbuf.scale_simple(width, height, GdkPixbuf.InterpType.BILINEAR)
         if pixbuf is None:
             raise GazeError("Gaze couldn't resize the camera preview.")
-    pixbuf.saturate_and_pixelate(pixbuf, 0.0, False)
-    pixels = pixbuf.get_pixels()
     channels = pixbuf.get_n_channels()
     stride = pixbuf.get_rowstride()
-    return b"".join(pixels[y * stride : y * stride + width * channels : channels] for y in range(height))
+    rows = numpy.frombuffer(pixbuf.get_pixels(), numpy.uint8)
+    rows = numpy.pad(rows, (0, stride * height - len(rows))).reshape(height, stride)
+    rgb = rows[:, : width * channels].reshape(height, width, channels)[:, :, :3].astype(numpy.int16)
+    colour = numpy.abs(rgb[:, :, 0] - rgb[:, :, 1]).mean() + numpy.abs(rgb[:, :, 1] - rgb[:, :, 2]).mean()
+    luma = (77 * rgb[:, :, 0] + 150 * rgb[:, :, 1] + 29 * rgb[:, :, 2]) >> 8
+    if colour > COLOUR_SPREAD:
+        luma = 255 - luma
+    return luma.astype(numpy.uint8).tobytes()
 
 
 def drain_main_context(context: GLib.MainContext, limit: int = 32) -> int:

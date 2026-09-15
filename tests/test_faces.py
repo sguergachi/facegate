@@ -201,11 +201,17 @@ class PreviewTests(unittest.TestCase):
         pixbuf.fill(rgba)
         return bytes(pixbuf.save_to_bufferv("jpeg", [], [])[1])
 
-    def test_jpeg_preview_becomes_a_greyscale_frame(self):
-        grey = faces._jpeg_to_greyscale(self.jpeg(), PREVIEW_WIDTH, PREVIEW_HEIGHT)
+    def test_an_ir_preview_keeps_its_brightness(self):
+        grey = faces._jpeg_to_greyscale(self.jpeg(rgba=0x303030FF), PREVIEW_WIDTH, PREVIEW_HEIGHT)
         self.assertEqual(len(grey), PREVIEW_WIDTH * PREVIEW_HEIGHT)
         self.assertEqual(len(set(grey)), 1)
-        self.assertLess(abs(grey[0] - 0x74), 8)
+        self.assertLess(abs(grey[0] - 0x30), 4)
+
+    def test_a_colour_preview_is_inverted_so_the_face_gets_the_bright_stars(self):
+        # Luma of 0x4080C0 is 0x74; inverted, it lights like an IR-lit face.
+        grey = faces._jpeg_to_greyscale(self.jpeg(), PREVIEW_WIDTH, PREVIEW_HEIGHT)
+        self.assertEqual(len(grey), PREVIEW_WIDTH * PREVIEW_HEIGHT)
+        self.assertLess(abs(grey[0] - (255 - 0x74)), 8)
 
     def test_a_flood_of_previews_keeps_only_the_newest_and_never_delays_progress(self):
         from gi.repository import GLib
