@@ -133,8 +133,10 @@ class FaceMesh:
         u = points[:, 0] / LANDMARKS_SIZE - 0.5
         v = points[:, 1] / LANDMARKS_SIZE - 0.5
         cos, sin = math.cos(angle), math.sin(angle)
+        # Nearness over the face's surface; the irises' depth runs off its range.
         depth = points[:, 2]
-        near = (depth.max() - depth) / max(float(depth.max() - depth.min()), 1e-6)
+        surface = depth[:468]
+        near = numpy.clip((surface.max() - depth) / max(float(surface.max() - surface.min()), 1e-6), 0, 1)
         return numpy.stack([cx + (u * cos - v * sin) * size, cy + (u * sin + v * cos) * size, near], axis=1).astype(numpy.float32)
 
 
@@ -164,7 +166,7 @@ class Framing:
         self.view = self.source = self.relative = None
 
     def place(self, mesh: numpy.ndarray, source: tuple[int, int] | None = None) -> numpy.ndarray:
-        """The mesh in preview pixels: x, y, and the light each point carries.
+        """The mesh in preview pixels: x, y, and each point's nearness 0..1.
 
         ``source`` is the camera frame's size, telling cameras apart.
         """
@@ -182,9 +184,8 @@ class Framing:
         self.relative = numpy.array([*(self.view[:2] - centre) / face, self.view[2] / face], numpy.float32)
         cx, cy, span = self.view
         scale = self.height / max(float(span), 1.0)
-        light = 0.35 + 0.65 * mesh[:, 2] ** 1.5
         return numpy.stack([
             (mesh[:, 0] - cx) * scale + self.width / 2,
             (mesh[:, 1] - cy) * scale + self.height / 2,
-            light,
+            mesh[:, 2],
         ], axis=1).astype(numpy.float32)

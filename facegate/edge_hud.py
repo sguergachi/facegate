@@ -452,13 +452,13 @@ TRACE_INSET = 2
 PREVIEW_BLEED = 6
 IR_TINT = (0.84, 0.94, 1.0)
 # The camera is never shown as a picture: the raw IR image lights skin from
-# within and makes a face look like a ghost. Instead, starlight: particles
-# that form the face (see starlight.py), drawn as render nodes on the GPU.
+# within and makes a face look like a ghost. Instead, star dust that condenses
+# into the face (see starlight.py), drawn as render nodes on the GPU.
 STAR_STYLE = {
-    # Stars have spots 5 apart across the frame; in the face each takes its
-    # spot's brightness, points splatted at `core` intensity, bloomed by a
+    # One mote per spot 4 apart across the frame (where a frame-lit face puts
+    # them); each splatted at `core` intensity, the bright ones bloomed by a
     # tight glow and a wide one.
-    "pitch": 5.0,
+    "pitch": 4.0,
     "core": 2.4,
     "glow": 1.2,
     "glow_alpha": 1.0,
@@ -593,7 +593,7 @@ class PreviewArea(Gtk.Widget):
             pass
 
     def take_mesh(self, message: dict[str, Any]) -> None:
-        """Keep the newest face mesh: float32 (x, y, light) rows, or none for no face."""
+        """Keep the newest face mesh: float32 (x, y, nearness) rows, or none for no face."""
         try:
             width, height = int(message["w"]), int(message["h"])
             data = base64.b64decode(message["mesh"])

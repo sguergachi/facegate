@@ -472,17 +472,32 @@ connection for the whole scan. The mark gives way to a 312 × 208 live IR
 preview at the top inset, 16 pt above the title. The island keeps its width
 and grows to fit (surface height 440).
 
-- **Preview:** the camera is never shown as a picture, only as starlight.
-  The face's 478 surface points (MediaPipe Face Mesh, run on the preview in
-  the unprivileged helper) each take a star, lit by nearness (35% at the ears,
-  full at the nose), with two dimmer stars scattered just around each point;
-  the leftover stars go dark. The view follows the face, eased, with the mesh
-  filling 1 / 1.35 of the height. Gaze switches between its colour and IR
-  cameras at every pose; the view is kept in face heights relative to the
-  face and carried across the switch, so the preview never jumps. Without a face the stars wander in their
-  cloud. Where the mesh can't run, the stars take the frame's brightness
-  instead (colour frames inverted under a head-and-shoulders spotlight). All
-  of it is tinted a cool `#d6f0ff` and masked by a rounded rectangle
+- **Preview:** the camera is never shown as a picture, only as star dust.
+  About 4,500 motes, like real dust: most faint grains, some stars, a few
+  sparks that glint and bloom (only bright motes glow, so faint dust stays
+  crisp). Before a face they drift as a faint nebula. When the face mesh
+  (MediaPipe Face Mesh, run on the preview in the unprivileged helper) finds a
+  face, the dust condenses onto it from the nose outward over about a
+  second, each mote swirling in on its own curved path and flaring as it
+  settles; a lost face spreads back out faster than it came.
+  - *Never the mesh's grid:* each mote has its own place on the face's
+    surface, scattered over its triangles. About 14% trace soft strokes
+    along the upper lids, brows and mouth, plus a five-mote glint in each
+    iris; outlines of eyes and lips read as a cartoon and are avoided.
+  - *Lit like a sculpture:* a key light from above and in front, mixed with
+    nearness as IR falls off, a faint rim, and a dissolving silhouette. Light
+    sets density as well as brightness, like stippling: shadowed planes keep
+    only sparse dust.
+  - *Alive:* resting motes drift under half a point and scintillate; 240
+    ambient motes stay drifting faintly around the face.
+  - *Framing:* the view follows the face, eased, with the mesh filling
+    1 / 1.35 of the height. Gaze switches between its colour and IR cameras
+    at every pose; the view is kept in face heights relative to the face and
+    carried across the switch, so the preview never jumps.
+  - *Fallback:* where the mesh can't run, motes take a field over the frame
+    and its brightness (colour frames inverted under a head-and-shoulders
+    spotlight).
+  All of it is tinted a cool `#d6f0ff` and masked by a rounded rectangle
   (radius 30) whose last 36 pt feather to nothing.
 - **Hints:** live coaching. Gaze names each pose once and never says how
   close you are, so FaceGate measures the same head yaw and pitch Gaze does
@@ -493,13 +508,15 @@ and grows to fit (surface height 440).
   Camera problems (too dark, clipped, off-centre, distance) outrank pose
   advice. A new instruction must hold 0.4 s before it replaces the one
   showing, so a wavering head doesn't make the words flicker.
-- **Coaching arrow:** each directional instruction also shows an arrow made
-  of 420 spare stars, drawn in 3D with perspective: a turn is an arc orbiting
-  the head, passing under the chin, with its chevron on the side to turn
-  toward; a tilt is an arc up the side of the head; a move is a straight
-  arrow beside the face, rocking slowly in depth. The shaft streams toward
-  the chevron and the arrow nudges its way every 1.1 s. It fades in and out
-  over 220 ms and never takes the face's stars.
+- **Coaching arrow:** each directional instruction also draws an arrow of
+  420 motes of its own, in 3D with perspective: a turn is an arc orbiting the
+  head just under the chin; a tilt is an arc up the side of the head; a move
+  is a straight arrow beside the face, rocking slowly in depth. Dust streams
+  along it, wide and faint at the tail and drawn into a bright filament that
+  stops short of the head; the head is an open chevron whose dust runs back
+  from the tip along both wings, always opening toward the viewer. The arrow
+  nudges its way every 1.4 s, gathers in and fades over 300 ms, and never
+  takes the face's dust.
 - **Fluidity:** IR emitters often light only every other frame, so unlit
   frames are skipped and each lit frame cross-fades into the next over 70 ms
   on the frame clock.

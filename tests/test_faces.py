@@ -438,7 +438,7 @@ class MeshPreviewTests(unittest.TestCase):
         # The face fills the preview's height, centred.
         self.assertAlmostEqual(float(points[:, 1].max() - points[:, 1].min()), PREVIEW_HEIGHT / faces_mesh.Framing.ZOOM, places=3)
         self.assertAlmostEqual(float(points[:, 0].mean()), PREVIEW_WIDTH / 2, places=3)
-        # Nearer points carry more light.
+        # Each point keeps its nearness.
         self.assertLess(points[0, 2], points[2, 2])
         self.assertEqual(points[1, 2], 1.0)
 
@@ -449,25 +449,56 @@ class MeshPreviewTests(unittest.TestCase):
         self.assertAlmostEqual(faces_mesh.upright(0.2), 0.2)
         self.assertAlmostEqual(faces_mesh.upright(-math.pi + 0.3), 0.3)
 
-    def test_stars_gather_on_the_mesh_and_leave_the_rest_dark(self):
+    @staticmethod
+    def face_mesh():
+        """478 points scattered over a face-sized oval, nearest at its middle."""
+        import numpy
+
+        random = numpy.random.default_rng(3)
+        angle = random.uniform(0, 6.283, 478)
+        radius = numpy.sqrt(random.uniform(0, 1, 478))
+        x = 156 + numpy.cos(angle) * radius * 55
+        y = 104 + numpy.sin(angle) * radius * 75
+        return numpy.stack([x, y, 1 - radius], axis=1).astype(numpy.float32)
+
+    def test_dust_condenses_onto_the_face_and_spreads_when_it_is_lost(self):
         import numpy
 
         from facegate.edge_hud import STAR_STYLE
         from facegate.starlight import Starlight
 
         stars = Starlight(PREVIEW_WIDTH, PREVIEW_HEIGHT, STAR_STYLE)
-        points = numpy.array([[40, 50, 1.0], [80, 90, 0.5]], numpy.float32)
+        roles = [set(stars.face_stars.tolist()), set(stars.arrow_stars.tolist()), set(stars.ambient_stars.tolist())]
+        self.assertFalse(roles[0] & roles[1] or roles[0] & roles[2] or roles[1] & roles[2])
+        points = self.face_mesh()
         stars.submit_mesh(points)
         self.assertTrue(stars.face)
-        first = stars.mesh_order[0]
-        self.assertEqual(stars.mesh[first].tolist(), [40.0, 50.0])
-        self.assertEqual(stars.targets[first], 1.0)
-        self.assertEqual(int((stars.targets > 0).sum()), 6)
-        for _ in range(240):
+        rest, lit = stars.dust
+        # Every mote rests on the face, not on its points, and light stipples it.
+        self.assertTrue((rest[:, 0] > 90).all() and (rest[:, 0] < 222).all())
+        self.assertGreater(len(numpy.unique(rest.round(1), axis=0)), len(points) * 2)
+        self.assertTrue((lit == 0).any() and (lit > 0.2).any())
+        for _ in range(180):
             stars.advance(1 / 60)
-        self.assertLess(float(numpy.abs(stars.position[first] - [40, 50]).max()), 0.5)
+        settled = stars.position[stars.face_stars]
+        self.assertLess(float(numpy.abs(settled - rest).max()), 2.5)
         stars.submit_mesh(numpy.zeros((0, 3), numpy.float32))
         self.assertFalse(stars.face)
+        for _ in range(180):
+            stars.advance(1 / 60)
+        self.assertIsNone(stars.vertices)
+        self.assertGreater(float(numpy.abs(stars.position[stars.face_stars] - rest).mean()), 10)
+
+    def test_a_frame_without_a_mesh_still_lights_the_field(self):
+        from facegate.edge_hud import STAR_STYLE
+        from facegate.starlight import Starlight
+
+        stars = Starlight(PREVIEW_WIDTH, PREVIEW_HEIGHT, STAR_STYLE)
+        stars.submit(bytes(range(256)) * (PREVIEW_WIDTH * PREVIEW_HEIGHT // 256) + bytes(PREVIEW_WIDTH * PREVIEW_HEIGHT % 256))
+        for _ in range(60):
+            stars.advance(1 / 60)
+        self.assertTrue(stars.face)
+        self.assertGreater(float(stars.light.max()), 0.2)
 
 
 class CoachingArrowTests(unittest.TestCase):
@@ -495,12 +526,11 @@ class CoachingArrowTests(unittest.TestCase):
         from facegate.starlight import Starlight
 
         stars = Starlight(PREVIEW_WIDTH, PREVIEW_HEIGHT, STAR_STYLE)
-        mesh_stars = set(stars.mesh_order[: len(stars.spots) - len(stars.arrow_stars)].tolist())
-        self.assertFalse(mesh_stars & set(stars.arrow_stars.tolist()))
+        head = stars.arrow_wing_star
         for name, axis, sign in (("turn-left", 0, -1), ("turn-right", 0, 1), ("tilt-up", 1, -1), ("move-down", 1, 1)):
             points, light = stars.arrow_shape(name, 0.0)
-            tip = points[stars.arrow_head & (stars.arrow_wing < 0.1)].mean(axis=0)
-            tail = points[~stars.arrow_head].mean(axis=0)
+            tip = points[head].mean(axis=0)
+            tail = points[~head & (stars.arrow_seed < 0.3)].mean(axis=0)
             self.assertGreater((tip[axis] - tail[axis]) * sign, 5, name)
             self.assertTrue(numpy.isfinite(points).all())
         stars.set_arrow("turn-left")
