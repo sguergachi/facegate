@@ -93,3 +93,61 @@ class StarlightGeometryTests(unittest.TestCase):
                     self.assertTrue(np.all(line >= [0, 0]))
                     self.assertTrue(np.all(line <= [312, 208]))
             self.assertGreater(direction * (widths[1] - widths[0]), 0)
+
+
+class StarlightShadingTests(unittest.TestCase):
+    def canonical(self):
+        from facegate.starlight import load_surface
+        points = load_surface()
+        # Physical XYZ, placed with one uniform scale in all dimensions.
+        points *= 8
+        points[:, :2] += [156, 104]
+        return np.concatenate([points, np.tile(points[1], (10, 1))])
+
+    def test_lighting_is_invariant_to_uniform_scale_and_translation(self):
+        stars = Starlight(312, 208, STAR_STYLE)
+        points = self.canonical()
+        stars.submit_mesh(points)
+        first = stars._face_dust()[1]
+        stars.vertices = points * 1.25 + [12, -5, 30]
+        second = stars._face_dust()[1]
+        np.testing.assert_allclose(first, second, atol=1e-5)
+
+    def test_back_facing_surface_does_not_get_flipped_toward_light(self):
+        stars = Starlight(312, 208, STAR_STYLE)
+        points = self.canonical()
+        stars.submit_mesh(points)
+        front = stars._face_dust()[1].sum()
+        turned = points.copy()
+        turned[:, [0, 2]] *= -1  # 180 degree rotation, not a reflection.
+        stars.vertices = turned
+        back = stars._face_dust()[1].sum()
+        self.assertLess(back, front * 0.1)
+
+    def test_surface_sampling_does_not_depend_on_first_capture_pose(self):
+        points = self.canonical()
+        first = Starlight(312, 208, STAR_STYLE)
+        second = Starlight(312, 208, STAR_STYLE)
+        first.submit_mesh(points)
+        turned = points.copy()
+        turned[:, 0] = points[:, 0] * 0.6 + points[:, 2] * 0.8
+        second.submit_mesh(turned)
+        # The surface samples precede the small feature-stroke allocation.
+        from facegate.starlight import FEATURE_SHARE
+        count = len(first.face_stars) - int(len(first.face_stars) * FEATURE_SHARE)
+        np.testing.assert_array_equal(first.surface["corners"][:count], second.surface["corners"][:count])
+        np.testing.assert_array_equal(first.surface["weights"][:count], second.surface["weights"][:count])
+
+    def test_reset_releases_previous_face_samples_and_radiance(self):
+        stars = Starlight(312, 208, STAR_STYLE)
+        stars.submit_mesh(self.canonical())
+        stars.reset()
+        self.assertIsNone(stars.surface)
+        self.assertIsNone(stars.dust_target)
+        self.assertIsNone(stars.dust)
+
+    def test_iris_catchlights_inherit_valid_surface_orientation(self):
+        stars = Starlight(312, 208, STAR_STYLE)
+        normal = stars._normals(self.canonical())
+        np.testing.assert_allclose(np.linalg.norm(normal[468:478], axis=1), np.ones(10), atol=1e-6)
+        self.assertTrue(np.all(normal[468:478, 2] > 0))

@@ -2873,7 +2873,7 @@ class SettingsPanel(Gtk.Overlay):
             elif kind == "arrow":
                 self.island.send({"arrow": event.get("arrow") or ""})
             elif kind == "mesh":
-                self.island.send({"mesh": event.get("points"), "w": event.get("w"), "h": event.get("h")})
+                self.island.send({"mesh": event.get("points"), "w": event.get("w"), "h": event.get("h"), "space": event.get("space")})
             elif kind == "hint":
                 self.island.send({"hint": event.get("text")})
             else:

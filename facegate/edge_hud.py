@@ -455,16 +455,16 @@ IR_TINT = (0.84, 0.94, 1.0)
 # within and makes a face look like a ghost. Instead, star dust that condenses
 # into the face (see starlight.py), drawn as render nodes on the GPU.
 STAR_STYLE = {
-    # One mote per spot 4 apart across the frame (where a frame-lit face puts
+    # One mote per spot 3 apart across the frame (where a frame-lit face puts
     # them); each splatted at `core` intensity, the bright ones bloomed by a
     # tight glow and a wide one.
-    "pitch": 4.0,
+    "pitch": 3.0,
     "core": 2.4,
     "glow": 0.7,
     "glow_alpha": 0.65,
     "bloom": 4.0,
     "bloom_alpha": 0.32,
-    "twinkle": 0.35,
+    "twinkle": 0.18,
     # Before a face, the cloud: an oval this big, each star wandering this far.
     "cloud_width": 150.0,
     "cloud_height": 170.0,
@@ -593,7 +593,7 @@ class PreviewArea(Gtk.Widget):
             pass
 
     def take_mesh(self, message: dict[str, Any]) -> None:
-        """Keep the newest face mesh: float32 (x, y, nearness) rows, or none for no face."""
+        """Keep the newest face mesh: float32 (x, y, z) rows, or none for no face."""
         try:
             width, height = int(message["w"]), int(message["h"])
             data = base64.b64decode(message["mesh"])
@@ -602,7 +602,11 @@ class PreviewArea(Gtk.Widget):
             points = numpy.frombuffer(data, numpy.float32).reshape(-1, 3)
             if not numpy.isfinite(points).all():
                 return
-            self.latest_mesh = numpy.clip(points, (-PREVIEW_WIDTH, -PREVIEW_HEIGHT, 0), (2 * PREVIEW_WIDTH, 2 * PREVIEW_HEIGHT, 1))
+            points = points.copy()
+            if message.get("space") != "xyz" and len(points):
+                # Compatibility with a helper from before physical z transport.
+                points[:, 2] *= max(float(numpy.ptp(points[:468, 1])), 1.0) * 0.32
+            self.latest_mesh = numpy.clip(points, (-PREVIEW_WIDTH, -PREVIEW_HEIGHT, -PREVIEW_HEIGHT), (2 * PREVIEW_WIDTH, 2 * PREVIEW_HEIGHT, PREVIEW_HEIGHT))
             self.latest = None
         except (KeyError, TypeError, ValueError):
             pass

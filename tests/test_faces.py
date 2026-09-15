@@ -460,9 +460,10 @@ class MeshPreviewTests(unittest.TestCase):
         # The face fills the preview's height, centred.
         self.assertAlmostEqual(float(points[:, 1].max() - points[:, 1].min()), PREVIEW_HEIGHT / faces_mesh.Framing.ZOOM, places=3)
         self.assertAlmostEqual(float(points[:, 0].mean()), PREVIEW_WIDTH / 2, places=3)
-        # Each point keeps its nearness.
+        # Depth scales by exactly the same factor as x/y.
         self.assertLess(points[0, 2], points[2, 2])
-        self.assertEqual(points[1, 2], 1.0)
+        self.assertAlmostEqual(float(points[1, 2]), PREVIEW_HEIGHT / (200 * faces_mesh.Framing.ZOOM), places=6)
+        self.assertEqual(meshes[0]["space"], "xyz")
 
     def test_a_mirrored_eye_pair_is_not_a_face_upside_down(self):
         import math
@@ -688,3 +689,33 @@ class StreamTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MeshSourceQualityTests(unittest.TestCase):
+    def test_depth_retains_scale_when_an_unrelated_point_moves(self):
+        from unittest.mock import Mock
+        import numpy as np
+        mesh = object.__new__(faces_mesh.FaceMesh)
+        mesh.detect = Mock(return_value=(128, 128, 256, 0))
+        mesh.landmarks_input = "image"
+        raw = np.zeros((478, 3), np.float32)
+        raw[:, :2] = 128
+        raw[1, 2] = -20
+        mesh.landmarks = Mock()
+        mesh.landmarks.run.return_value = [raw, np.array([10])]
+        first = mesh.find(np.zeros((256, 256, 3), np.uint8))
+        raw[200, 2] = 100
+        second = mesh.find(np.zeros((256, 256, 3), np.uint8))
+        self.assertEqual(first[1, 2], 20)
+        self.assertEqual(second[1, 2], 20)
+        self.assertEqual(second[200, 2], -100)
+
+    def test_border_crop_replicates_edge_without_bleeding_next_pixel(self):
+        import numpy as np
+        image = np.tile(np.arange(4, dtype=np.float32)[None, :, None], (4, 1, 3))
+        cropped = faces_mesh.warp(image, -0.25, 2, 1, 0, 1)
+        np.testing.assert_array_equal(cropped, np.zeros((1, 1, 3)))
+
+    def test_native_preview_detail_is_kept_before_the_face_crop(self):
+        jpeg = PreviewTests.jpeg(width=848, height=480)
+        self.assertEqual(faces._decode_rgb(jpeg).shape, (480, 848, 3))

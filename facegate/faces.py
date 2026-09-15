@@ -46,7 +46,7 @@ SPOTLIGHT_HEIGHT = 1.3
 SPOTLIGHT_CENTRE = 0.62
 SPOTLIGHT_EDGE = (0.3, 0.85)
 # Colour previews are decoded no wider than this for the face mesh.
-MESH_DECODE_WIDTH = 640
+MESH_DECODE_WIDTH = 1280
 # A face missing for this long, not just one frame, sends the stars back to the cloud.
 MESH_HOLD_SECONDS = 0.6
 DBUS_TIMEOUT_MS = 35_000
@@ -469,6 +469,7 @@ class GazeClient:
                         placed = framing.place(points, source)
                         yield {
                             "event": "mesh",
+                            "space": "xyz",
                             "w": width,
                             "h": height,
                             "points": base64.b64encode(placed.tobytes()).decode("ascii"),

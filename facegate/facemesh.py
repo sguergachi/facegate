@@ -2,9 +2,9 @@
 
 A colour camera lights the room as brightly as the face, so its brightness
 alone makes a poor portrait in stars. Instead the preview finds the face's
-478 surface points with MediaPipe's face detector and Face Mesh, and each star
-takes one point, lit by how near it is to the camera: the shape IR shows
-without IR.
+478 surface points with MediaPipe's face detector and Face Mesh. We preserve
+its relative XYZ geometry in image pixels, including depth scale, so the
+renderer can light the actual predicted surface normals.
 
 This is presentation only. Gaze does its own detection and recognition; these
 points are never sent to it and never stored. ONNX Runtime is optional: without
@@ -50,8 +50,8 @@ def warp(image: numpy.ndarray, cx: float, cy: float, size: float, angle: float, 
     fx, fy = (xs - left)[..., None], (ys - top)[..., None]
     x0 = numpy.clip(left.astype(int), 0, width - 1)
     y0 = numpy.clip(top.astype(int), 0, height - 1)
-    x1 = numpy.clip(x0 + 1, 0, width - 1)
-    y1 = numpy.clip(y0 + 1, 0, height - 1)
+    x1 = numpy.clip(left.astype(int) + 1, 0, width - 1)
+    y1 = numpy.clip(top.astype(int) + 1, 0, height - 1)
     pixels = image.astype(numpy.float32)
     return (
         pixels[y0, x0] * (1 - fx) * (1 - fy)
@@ -104,20 +104,28 @@ class FaceMesh:
         best = int(scores.argmax())
         if scores[best] < DETECTION_SCORE:
             return None
-        box = boxes[0, best] / DETECTOR_SIZE
-        anchor_x, anchor_y = self.anchors[best]
-        # Keypoints 0 and 1 are the eyes.
-        eye_x = box[6] - box[4]
-        eye_y = box[7] - box[5]
+        decoded = boxes[0].reshape(-1, 8, 2) / DETECTOR_SIZE
+        decoded[:, 0] += self.anchors
+        decoded[:, 2:] += self.anchors[:, None, :]
+        # Fuse overlapping detections rather than jumping between anchors as
+        # their scores trade places. This preserves subpixel crop continuity.
+        centres, sizes = decoded[:, 0], decoded[:, 1]
+        low, high = centres - sizes / 2, centres + sizes / 2
+        intersection = numpy.maximum(0, numpy.minimum(high, high[best]) - numpy.maximum(low, low[best])).prod(axis=1)
+        area = sizes.prod(axis=1)
+        iou = intersection / numpy.maximum(area + area[best] - intersection, 1e-9)
+        selected = (scores >= DETECTION_SCORE) & (iou > 0.3)
+        box = numpy.average(decoded[selected], axis=0, weights=scores[selected])
+        eye = box[3] - box[2]
         return (
-            width / 2 + (anchor_x + box[0] - 0.5) * side,
-            height / 2 + (anchor_y + box[1] - 0.5) * side,
-            float(max(box[2], box[3])) * side * ROI_SCALE,
-            upright(math.atan2(eye_y, eye_x)),
+            width / 2 + (box[0, 0] - 0.5) * side,
+            height / 2 + (box[0, 1] - 0.5) * side,
+            float(max(box[1])) * side * ROI_SCALE,
+            upright(math.atan2(eye[1], eye[0])),
         )
 
     def find(self, image: numpy.ndarray) -> numpy.ndarray | None:
-        """Each surface point as (x, y, nearness 0..1) in image pixels, or None without a face.
+        """Each surface point as (x, y, z toward viewer) in image pixels, or None without a face.
 
         ``image`` is an RGB array, height × width × 3.
         """
@@ -133,11 +141,11 @@ class FaceMesh:
         u = points[:, 0] / LANDMARKS_SIZE - 0.5
         v = points[:, 1] / LANDMARKS_SIZE - 0.5
         cos, sin = math.cos(angle), math.sin(angle)
-        # Nearness over the face's surface; the irises' depth runs off its range.
-        depth = points[:, 2]
-        surface = depth[:468]
-        near = numpy.clip((surface.max() - depth) / max(float(surface.max() - surface.min()), 1e-6), 0, 1)
-        return numpy.stack([cx + (u * cos - v * sin) * size, cy + (u * sin + v * cos) * size, near], axis=1).astype(numpy.float32)
+        # Preserve the model's weak-perspective geometry: z has the same
+        # units as x/y. Positive z faces the viewer. Never range-normalize it:
+        # doing so changes the apparent depth whenever the head turns.
+        depth = -points[:, 2] / LANDMARKS_SIZE * size
+        return numpy.stack([cx + (u * cos - v * sin) * size, cy + (u * sin + v * cos) * size, depth], axis=1).astype(numpy.float32)
 
 
 class Framing:
@@ -166,7 +174,7 @@ class Framing:
         self.view = self.source = self.relative = None
 
     def place(self, mesh: numpy.ndarray, source: tuple[int, int] | None = None) -> numpy.ndarray:
-        """The mesh in preview pixels: x, y, and each point's nearness 0..1.
+        """The mesh in preview pixels: x, y, z, all in preview pixels.
 
         ``source`` is the camera frame's size, telling cameras apart.
         """
@@ -187,5 +195,5 @@ class Framing:
         return numpy.stack([
             (mesh[:, 0] - cx) * scale + self.width / 2,
             (mesh[:, 1] - cy) * scale + self.height / 2,
-            mesh[:, 2],
+            mesh[:, 2] * scale,
         ], axis=1).astype(numpy.float32)

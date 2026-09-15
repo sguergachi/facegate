@@ -16,9 +16,10 @@ sha256
 02a04d5d37c3558dc4d5274f7f8f0f0f01ac94e46c5ffb2cee82395d47e23181  face_detector.onnx
 d16e5a55e6a480284d468ee32469692464049518c311662ab3956681de31e3e9  face_landmarks.onnx
 
-face_triangles.npy
+face_triangles.npy and face_surface.npy
 
 Triangle vertex indices extracted from Google MediaPipe's canonical face model
-(OBJ face records, zero-based; no geometry or texture coordinates retained).
+(OBJ face records, zero-based, plus the 468 canonical vertex coordinates
+with Y inverted for screen coordinates; texture coordinates omitted).
 Copyright The MediaPipe Authors. Apache License, Version 2.0, as above.
 Source: https://github.com/google-ai-edge/mediapipe/blob/master/mediapipe/modules/face_geometry/data/canonical_face_model.obj

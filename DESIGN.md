@@ -504,7 +504,7 @@ preview at the top inset, 16 pt above the title. The island keeps its width
 and grows to fit (surface height 440).
 
 - **Preview:** the camera is never shown as a picture, only as star dust.
-  About 4,500 motes, like real dust: most faint grains, some stars, a few
+  About 8,200 motes, like real dust: most faint grains, some stars, a few
   sparks that glint and bloom (only bright motes glow, so faint dust stays
   crisp). Before a face they drift as a faint nebula. When the face mesh
   (MediaPipe Face Mesh, run on the preview in the unprivileged helper) finds a
@@ -512,14 +512,14 @@ and grows to fit (surface height 440).
   second, each mote swirling in on its own curved path and flaring as it
   settles; a lost face spreads back out faster than it came.
   - *Never the mesh's grid:* each mote has its own place on the face's
-    surface, scattered over its triangles. About 8% trace soft strokes
-    along the upper lids, brows and mouth; 24% follow softly scattered
-    surface contours that bend over the nose and cheeks, plus a five-mote glint in each
-    iris; outlines of eyes and lips read as a cartoon and are avoided.
-  - *Lit like a sculpture:* a side key from above-left (85% of the diffuse light), mixed with
-    nearness as IR falls off, a faint rim, and a dissolving silhouette. Light
-    sets density as well as brightness, like stippling: shadowed planes keep
-    only sparse dust.
+    surface, stratified by its canonical 3D triangle areas. About 4.5% trace
+    soft strokes along the upper lids, brows and mouth, including a five-mote
+    glint in each iris. No scanline bands or first-camera-pose density bias.
+  - *Lit like a sculpture:* a broad key from above-left, a quiet opposing fill,
+    and a grazing rim. A view-dependent highlight travels over the nose and
+    cheek planes. Signed normals suppress the back-facing surface; soft
+    density thresholds retain detail in the shadows. Radiance interpolates
+    over 65 ms so highlights do not snap at the camera frame rate.
   - *Alive:* resting motes drift under half a point and scintillate; 240
     ambient motes stay drifting faintly around the face.
   - *Framing:* the view follows the face, eased, with the mesh filling
@@ -672,3 +672,24 @@ Use that as art direction, with the user's own face as the recognizable subject.
 The particle surface uses MediaPipe's canonical triangle connectivity, covering
 all 468 landmarks. Do not triangulate a captured frame: pose-dependent gaps can
 remove the forehead crown, and wrong edges bridge anatomical openings.
+
+### Preview quality pipeline
+
+- Preserve Gaze's preview detail up to a 1280 px decode budget; the inspected
+  Gaze encoder supplies at most 854 px at JPEG quality 88. Landmark inference
+  uses the native 256 px face crop, not the 312 × 208 display image.
+- Fuse overlapping detector boxes by score. Keep model-relative XYZ in one
+  coordinate scale through cropping, framing, transport (`space: xyz`), and
+  shading. Never min/max-normalize depth separately for each frame.
+- Canonical surface coordinates control sampling area only; live landmarks
+  still determine the user's shape. All 468 vertices and anatomical openings
+  are retained. New enrollments release old sampling/lighting state.
+- Render 0.30 pt Gaussian grains at at least 2× resolution; preserve fractional
+  monitor scales. Accumulate light before a soft exponential highlight
+  shoulder. Bloom remains selective, and atmosphere uses a cheaper half-size
+  texture because it is intentionally out of focus.
+- These are monocular inferred landmarks, not measured depth or a full head
+  scan. Hair, pores, ears, and hidden surfaces are not supplied by the model.
+  Higher particle counts cannot recover details absent from that source.
+
+See [the pipeline audit](docs/preview-quality.md) for evidence and limits.

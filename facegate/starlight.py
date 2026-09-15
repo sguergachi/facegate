@@ -81,29 +81,13 @@ NOSE_TIP = 1
 # face's dust, which is everything else.
 ARROW_MOTES = 420
 AMBIENT_MOTES = 240
-# Of the face's dust, this share lies along the features, and this share on
-# slices across the surface every `SLICE_STEP` face heights, which bend over
-# the nose, cheeks and lips and show the face's form.
-FEATURE_SHARE = 0.08
-SLICE_SHARE = 0.24
-SLICE_STEP = 0.034
-SLICE_SCATTER = 0.0025
-
-# The face, lit, in screen axes (y down, z toward the viewer). Shade mixes a
-# key light from above and in front with nearness (as IR light falls off), a
-# little ambient, and a rim at the silhouette; the face's depth is its height
-# times `DEPTH`. Shade is then stretched over `SHADE_RANGE` for contrast, and
-# every face mote's light scaled by `GRAIN`. Feature strokes are brightened by
-# `FEATURE_GAIN`, never below `FEATURE_FLOOR`, and always shown.
-KEY_LIGHT = (-0.65, -0.45, 0.60)
-KEY_SHARE = 0.85
-AMBIENT_LIGHT = 0.04
-RIM_LIGHT = 0.12
-DEPTH = 0.32
-SHADE_RANGE = (0.12, 0.95)
-GRAIN = 0.82
-FEATURE_GAIN = 1.2
-FEATURE_FLOOR = 0.3
+# A small share supports the lids/lips; the rest follows the anatomical surface.
+FEATURE_SHARE = 0.045
+# A large soft key, a quiet opposing fill, and a grazing rim separate planes.
+KEY_LIGHT = (-0.55, -0.50, 0.67)
+FILL_LIGHT = (0.65, 0.05, 0.76)
+RIM_DIRECTION = (0.85, -0.15, -0.50)
+GRAIN = 0.72
 
 # Condensing: a mote starts after its delay, earlier near the nose, and
 # settles over `ARRIVE_SECONDS`, swirling up to `SWIRL` points off its path.
@@ -227,6 +211,15 @@ def load_triangles() -> numpy.ndarray | None:
     return triangles if triangles.ndim == 2 and triangles.shape[1] == 3 and triangles.max() < 468 else None
 
 
+def load_surface() -> numpy.ndarray | None:
+    """Canonical coordinates for stable 3D area sampling; optional with the mesh."""
+    try:
+        surface = numpy.load(TRIANGLES.with_name("face_surface.npy")).astype(numpy.float32)
+    except (OSError, ValueError):
+        return None
+    return surface if surface.shape == (468, 3) and numpy.isfinite(surface).all() else None
+
+
 @dataclass
 class Look:
     """What changes from frame to frame: the dust's colours and the shake."""
@@ -284,7 +277,8 @@ class Starlight:
         self.spark[ambient] = False
         self._brighten()
 
-        self.triangles = load_triangles()
+        self.canonical = load_surface()
+        self.triangles = load_triangles() if self.canonical is not None else None
         self.surface: dict[str, numpy.ndarray] | None = None
         self.swirl_side = numpy.where(random.uniform(0, 1, count) < 0.5, -1.0, 1.0).astype(numpy.float32)
 
@@ -314,9 +308,11 @@ class Starlight:
         self.levels = numpy.zeros(count, numpy.float32)
         self.targets = numpy.zeros(count, numpy.float32)
         self.face = False
-        # The newest face mesh's points (x, y, nearness), when the face is dust,
+        # The newest face mesh's points (x, y, z), when the face is dust,
         # and where on it each face mote rests and how lit it is there.
         self.vertices: numpy.ndarray | None = None
+        self.surface = None
+        self.dust_target = None
         self.dust: tuple[numpy.ndarray, numpy.ndarray] | None = None
         # Seconds the face has been condensing, eased back down when it's lost.
         self.formed = 0.0
@@ -355,7 +351,7 @@ class Starlight:
         self.vertices = None
 
     def submit_mesh(self, points: numpy.ndarray) -> None:
-        """The face mesh's points as (x, y, nearness 0..1) rows; none means no face."""
+        """The face mesh's points as (x, y, z) in preview pixels rows; none means no face."""
         if len(points) == 0:
             self.face = False
             return
@@ -366,7 +362,9 @@ class Starlight:
             self._place_dust(points)
         self.vertices = points
         # Where the dust rests and how it's lit change only with the mesh.
-        self.dust = self._face_dust()
+        self.dust_target = self._face_dust()
+        if self.dust is None:
+            self.dust = self.dust_target
         low, high = points[:468, :2].min(axis=0), points[:468, :2].max(axis=0)
         size = numpy.maximum(high - low, 1.0)
         self.parallax_target = numpy.clip((points[NOSE_TIP, :2] - (low + high) / 2) / size * 5, -1, 1).astype(numpy.float32)
@@ -402,56 +400,21 @@ class Starlight:
         features = int(count * FEATURE_SHARE)
         xy = points[:, :2]
 
-        slices = int(count * SLICE_SHARE)
-        surface = count - features - slices
-        corners = xy[self.triangles]
-        a, b = corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0]
-        areas = numpy.abs(a[:, 0] * b[:, 1] - a[:, 1] * b[:, 0]) / 2
-        triangle = random.choice(len(self.triangles), surface, p=areas / areas.sum())
-        # Uniform over each triangle.
-        first, second = random.uniform(0, 1, (2, surface))
-        flip = first + second > 1
-        first[flip], second[flip] = 1 - first[flip], 1 - second[flip]
+        surface = count - features
+        # Sample the canonical 3D surface, not a flattened first camera frame.
+        # Stratified area allocation keeps dust out of random clumps and avoids
+        # starving a cheek when the first frame happens to be a turned head.
+        canonical = self.canonical
+        solid = canonical[self.triangles]
+        areas = numpy.linalg.norm(numpy.cross(solid[:, 1] - solid[:, 0], solid[:, 2] - solid[:, 0]), axis=1)
+        cdf = numpy.cumsum(areas) / areas.sum()
+        sample = (numpy.arange(surface) + random.uniform(0, 1, surface)) / surface
+        triangle = numpy.searchsorted(cdf, sample)
+        first = (numpy.arange(surface) * 0.754877666 + random.uniform()) % 1
+        second = (numpy.arange(surface) * 0.569840291 + random.uniform()) % 1
+        root = numpy.sqrt(first)
         surface_corners = self.triangles[triangle]
-        surface_weights = numpy.stack([1 - first - second, first, second], axis=1)
-
-        # Slices: where each level across the face (in its first frame's height)
-        # crosses each triangle, a segment; dust spread along them by length.
-        if slices:
-            height = (xy[:, 1] - xy[:468, 1].min()) / max(float(numpy.ptp(xy[:468, 1])), 1.0)
-            level = height[self.triangles]
-            pieces_corners, pieces_from, pieces_to, pieces_length = [], [], [], []
-            for value in numpy.arange(SLICE_STEP / 2, 1.0, SLICE_STEP):
-                crossings = []
-                for a_index, b_index in ((0, 1), (1, 2), (2, 0)):
-                    va, vb = level[:, a_index], level[:, b_index]
-                    t = (value - va) / numpy.where(vb == va, 1e-9, vb - va)
-                    crossings.append(((va - value) * (vb - value) < 0, a_index, b_index, t))
-                for i, (hit_a, a0, a1, ta) in enumerate(crossings):
-                    for hit_b, b0, b1, tb in crossings[i + 1:]:
-                        both = hit_a & hit_b
-                        if not both.any():
-                            continue
-                        start = numpy.zeros((both.sum(), 3))
-                        end = numpy.zeros((both.sum(), 3))
-                        rows = numpy.arange(both.sum())
-                        start[rows, a0] = 1 - ta[both]
-                        start[rows, a1] = ta[both]
-                        end[rows, b0] = 1 - tb[both]
-                        end[rows, b1] = tb[both]
-                        tri = self.triangles[both]
-                        length = numpy.linalg.norm((start[:, :, None] * xy[tri]).sum(1) - (end[:, :, None] * xy[tri]).sum(1), axis=1)
-                        pieces_corners.append(tri)
-                        pieces_from.append(start)
-                        pieces_to.append(end)
-                        pieces_length.append(length)
-            piece_corners = numpy.concatenate(pieces_corners)
-            lengths = numpy.concatenate(pieces_length) + 1e-6
-            piece = random.choice(len(lengths), slices, p=lengths / lengths.sum())
-            along = random.uniform(0, 1, slices)[:, None]
-            slice_weights = numpy.concatenate(pieces_from)[piece] * (1 - along) + numpy.concatenate(pieces_to)[piece] * along
-            surface_corners = numpy.concatenate([surface_corners, piece_corners[piece]])
-            surface_weights = numpy.concatenate([surface_weights, slice_weights])
+        surface_weights = numpy.stack([1 - root, root * (1 - second), root * second], axis=1)
 
         # Strokes: a point along one segment of a feature, by the feature's share
         # and each segment's length within it.
@@ -487,7 +450,7 @@ class Starlight:
         feature = numpy.concatenate([numpy.zeros(count - features, bool), numpy.ones(features, bool)])
         glinting = numpy.concatenate([numpy.zeros(count - glint_count, bool), numpy.ones(glint_count, bool)])
         # Feature dust scatters a little off its stroke, in face heights; glints stay put.
-        spread = numpy.concatenate([numpy.zeros(surface), numpy.full(slices, SLICE_SCATTER), spreads[segment], numpy.full(glint_count, 0.002)])
+        spread = numpy.concatenate([numpy.zeros(surface), spreads[segment], numpy.full(glint_count, 0.002)])
         scatter = (random.normal(0, 1, (count, 2)) * spread[:, None]).astype(numpy.float32)
         rest = (weights[:, :, None] * xy[corners_of]).sum(axis=1)
         span = float(numpy.ptp(xy[:, 1])) or 1.0
@@ -509,16 +472,23 @@ class Starlight:
         }
 
     def _normals(self, points: numpy.ndarray) -> numpy.ndarray:
-        """Each mesh point's surface normal, facing the viewer."""
-        span = float(numpy.ptp(points[:, 1])) or 1.0
-        solid = numpy.column_stack([points[:, 0], points[:, 1], points[:, 2] * span * DEPTH])
-        corners = solid[self.triangles]
+        """Outward surface normals in screen XYZ, including signed back faces."""
+        corners = points[self.triangles]
         faces = numpy.cross(corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0])
-        faces *= numpy.where(faces[:, 2:3] < 0, -1.0, 1.0)
+        # Canonical winding is clockwise after converting y to screen-down.
+        # Keep signed normals: flipping every triangle toward the viewer lit
+        # the hidden cheek and flattened the volume at a turn.
+        faces *= -1
         normals = numpy.stack([
-            sum(numpy.bincount(self.triangles[:, corner], faces[:, axis], minlength=len(solid)) for corner in range(3))
+            sum(numpy.bincount(self.triangles[:, corner], faces[:, axis], minlength=len(points)) for corner in range(3))
             for axis in range(3)
         ], axis=1)
+        # Iris landmarks are outside the 468-vertex surface topology. Borrow
+        # the eye socket's orientation so catchlight motes have a valid normal
+        # instead of silently disappearing with a zero-length vector.
+        if len(points) >= 478:
+            for iris, socket in zip(IRISES, ((33, 133, 159, 145), (263, 362, 386, 374))):
+                normals[list(iris)] = normals[list(socket)].mean(axis=0)
         length = numpy.linalg.norm(normals, axis=1, keepdims=True)
         return normals / numpy.maximum(length, 1e-6)
 
@@ -531,24 +501,30 @@ class Starlight:
         normals = self._normals(points)
         normal = (weights * normals[corners]).sum(axis=1)
         normal /= numpy.maximum(numpy.linalg.norm(normal, axis=1, keepdims=True), 1e-6)
-        near = (weights[:, :, 0] * points[corners, 2]).sum(axis=1)
-        light_direction = numpy.array(KEY_LIGHT) / numpy.linalg.norm(KEY_LIGHT)
-        key = numpy.clip(normal @ light_direction, 0, 1)
+        def direction(value):
+            vector = numpy.asarray(value, numpy.float32)
+            return vector / numpy.linalg.norm(vector)
+
+        key_direction = direction(KEY_LIGHT)
+        key = numpy.maximum(normal @ key_direction, 0)
+        fill = numpy.maximum(normal @ direction(FILL_LIGHT), 0)
         facing = numpy.clip(normal[:, 2], 0, 1)
+        rim = numpy.maximum(normal @ direction(RIM_DIRECTION), 0) ** 1.5
+        # Broad diffuse planes plus a restrained view-dependent highlight.
+        # The specular lobe moves across the cheeks/nose as the head turns.
+        half_vector = direction(key_direction + [0, 0, 1])
+        specular = numpy.maximum(normal @ half_vector, 0) ** 28 * key
+        shade = 0.055 + 0.72 * key + 0.14 * fill + 0.40 * rim
         feature = surface["feature"]
-        shade = AMBIENT_LIGHT + KEY_SHARE * key ** 1.3 + (1 - KEY_SHARE) * near ** 1.4 + RIM_LIGHT * (1 - facing) ** 3
-        shade = numpy.where(
-            feature,
-            numpy.clip(numpy.maximum(shade * FEATURE_GAIN, FEATURE_FLOOR), 0, 1),
-            smoothstep(SHADE_RANGE[0], SHADE_RANGE[1], shade),
-        )
-        # The silhouette dissolves rather than ending in a line.
-        shade = shade * smoothstep(0.0, 0.3, facing)
-        # Light sets how dense the dust is as well as how bright, like
-        # stippling: a surface mote shows only where the light passes its own level.
-        shown = numpy.where(feature, 1.0, smoothstep(-0.1, 0.1, shade - surface["dither"]))
-        brightness = GRAIN * (0.25 + 0.75 * self.magnitude[self.face_stars])
-        return rest.astype(numpy.float32), ((0.3 + 0.7 * shade) * shown * brightness).astype(numpy.float32)
+        shade = numpy.where(feature, shade * 1.12, shade)
+        visibility = smoothstep(0.02, 0.20, normal[:, 2])
+        # Shadows retain fine dust; avoid hard thresholds that punch holes in
+        # broad planes and sparkle on/off when normals change by a fraction.
+        density = 0.22 + 0.78 * numpy.clip(shade, 0, 1)
+        shown = numpy.where(feature, 1.0, smoothstep(-0.18, 0.18, density - surface["dither"]))
+        magnitude = self.magnitude[self.face_stars]
+        radiance = (shade ** 1.35 + 0.55 * specular) * GRAIN * (0.18 + 0.82 * magnitude)
+        return rest.astype(numpy.float32), (radiance * shown * visibility).astype(numpy.float32)
 
     # The arrow's dust ---------------------------------------------------------------
 
@@ -770,6 +746,13 @@ class Starlight:
         light = self.cloud_light * NEBULA_LIGHT
         stars = self.face_stars
         surface = self.surface
+        if self.dust_target is not None:
+            # Interpolate radiance as well as position; camera-rate lighting
+            # steps otherwise shimmer even when the particles move smoothly.
+            rest, old_light = self.dust
+            next_rest, next_light = self.dust_target
+            blend = 1 - math.exp(-elapsed / 0.065)
+            self.dust = (next_rest, old_light + (next_light - old_light) * blend)
         rest, lit = self.dust
         arrival = numpy.clip((self.formed - surface["delay"]) / ARRIVE_SECONDS, 0, 1)
         eased = 1 - (1 - arrival) ** 3
@@ -803,33 +786,44 @@ class Starlight:
 
     # Nodes ----------------------------------------------------------------------
 
-    def splat(self, device_scale: float, *lights: numpy.ndarray) -> list[Gdk.Texture]:
+    def splat(self, device_scale: float, *lights: numpy.ndarray, minimum_scale: float = 2.0) -> list[Gdk.Texture]:
         """Motes as soft points at the display's own pixel density, one texture per light.
 
         Without lights, one texture of every mote's own light.
         """
-        scale = max(1, round(device_scale))
-        width, height = self.width * scale, self.height * scale
+        # At least 2x supersampling resolves sub-point grains. Preserve the
+        # actual fractional scale instead of rounding 1.25/1.5 to an integer.
+        scale = max(minimum_scale, float(device_scale))
+        width, height = math.ceil(self.width * scale), math.ceil(self.height * scale)
         lights = lights or (self.light,)
-        # Unlit motes (dust in shadow, spare arrow dust) draw nothing.
         lit = numpy.flatnonzero(numpy.max(lights, axis=0) > 0.004)
         x = self.position[lit, 0] * scale - 0.5
         y = self.position[lit, 1] * scale - 0.5
-        left, top = numpy.floor(x), numpy.floor(y)
-        fx, fy = x - left, y - top
-        left, top = left.astype(numpy.int64), top.astype(numpy.int64)
-        # Each mote shares its light between the four pixels around it, all
-        # gathered in one pass.
-        columns = numpy.concatenate([left, left + 1, left, left + 1])
-        rows = numpy.concatenate([top, top, top + 1, top + 1])
-        weights = numpy.concatenate([(1 - fx) * (1 - fy), fx * (1 - fy), (1 - fx) * fy, fx * fy])
+        # A compact optical point-spread function replaces four square taps.
+        # Width is in logical points, so dust keeps its size on every monitor.
+        sigma = 0.30 * scale
+        radius = max(1, math.ceil(2 * sigma - 0.5))
+        offsets = numpy.arange(-radius, radius + 1)
+        columns_x = numpy.rint(x).astype(numpy.int64)[:, None] + offsets
+        rows_y = numpy.rint(y).astype(numpy.int64)[:, None] + offsets
+        # Separable Gaussian: only 2K exponentials per particle, not K².
+        wx = numpy.exp(-(columns_x.astype(numpy.float32) - x[:, None]) ** 2 / (2 * sigma ** 2))
+        wy = numpy.exp(-(rows_y.astype(numpy.float32) - y[:, None]) ** 2 / (2 * sigma ** 2))
+        wx /= numpy.maximum(wx.sum(axis=1, keepdims=True), 1e-9)
+        wy /= numpy.maximum(wy.sum(axis=1, keepdims=True), 1e-9)
+        weights = wy[:, :, None] * wx[:, None, :] * (self.style["core"] * scale ** 2)
+        shape = weights.shape
+        columns = numpy.broadcast_to(columns_x[:, None, :], shape)
+        rows = numpy.broadcast_to(rows_y[:, :, None], shape)
         inside = (columns >= 0) & (columns < width) & (rows >= 0) & (rows < height)
         index = rows[inside] * width + columns[inside]
-        weights = weights[inside] * self.style["core"]
         textures = []
         for light in lights:
-            image = numpy.bincount(index, weights * numpy.tile(light[lit], 4)[inside], minlength=width * height)
-            pixels = numpy.clip(image * 255, 0, 255).astype(numpy.uint8)
+            energy = (weights * light[lit, None, None])[inside]
+            linear = numpy.bincount(index, energy, minlength=width * height)
+            # A soft exposure shoulder retains highlight structure instead of
+            # clipping overlapping grains into opaque white blobs.
+            pixels = numpy.rint(-numpy.expm1(-linear) * 255).astype(numpy.uint8)
             textures.append(Gdk.MemoryTexture.new(width, height, Gdk.MemoryFormat.A8, GLib.Bytes.new(pixels.tobytes()), width))
         return textures
 
@@ -858,7 +852,7 @@ class Starlight:
         saved = self.position
         self.position = positions.astype(numpy.float32)
         try:
-            return self.splat(device_scale, self.haze_light)[0]
+            return self.splat(0.5, self.haze_light, minimum_scale=0.5)[0]
         finally:
             self.position = saved
 
