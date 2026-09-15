@@ -27,6 +27,8 @@ STRAIGHT_YAW = 0.18
 STRAIGHT_PITCH = (0.2, 0.8)
 TURN = 0.16
 TILT = 0.07
+# A face's box must span this share of the frame's short side (enrollment).
+FACE_SIZE = (0.25, 0.78)
 STEADY_YAW = 0.08
 STEADY_PITCH = 0.06
 
@@ -35,6 +37,14 @@ STEADY_PITCH = 0.06
 SETTLE_SECONDS = 0.4
 # Poses from about this long before a capture set the straight baseline.
 BASELINE_SECONDS = 0.6
+# Coaching distance starts this far inside Gaze's face size limits, so the
+# user settles safely within them.
+SIZE_MARGIN = (1.15, 0.92)
+# Holding a pose this long without Gaze capturing it usually means the face is
+# too small for one of the cameras (the IR camera sees a narrower frame), so
+# FaceGate asks to come closer, while there's room to.
+STALL_SECONDS = 3.0
+STALL_ROOM = 0.5
 
 LOOK = "Look straight at the camera."
 HOLD = "Hold still…"
@@ -71,6 +81,8 @@ PROBLEMS = {
 
 # Which star arrow each instruction shows: a turn, a tilt, or a move, and its
 # direction as seen in the mirrored preview.
+CLOSER = "Move a little closer."
+FARTHER = "Move a little farther away."
 TURN_LEFT_TO_FACE = "Turn a little to the left, to face the camera."
 TURN_RIGHT_TO_FACE = "Turn a little to the right, to face the camera."
 CHIN_DOWN = "Lower your chin a little."
@@ -107,6 +119,10 @@ def arrow_for(text: str) -> str:
     for direction, move in MOVES.items():
         if text == move:
             return f"move-{direction}"
+    if text == CLOSER:
+        return "closer"
+    if text == FARTHER:
+        return "back"
     return {TURN_LEFT_TO_FACE: "turn-left", TURN_RIGHT_TO_FACE: "turn-right", CHIN_DOWN: "tilt-down", CHIN_UP: "tilt-up"}.get(text, "")
 
 
@@ -147,6 +163,10 @@ class Guide:
         # Where the face's centre sits in its camera frame, 0..1 on each axis.
         self.placement: tuple[float, float] | None = None
         self.status_key = ""
+        # The face box's share of the frame's short side, and since when a
+        # reached pose has been held without a capture.
+        self.face_size: float | None = None
+        self.holding_since: float | None = None
         self.shown = ""
         self.pending = ""
         self.pending_since = 0.0
@@ -165,6 +185,7 @@ class Guide:
                     self.baseline = tuple(numpy.median(numpy.array(recent), axis=0).tolist())
             self.captured_at = self.clock()
             self.poses.clear()
+            self.holding_since = None
         elif key in PROMPTS:
             self.pose_name = PROMPTS[key]
 
@@ -184,6 +205,7 @@ class Guide:
             low, high = points[:, :2].min(axis=0), points[:, :2].max(axis=0)
             centre = (low + high) / 2
             self.placement = (float(centre[0]) / source[0], float(centre[1]) / source[1])
+            self.face_size = float((high - low).max()) / min(source)
         if measured is not None:
             now = self.clock()
             self.poses.append((now, *measured))
@@ -200,6 +222,24 @@ class Guide:
             if self.status_key in ("not-centered", "please center your face...") and self.placement:
                 return self._centre()
             return self.problem
+        if self.face and self.face_size is not None:
+            if self.face_size < FACE_SIZE[0] * SIZE_MARGIN[0]:
+                return CLOSER
+            if self.face_size > FACE_SIZE[1] * SIZE_MARGIN[1]:
+                return FARTHER
+        pose = self._pose()
+        if pose not in (HOLD, HOLD_THERE):
+            self.holding_since = None
+            return pose
+        now = self.clock()
+        if self.holding_since is None:
+            self.holding_since = now
+        if now - self.holding_since >= STALL_SECONDS and (self.face_size or 0) < STALL_ROOM:
+            return CLOSER
+        return pose
+
+    def _pose(self) -> str:
+        """What the current pose needs, from the measured head pose."""
         if not self.face or not self.poses or self.pose_name is None:
             return LOOK if self.pose_name in (None, "straight") else START.get(self.pose_name, LOOK)
         _, yaw, pitch = self.poses[-1]

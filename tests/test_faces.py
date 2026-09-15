@@ -400,6 +400,28 @@ class GuidanceTests(unittest.TestCase):
         guide.status("too-dark")
         self.assertEqual(guide.hint(), "Too dark. Face a light, or move closer.")
 
+    def test_a_small_face_is_asked_closer_and_a_large_one_back(self):
+        guide = self.guide()
+        guide.prompt("look-straight")
+        # The test face spans 140 points.
+        guide.pose(self.face(), (800, 800))
+        self.assertEqual(guide.advice(), "Move a little closer.")
+        guide.pose(self.face(), (160, 160))
+        self.assertEqual(guide.advice(), "Move a little farther away.")
+
+    def test_holding_a_pose_that_never_captures_asks_to_come_closer(self):
+        guide = self.guide()
+        guide.prompt("look-straight")
+        guide.pose(self.face(), (300, 300))
+        self.assertEqual(guide.advice(), "Hold still…")
+        self.now += 3.5
+        self.assertEqual(guide.advice(), "Move a little closer.")
+        # A capture starts the wait afresh.
+        guide.prompt("captured")
+        self.now += 1
+        guide.pose(self.face(), (300, 300))
+        self.assertEqual(guide.advice(), "Hold still…")
+
     def test_tilting_asks_to_keep_facing_forward(self):
         guide = self.guide()
         guide.prompt("look-straight")
@@ -510,6 +532,8 @@ class CoachingArrowTests(unittest.TestCase):
         self.assertEqual(guidance.arrow_for("A little higher…"), "tilt-up")
         self.assertEqual(guidance.arrow_for("Lower your chin a little."), "tilt-down")
         self.assertEqual(guidance.arrow_for("Move a little to the left."), "move-left")
+        self.assertEqual(guidance.arrow_for("Move a little closer."), "closer")
+        self.assertEqual(guidance.arrow_for("Move a little farther away."), "back")
         self.assertEqual(guidance.arrow_for("Hold it there…"), "")
 
     def test_an_off_centre_face_is_told_which_way_to_move_as_seen_in_the_mirror(self):

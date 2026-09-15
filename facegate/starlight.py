@@ -14,10 +14,18 @@ above left and dissolves at the silhouette. Motes differ like real dust: most
 are faint grains, some are stars, a few are sparks that glint and bloom. They
 never quite hold still: each drifts a fraction of a point and scintillates.
 
-To coach a pose, spare dust streams into a 3D arrow: a wide, faint drift
-drawn tight and bright toward the tip, where it sprays back out into a
-chevron. When the scan ends the dust takes the result's colour and winks
-out, in random order.
+The face stands in a scene built in layers, back to front: a deep field of
+faint distant stars that shifts against the head's turn, a back light that
+separates the head from the dark and breathes slowly, haze orbiting through
+it, the face itself (now and then swept by a band of structured light), the
+coaching guide, and a few out-of-focus motes drifting past the lens.
+
+To coach, a guide appears in precise hairline geometry with its own dust
+streaming along it: an arc orbiting the head for a turn or tilt, a straight
+arrow for a move, and corner brackets opening or closing for closer or back.
+Arrowheads lie flat on the screen so they read at any angle, and while the
+guide speaks the face steps back. When the scan ends the scene takes the
+result's colour and winks out, in random order.
 
 Without a face mesh (no ONNX Runtime), each mote instead takes a spot on a
 field over the frame and that spot's brightness, as before.
@@ -98,30 +106,64 @@ ARRIVE_SECONDS = 0.7
 SWIRL = 18.0
 LEAVE_SPEED = 1.8
 # How bright the nebula is, and on the face how far a mote drifts, in points.
-NEBULA_LIGHT = 0.6
+NEBULA_LIGHT = 0.45
 DRIFT = 0.45
 
-# The coaching arrow, in preview points. A turn is an arc of `ARROW_RADIUS`
-# orbiting the head under the chin, a tilt an arc up the side of the head, and a
-# move a straight arrow beside the face; each is seen `ARROW_VIEW` radians off its
-# plane with perspective from `ARROW_FOCAL` away. Dust streams along it at
-# `ARROW_FLOW` lengths a second, from `ARROW_TAIL_SPREAD` points wide at the
-# tail to a filament at the tip, then sprays back along the chevron's wings.
-ARROW_WING_SHARE = 0.18
-ARROW_TAIL_SPREAD = 10.0
-ARROW_HEAD_WIDTH = 18.0
-ARROW_HEAD_LENGTH = 15.0
-ARROW_RADIUS = 118.0
-ARROW_SWEEP = {"turn": 0.85, "tilt": 0.5}
-ARROW_VIEW = 0.38
-ARROW_FOCAL = 420.0
-ARROW_LENGTH = 66.0
-ARROW_ASIDE = 96.0
-ARROW_FLOW = 0.5
-ARROW_NUDGE_SECONDS = 1.4
-ARROW_FADE_SECONDS = 0.3
-ARROWS = {"turn-left", "turn-right", "tilt-up", "tilt-down", "move-left", "move-right", "move-up", "move-down"}
+# The scene around the face, back to front, in preview points. A deep field of
+# faint distant stars shifts `PARALLAX` points against the head's turn (the
+# foreground bokeh the other way), a back light glows behind the head and
+# breathes every `BREATH_SECONDS`, haze motes orbit slowly through it, and a
+# few large out-of-focus motes drift past the lens.
+PARALLAX = 7.0
+BREATH_SECONDS = 7.0
+HALO = (220.0, 260.0, 0.1)
+HAZE_MOTES = 90
+BOKEH = ((0.12, 0.2, 13.0), (0.86, 0.14, 9.0), (0.93, 0.78, 16.0), (0.06, 0.84, 11.0), (0.7, 0.95, 7.0))
+BOKEH_ALPHA = 0.07
+# Futurism, restrained: a band of structured light sweeps down the formed face
+# every `SCAN_SECONDS`, taking `SCAN_SWEEP` of them, like a depth projector.
+SCAN_SECONDS = 6.0
+SCAN_SWEEP = 1.6
+SCAN_GAIN = 0.9
+SCAN_WIDTH = 5.0
+# When the guide speaks the face steps back, so one thing leads at a time.
+GUIDE_DIMS_FACE = 0.3
 
+# The coaching guide, in preview points, drawn twice: a hairline of precise
+# geometry that carries the reading, and dust that carries the life.
+# A turn is an arc of `GUIDE_RADIUS` orbiting the head under the chin, from its
+# tail behind the head (`GUIDE_TAIL` radians) to its head just past the front
+# (`GUIDE_HEAD` radians), where the arc moves across the view rather than into
+# it; a tilt is the same arc up the side of the head. Each is seen `GUIDE_VIEW`
+# radians off its plane, with perspective from `GUIDE_FOCAL` away. A move is a
+# straight arrow beside the face. Arrowheads are laid out flat on the screen,
+# so they read at any angle. Closer and back are four corner brackets around
+# the face, opening outward or closing in.
+GUIDE_TAIL = -1.55
+GUIDE_HEAD = 0.5
+# A tilt's arc starts this much nearer the front, so it stays within the frame's height.
+GUIDE_TILT_REACH = 0.7
+GUIDE_RADIUS = 104.0
+GUIDE_VIEW = 0.42
+GUIDE_FOCAL = 420.0
+GUIDE_LENGTH = 62.0
+GUIDE_ASIDE = 98.0
+GUIDE_HEAD_WIDTH = 9.0
+GUIDE_HEAD_LENGTH = 11.0
+GUIDE_TAIL_SPREAD = 6.0
+GUIDE_FLOW = 0.45
+GUIDE_NUDGE_SECONDS = 1.6
+GUIDE_FADE_SECONDS = 0.3
+# The brackets' corners around the face, how far they travel, and their arms.
+BRACKET_BOX = (62.0, 68.0)
+BRACKET_TRAVEL = 10.0
+BRACKET_ARM = 13.0
+BRACKET_SECONDS = 1.5
+ARROW_WING_SHARE = 0.3
+ARROWS = {
+    "turn-left", "turn-right", "tilt-up", "tilt-down",
+    "move-left", "move-right", "move-up", "move-down", "closer", "back",
+}
 
 def rect(x: float, y: float, width: float, height: float) -> Graphene.Rect:
     return Graphene.Rect().init(x, y, width, height)
@@ -154,9 +196,22 @@ def feather(points: numpy.ndarray, width: float, height: float, radius: float, r
     return amount * amount * (3 - 2 * amount)
 
 
+def drift_of(wander: numpy.ndarray, share: float) -> numpy.ndarray:
+    return wander * share
+
+
 def smoothstep(edge0: float, edge1: float, value: numpy.ndarray) -> numpy.ndarray:
     amount = numpy.clip((value - edge0) / (edge1 - edge0), 0, 1)
     return amount * amount * (3 - 2 * amount)
+
+
+def soft_disc(size: int) -> Gdk.Texture:
+    """A soft round falloff as an alpha texture, for glows and out-of-focus motes."""
+    steps = (numpy.arange(size) + 0.5) / size * 2 - 1
+    radius = numpy.hypot(*numpy.meshgrid(steps, steps))
+    alpha = numpy.clip(1 - radius, 0, 1) ** 2 * (3 - 2 * numpy.clip(1 - radius, 0, 1))
+    pixels = (alpha * 255).astype(numpy.uint8)
+    return Gdk.MemoryTexture.new(size, size, Gdk.MemoryFormat.A8, GLib.Bytes.new(pixels.tobytes()), size)
 
 
 def load_triangles() -> numpy.ndarray | None:
@@ -228,6 +283,15 @@ class Starlight:
         self.surface: dict[str, numpy.ndarray] | None = None
         self.swirl_side = numpy.where(random.uniform(0, 1, count) < 0.5, -1.0, 1.0).astype(numpy.float32)
 
+        # The atmosphere: haze motes orbiting the head, and soft discs for the
+        # back light and the bokeh.
+        self.haze_angle = random.uniform(0, math.tau, HAZE_MOTES).astype(numpy.float32)
+        self.haze_radius = (0.55 + 0.6 * numpy.sqrt(random.uniform(0, 1, HAZE_MOTES))).astype(numpy.float32)
+        self.haze_speed = random.uniform(0.015, 0.05, HAZE_MOTES).astype(numpy.float32) * numpy.where(random.uniform(0, 1, HAZE_MOTES) < 0.5, -1, 1)
+        self.haze_light = random.uniform(0.2, 0.6, HAZE_MOTES).astype(numpy.float32)
+        self.disc = soft_disc(64)
+        self.bokeh_drift = random.uniform(-1, 1, (len(BOKEH), 2)).astype(numpy.float32) * [2.5, 1.2]
+
         arrows = len(self.arrow_stars)
         self.arrow_wing_star = random.uniform(0, 1, arrows) < ARROW_WING_SHARE
         self.arrow_seed = random.uniform(0, 1, arrows).astype(numpy.float32)
@@ -254,6 +318,12 @@ class Starlight:
         self.arrow = ""
         self.arrow_target = 0.0
         self.arrow_amount = 0.0
+        self.guide_lines: list[tuple[numpy.ndarray, numpy.ndarray]] = []
+        # How the head is turned (-1..1 each way), eased, for parallax; and how
+        # formed the scene around the face is.
+        self.parallax = numpy.zeros(2, numpy.float32)
+        self.parallax_target = numpy.zeros(2, numpy.float32)
+        self.scene = 0.0
         # 0..1 how gathered into a frame-lit face the motes are, and how alive the field is.
         self.gathered = 0.0
         self.presence = 0.0
@@ -291,6 +361,9 @@ class Starlight:
         self.vertices = points
         # Where the dust rests and how it's lit change only with the mesh.
         self.dust = self._face_dust()
+        low, high = points[:468, :2].min(axis=0), points[:468, :2].max(axis=0)
+        size = numpy.maximum(high - low, 1.0)
+        self.parallax_target = numpy.clip((points[NOSE_TIP, :2] - (low + high) / 2) / size * 5, -1, 1).astype(numpy.float32)
         self.face = True
 
     def set_arrow(self, name: str) -> None:
@@ -429,84 +502,124 @@ class Starlight:
 
     # The arrow's dust ---------------------------------------------------------------
 
+    def _project(self, kind: str, solid: numpy.ndarray) -> tuple[numpy.ndarray, numpy.ndarray]:
+        """A guide's 3D points on the screen, and the perspective scale at each."""
+        x, y, z = solid[:, 0], solid[:, 1], solid[:, 2]
+        view = GUIDE_VIEW
+        if kind == "turn":
+            # Orbiting the head's vertical axis, seen from above: the front of
+            # the orbit passes under the chin.
+            y, z = y * math.cos(view) + z * math.sin(view), z * math.cos(view) - y * math.sin(view)
+            y = y + 30
+        elif kind == "tilt":
+            # Orbiting the ear-to-ear axis, seen from the side: the front of
+            # the orbit passes beside the cheek.
+            x, z = x * math.cos(view) + z * math.sin(view), z * math.cos(view) - x * math.sin(view)
+            x = x + 26
+        scale = GUIDE_FOCAL / numpy.maximum(GUIDE_FOCAL - z, 60.0)
+        points = numpy.stack([self.width / 2 + x * scale, self.height / 2 + y * scale], axis=1)
+        return points.astype(numpy.float32), scale.astype(numpy.float32)
+
     def arrow_shape(self, name: str, clock: float) -> tuple[numpy.ndarray, numpy.ndarray]:
-        """Where each arrow mote is at `clock`, in preview points, and its light."""
+        """Where each guide mote is at `clock`, in preview points, and its light.
+
+        Also leaves the guide's hairlines in `guide_lines`: (points, alphas) polylines.
+        """
+        seed, side, scatter = self.arrow_seed, self.arrow_side, self.arrow_scatter
+        phase = (clock / GUIDE_NUDGE_SECONDS) % 1.0
+        # A nudge its way: quick out, slow back.
+        nudge = math.sin(math.pi * phase ** 0.6) ** 2
+        if name in ("closer", "back"):
+            return self._brackets(name, clock)
         kind, direction = name.split("-")
         forward = 1.0 if direction in ("right", "down") else -1.0
-        seed, wing = self.arrow_seed, self.arrow_wing_star
-        # A nudge its way: quick out, slow back.
-        phase = (clock / ARROW_NUDGE_SECONDS) % 1.0
-        nudge = math.sin(math.pi * phase ** 0.6) ** 2
-        length = ARROW_LENGTH if kind == "move" else 2 * ARROW_SWEEP[kind] * ARROW_RADIUS
 
-        def centre(along: numpy.ndarray) -> numpy.ndarray:
-            """The arrow's spine at 0..1 from tail to tip, before it's viewed."""
+        def spine(along: numpy.ndarray) -> numpy.ndarray:
+            """The guide's centre line at 0..1 from tail to tip, in 3D."""
+            zero = numpy.zeros_like(along)
             if kind == "move":
-                offset = ((along - 0.5) * ARROW_LENGTH + nudge * 7) * forward
-                zero = numpy.zeros_like(along)
+                offset = ((along - 0.5) * GUIDE_LENGTH + nudge * 6) * forward
                 if direction in ("left", "right"):
-                    return numpy.stack([forward * ARROW_ASIDE + offset, zero, zero], axis=1)
-                return numpy.stack([zero + ARROW_ASIDE, offset, zero], axis=1)
-            angle = forward * ((along * 2 - 1) * ARROW_SWEEP[kind] + nudge * 0.1)
+                    return numpy.stack([forward * GUIDE_ASIDE + offset, zero, zero], axis=1)
+                return numpy.stack([zero + GUIDE_ASIDE, offset, zero], axis=1)
+            reach = GUIDE_TILT_REACH if kind == "tilt" else 1.0
+            angle = forward * (GUIDE_TAIL * reach + (GUIDE_HEAD - GUIDE_TAIL * reach) * along + nudge * 0.09)
+            sweep, depth = GUIDE_RADIUS * numpy.sin(angle), GUIDE_RADIUS * numpy.cos(angle)
             if kind == "turn":
-                return numpy.stack([ARROW_RADIUS * numpy.sin(angle), numpy.zeros_like(angle), ARROW_RADIUS * numpy.cos(angle)], axis=1)
-            return numpy.stack([numpy.zeros_like(angle), ARROW_RADIUS * numpy.sin(angle), ARROW_RADIUS * numpy.cos(angle)], axis=1)
+                return numpy.stack([sweep, zero, depth], axis=1)
+            return numpy.stack([zero, sweep, depth], axis=1)
 
-        across = numpy.array([0.0, 1.0, 0.0]) if kind == "turn" or (kind == "move" and direction in ("left", "right")) else numpy.array([1.0, 0.0, 0.0])
-        tip = centre(numpy.array([1.0]))[0]
-        tangent = tip - centre(numpy.array([1.0 - 2.0 / length]))[0]
-        # The chevron opens facing the viewer, even where the arc turns away
-        # into depth, or it would be seen edge-on.
-        tangent[2] = 0.0
-        tangent /= max(float(numpy.linalg.norm(tangent)), 1e-6)
+        project = lambda solid: self._project(kind, solid)  # noqa: E731
+        # The head, flat on the screen along the arc's last stretch.
+        ends, _ = project(spine(numpy.array([0.97, 1.0])))
+        tip = ends[1]
+        heading = ends[1] - ends[0]
+        heading /= max(float(numpy.linalg.norm(heading)), 1e-6)
+        normal = numpy.array([-heading[1], heading[0]])
+        shaft_end = 0.97
 
-        # The stream: wide and faint at the tail, drawn into a bright filament
-        # that stops short of the head, so the chevron stands on its own.
-        reach = min(1.0, length / 200)
-        flow = (seed + clock * ARROW_FLOW) % 1.0
-        spread = 1.6 + ARROW_TAIL_SPREAD * reach * (1 - flow) ** 1.5
-        wobble = numpy.sin(clock * 2.3 + self.arrow_wobble) * (1 - flow) * 1.5 * reach
-        stream = centre(flow * (1 - ARROW_HEAD_LENGTH * 1.1 / length))
-        stream = stream + across * (self.arrow_scatter[:, :1] * spread[:, None] + wobble[:, None])
-        stream[:, 2] += self.arrow_scatter[:, 1] * spread
-        stream_light = (0.1 + 0.9 * flow ** 1.6) * smoothstep(0.0, 0.15, flow) * (1 - smoothstep(0.8, 1.0, flow))
+        # The stream: faint and loose at the tail, drawn tight toward the head.
+        flow = (seed + clock * GUIDE_FLOW) % 1.0
+        loose = GUIDE_TAIL_SPREAD * (1 - flow) ** 1.6 + 0.7
+        solid = spine(flow * shaft_end)
+        wobble = numpy.sin(clock * 1.9 + self.arrow_wobble) * (1 - flow)
+        across_axis = 1 if kind in ("turn",) or (kind == "move" and direction in ("left", "right")) else 0
+        solid[:, across_axis] += scatter[:, 0] * loose + wobble
+        solid[:, 2] += scatter[:, 1] * loose
+        stream, depth_scale = project(solid)
+        stream_light = (0.08 + 0.92 * flow ** 1.5) * smoothstep(0.0, 0.12, flow) * (1 - smoothstep(0.85, 1.0, flow))
+        stream_light = stream_light * numpy.clip(depth_scale, 0.55, 1.3) ** 2
 
-        # The chevron: an open V whose dust runs back from the tip along each
-        # wing and fades at its end.
-        run = (seed + clock * ARROW_FLOW * 0.8) % 1.0
+        # The chevron: dust runs back from the tip along both wings.
+        run = (seed + clock * GUIDE_FLOW * 0.7) % 1.0
         wings = (
             tip
-            - tangent * (run * ARROW_HEAD_LENGTH)[:, None]
-            + across * (self.arrow_side * run * ARROW_HEAD_WIDTH + self.arrow_scatter[:, 0] * (0.8 + 2.4 * run))[:, None]
+            - heading * (run * GUIDE_HEAD_LENGTH)[:, None]
+            + normal * (side * run * GUIDE_HEAD_WIDTH)[:, None]
+            + scatter * (0.35 + 0.9 * run)[:, None]
         )
-        wings = wings - tangent * (self.arrow_scatter[:, 1] * (0.6 + 2.0 * run))[:, None]
-        wing_light = 0.6 * smoothstep(0.0, 0.1, run + 0.05) * (1 - smoothstep(0.7, 1.0, run))
+        wing_light = 0.85 * smoothstep(0.0, 0.08, run + 0.04) * (1 - smoothstep(0.8, 1.0, run))
 
-        solid = numpy.where(wing[:, None], wings, stream)
-        light = numpy.where(wing, wing_light, stream_light)
-        x, y, z = solid[:, 0], solid[:, 1], solid[:, 2]
-        if kind == "turn":
-            # Orbiting the head's vertical axis, seen from above, so its front
-            # passes under the chin.
-            y, z = y * math.cos(ARROW_VIEW) + z * math.sin(ARROW_VIEW), z * math.cos(ARROW_VIEW) - y * math.sin(ARROW_VIEW)
-            y = y + 18
-        elif kind == "tilt":
-            # Orbiting the ear-to-ear axis, seen from the side, so its front
-            # passes beside the face.
-            x, z = x * math.cos(ARROW_VIEW) + z * math.sin(ARROW_VIEW), z * math.cos(ARROW_VIEW) - x * math.sin(ARROW_VIEW)
-            x = x + 31
-        else:
-            # Rocking slowly in depth, so it reads as an object in space.
-            rock = 0.5 * math.sin(clock * 1.2)
-            if direction in ("left", "right"):
-                x0 = forward * ARROW_ASIDE
-                x, z = x0 + (x - x0) * math.cos(rock), z + (x - x0) * math.sin(rock)
-            else:
-                y, z = y * math.cos(rock), z + y * math.sin(rock)
-        scale = ARROW_FOCAL / numpy.maximum(ARROW_FOCAL - z, 60.0)
-        points = numpy.stack([self.width / 2 + x * scale, self.height / 2 + y * scale], axis=1).astype(numpy.float32)
-        light = light * numpy.clip(scale, 0.6, 1.4) ** 1.5 * (0.2 + 1.4 * self.magnitude[self.arrow_stars])
+        wing = self.arrow_wing_star
+        points = numpy.where(wing[:, None], wings, stream).astype(numpy.float32)
+        light = numpy.where(wing, wing_light, stream_light) * (0.35 + 0.9 * self.magnitude[self.arrow_stars])
+
+        # Hairlines: the path, fading in from its tail, and the chevron.
+        along = numpy.linspace(0, 1.0, 48)
+        path, path_scale = project(spine(along))
+        path_alpha = 0.34 * smoothstep(0.1, 0.75, along) * numpy.clip(path_scale, 0.5, 1.2) ** 2
+        left = tip - heading * GUIDE_HEAD_LENGTH + normal * GUIDE_HEAD_WIDTH
+        right = tip - heading * GUIDE_HEAD_LENGTH - normal * GUIDE_HEAD_WIDTH
+        chevron = numpy.array([left, tip, right], numpy.float32)
+        self.guide_lines = [(path, path_alpha), (chevron, numpy.full(3, 0.9, numpy.float32))]
         return points, numpy.clip(light, 0, 1.3).astype(numpy.float32)
+
+    def _brackets(self, name: str, clock: float) -> tuple[numpy.ndarray, numpy.ndarray]:
+        """Four corner brackets around the face: opening outward for closer, closing in for back."""
+        cycle = (clock / BRACKET_SECONDS) % 1.0
+        travel = cycle if name == "closer" else 1 - cycle
+        eased = 1 - (1 - travel) ** 2
+        # Each bracket appears, travels, and fades before the next begins.
+        alpha = smoothstep(0.0, 0.2, cycle) * (1 - smoothstep(0.65, 1.0, cycle))
+        half_x = BRACKET_BOX[0] + BRACKET_TRAVEL * eased
+        half_y = BRACKET_BOX[1] + BRACKET_TRAVEL * eased
+        corners = numpy.array([(-1, -1), (1, -1), (1, 1), (-1, 1)], numpy.float32)
+        centre = numpy.array([self.width / 2, self.height / 2], numpy.float32)
+        corner = corners[(self.arrow_seed * 4).astype(int) % 4]
+        along = (self.arrow_seed * 4) % 1.0
+        # Half the dust on each bracket's horizontal arm, half on its vertical.
+        horizontal = self.arrow_side > 0
+        at = centre + corner * [half_x, half_y]
+        arm = numpy.where(horizontal[:, None], numpy.stack([-corner[:, 0], numpy.zeros(len(corner))], axis=1), numpy.stack([numpy.zeros(len(corner)), -corner[:, 1]], axis=1))
+        points = at + arm * (along * BRACKET_ARM)[:, None] + self.arrow_scatter * 0.45
+        light = alpha * (1 - 0.5 * along) * (0.4 + 0.9 * self.magnitude[self.arrow_stars])
+        lines = []
+        for x, y in corners:
+            start = centre + numpy.array([x, y]) * [half_x, half_y]
+            polyline = numpy.array([start + [-x * BRACKET_ARM, 0], start, start + [0, -y * BRACKET_ARM]], numpy.float32)
+            lines.append((polyline, numpy.full(3, 0.8 * alpha, numpy.float32)))
+        self.guide_lines = lines
+        return points.astype(numpy.float32), numpy.clip(light, 0, 1.3).astype(numpy.float32)
 
     # Motion ---------------------------------------------------------------------
 
@@ -523,6 +636,8 @@ class Starlight:
         change = elapsed / seconds
         self.presence = min(self.presence_target, self.presence + change) if self.presence_target > self.presence else max(self.presence_target, self.presence - change)
 
+        self.parallax += (self.parallax_target * (1.0 if self.face else 0.0) - self.parallax) * (1 - math.exp(-elapsed / 0.4))
+        self.scene += ((1.0 if self.face else 0.0) - self.scene) * (1 - math.exp(-elapsed / 0.8))
         cloud = self._cloud()
         twinkle = 1 - style["twinkle"] * (0.5 + 0.5 * numpy.sin(self.twinkle_rate * self.clock + self.twinkle_phase))
         if self.vertices is not None and self.surface is not None:
@@ -540,7 +655,7 @@ class Starlight:
             # for the dark around a face fade on the way.
             light = (NEBULA_LIGHT * self.cloud_light * (1 - self.gathered) ** 3 + numpy.sqrt(self.levels) * self.gathered) * twinkle
 
-        self.arrow_amount += (self.arrow_target - self.arrow_amount) * (1 - math.exp(-elapsed / ARROW_FADE_SECONDS))
+        self.arrow_amount += (self.arrow_target - self.arrow_amount) * (1 - math.exp(-elapsed / GUIDE_FADE_SECONDS))
         stars = self.arrow_stars
         arrow = self.arrow_amount > 0.01 and self.arrow in ARROWS
         if arrow:
@@ -590,10 +705,20 @@ class Starlight:
         # At rest, a mote drifts a fraction of a point.
         drift = (cloud[stars] - self.anchor[stars]) / self.style["wander"] * DRIFT
         target[stars] = start + path * eased[:, None] + swirl + drift
-        flare = (4 * eased * (1 - eased)) ** 2 * 0.6 * self.magnitude[stars]
-        light[stars] = self.cloud_light[stars] * NEBULA_LIGHT * (1 - eased) ** 2 + lit * eased + flare
-        # Ambient dust stays faint around the face.
-        light[self.ambient_stars] = self.cloud_light[self.ambient_stars] * 0.55
+        flare = (4 * eased * (1 - eased)) ** 2 * 0.25 * self.magnitude[stars]
+        settled = lit * eased
+        # The scan: a band of light sweeping down the formed face.
+        sweep = (self.clock % SCAN_SECONDS) / SCAN_SWEEP
+        if sweep < 1 and self.formed > 1.6:
+            band = -20 + (self.height + 40) * sweep
+            strength = SCAN_GAIN * min(1.0, self.formed - 1.6) * (1 - self.arrow_amount)
+            settled = settled * (1 + strength * numpy.exp(-(((rest[:, 1] - band) / SCAN_WIDTH) ** 2)))
+        settled = settled * (1 - GUIDE_DIMS_FACE * self.arrow_amount)
+        light[stars] = self.cloud_light[stars] * NEBULA_LIGHT * (1 - eased) ** 2 + settled + flare
+        # The deep field: distant stars, nearly still, shifting against the head.
+        ambient = self.ambient_stars
+        target[ambient] = self.anchor[ambient] + drift_of(cloud[ambient] - self.anchor[ambient], 0.08) - self.parallax * PARALLAX
+        light[ambient] = self.cloud_light[ambient] * (0.25 + 0.3 * self.scene)
         return target, light
 
     @property
@@ -632,33 +757,111 @@ class Starlight:
             textures.append(Gdk.MemoryTexture.new(width, height, Gdk.MemoryFormat.A8, GLib.Bytes.new(pixels.tobytes()), width))
         return textures
 
+    def _tinted(self, texture: Gdk.Texture, bounds: Graphene.Rect, color: tuple[float, float, float]) -> Gsk.RenderNode:
+        colored = Gtk.Snapshot()
+        colored.push_mask(Gsk.MaskMode.ALPHA)
+        colored.append_texture(texture, bounds)
+        colored.pop()
+        colored.append_color(Gdk.RGBA(red=color[0], green=color[1], blue=color[2], alpha=1), bounds)
+        colored.pop()
+        return colored.to_node()
+
+    def _disc(self, snapshot: Gtk.Snapshot, x: float, y: float, width: float, height: float, alpha: float, color: tuple[float, float, float]) -> None:
+        if alpha <= 0.002:
+            return
+        snapshot.push_opacity(min(1.0, alpha))
+        snapshot.append_node(self._tinted(self.disc, rect(x - width / 2, y - height / 2, width, height), color))
+        snapshot.pop()
+
+    def _haze(self, device_scale: float) -> Gdk.Texture:
+        """The haze motes orbiting the head, splatted for blurring."""
+        angle = self.haze_angle + self.haze_speed * self.clock
+        breathe = 1 + 0.04 * math.sin(self.clock * math.tau / BREATH_SECONDS)
+        centre = numpy.array([self.width / 2, self.height / 2 - 6]) - self.parallax * PARALLAX * 0.5
+        positions = centre + numpy.stack([numpy.cos(angle) * 78, numpy.sin(angle) * 96], axis=1) * (self.haze_radius * breathe)[:, None]
+        saved = self.position
+        self.position = positions.astype(numpy.float32)
+        try:
+            return self.splat(device_scale, self.haze_light)[0]
+        finally:
+            self.position = saved
+
     def stars(self, device_scale: float, look: Look) -> Gsk.RenderNode | None:
+        """The scene, back to front: back light, haze, dust, guide, bokeh."""
         if not self.visible:
             return None
-        # Only bright motes glow, so faint dust stays fine and crisp.
-        grains, glowing = self.splat(device_scale, self.light, self.light * self.glow_share)
-        bounds = rect(0, 0, self.width, self.height)
-
-        def lit(texture: Gdk.Texture, color: tuple[float, float, float]) -> Gsk.RenderNode:
-            colored = Gtk.Snapshot()
-            colored.push_mask(Gsk.MaskMode.ALPHA)
-            colored.append_texture(texture, bounds)
-            colored.pop()
-            colored.append_color(Gdk.RGBA(red=color[0], green=color[1], blue=color[2], alpha=1), bounds)
-            colored.pop()
-            return colored.to_node()
-
-        glow = lit(glowing, look.glow)
+        width, height = self.width, self.height
+        bounds = rect(0, 0, width, height)
+        presence = min(1.0, self.presence)
         snapshot = Gtk.Snapshot()
-        # Starlight: bright motes spread into a wide faint bloom and a tighter
-        # glow, under every grain of dust itself.
+        breath = 0.5 + 0.5 * math.sin(self.clock * math.tau / BREATH_SECONDS)
+
+        # The back light: a soft glow behind the head that separates it from the dark.
+        halo_width, halo_height, halo_alpha = HALO
+        self._disc(
+            snapshot, width / 2 - self.parallax[0] * PARALLAX * 0.5, height / 2 - 10,
+            halo_width, halo_height, halo_alpha * (0.35 + 0.65 * self.scene) * (0.85 + 0.15 * breath) * presence, look.glow,
+        )
+        # Haze lit by it: motes softened out of focus.
+        snapshot.push_opacity(0.55 * (0.4 + 0.6 * self.scene) * presence)
+        snapshot.push_blur(2.5)
+        snapshot.append_node(self._tinted(self._haze(device_scale), bounds, look.glow))
+        snapshot.pop()
+        snapshot.pop()
+
+        # The dust: bright motes spread into a wide faint bloom and a tighter
+        # glow, under every grain itself. Only bright motes glow, so faint dust
+        # stays fine and crisp.
+        grains, glowing = self.splat(device_scale, self.light, self.light * self.glow_share)
+        glow = self._tinted(glowing, bounds, look.glow)
         for radius, alpha in ((self.style["bloom"], self.style["bloom_alpha"]), (self.style["glow"], self.style["glow_alpha"])):
             snapshot.push_opacity(alpha)
             snapshot.push_blur(radius)
             snapshot.append_node(glow)
             snapshot.pop()
             snapshot.pop()
-        snapshot.append_node(lit(grains, look.tint))
+        snapshot.append_node(self._tinted(grains, bounds, look.tint))
+
+        # The guide's hairlines: precise geometry under its dust, the chevron
+        # the brightest point of the scene.
+        amount = self.arrow_amount * presence
+        if amount > 0.01 and self.guide_lines:
+            lines = Gtk.Snapshot()
+            # Segments share one path per step of opacity: a fading line in a
+            # handful of strokes rather than one per segment.
+            steps: dict[int, Gsk.PathBuilder] = {}
+            for points, alphas in self.guide_lines:
+                for index in range(len(points) - 1):
+                    step = round(float(alphas[index] + alphas[index + 1]) / 2 * 12)
+                    if step <= 0:
+                        continue
+                    builder = steps.setdefault(step, Gsk.PathBuilder.new())
+                    builder.move_to(float(points[index][0]), float(points[index][1]))
+                    builder.line_to(float(points[index + 1][0]), float(points[index + 1][1]))
+            stroke = Gsk.Stroke.new(1.0)
+            stroke.set_line_cap(Gsk.LineCap.ROUND)
+            stroke.set_line_join(Gsk.LineJoin.ROUND)
+            for step, builder in steps.items():
+                lines.append_stroke(builder.to_path(), stroke, Gdk.RGBA(red=look.tint[0], green=look.tint[1], blue=look.tint[2], alpha=min(1.0, step / 12)))
+            node = lines.to_node()
+            if node is not None:
+                snapshot.push_opacity(amount)
+                snapshot.push_opacity(0.8)
+                snapshot.push_blur(2.0)
+                snapshot.append_node(node)
+                snapshot.pop()
+                snapshot.pop()
+                snapshot.append_node(node)
+                snapshot.pop()
+
+        # Bokeh: a few large motes out of focus, drifting past the lens.
+        for index, (x, y, size) in enumerate(BOKEH):
+            drift = self.bokeh_drift[index] * self.clock
+            bx = (x * width + drift[0] + self.parallax[0] * PARALLAX * 1.6) % (width + 40) - 20
+            by = (y * height + drift[1]) % (height + 40) - 20
+            edge = float(feather(numpy.array([[bx, by]]), width, height, self.style["corner"], self.style["feather"] * 0.6)[0])
+            flicker = 0.75 + 0.25 * math.sin(self.clock * 0.7 + index * 1.9)
+            self._disc(snapshot, bx, by, size, size, BOKEH_ALPHA * flicker * (0.3 + 0.7 * edge) * presence, look.glow)
         return snapshot.to_node()
 
     def snapshot(self, snapshot: Gtk.Snapshot, device_scale: float, look: Look) -> None:
