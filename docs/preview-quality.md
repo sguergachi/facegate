@@ -11,13 +11,13 @@
 | Depth | Min/max normalization independently stretched depth every frame, then renderer rebuilt it using an arbitrary multiplier. | Preserve weak-perspective XYZ units through crop, framing, and versioned transport. Legacy helper payloads remain readable. |
 | Topology | Previous pass restored the missing forehead crown with canonical connectivity. | Retain all 468 vertices, add canonical positions for sampling only. Live model points still set face geometry. |
 | Particle sampling | Projected first-frame areas biased density by starting pose; contour bands and random clumps obscured shading. | Stratified canonical 3D area sampling, fewer feature strokes, no contour bands. |
-| Lighting | Independent triangle flipping lit hidden surfaces; hard dither thresholds punched holes; highlights changed at camera cadence. | Signed normals, broad frontal key/fill, subtle highlight, constant surface-grain occupancy, 140 ms depth filtering, and 160 ms radiance interpolation. Iris catchlights inherit their socket orientation. |
+| Lighting | Independent triangle flipping lit hidden surfaces; hard dither thresholds punched holes; highlights changed at camera cadence. | Signed normals, broad frontal key/fill, subtle highlight, constant surface-grain occupancy, one display-rate XYZ pose for both normals and particle positions (140–50 ms adaptive response). Iris catchlights inherit their socket orientation. |
 | Raster / optics | Integer-rounded DPI, four-tap spots, and clipped accumulated intensity made grain coarse and highlights muddy. | Supersampled Gaussian grains, fractional scale, physical point size, soft highlight shoulder, selective bloom. |
 | Runtime | Higher-resolution dust increases CPU work. | Half-resolution atmosphere and separable Gaussian kernels; measured about 8 ms/frame CPU animation + node construction on this host. This excludes GPU rendering and camera inference. |
 
 ## Verification
 
-112 tests pass; Python compilation and diff checks pass.
+113 tests pass; Python compilation and diff checks pass.
 
 - Unit regressions: depth scale survives changes to unrelated points; uniform XYZ scale/translation preserves lighting; back-facing normals stay unlit; particle surface sampling is independent of first pose; camera detail survives decode; border crops replicate correctly; reset clears old face state.
 - Existing enrollment, security boundary, guides, loss/dissolution, and settings tests retained.
@@ -40,3 +40,14 @@ Depth is smoothed before computing normals, and the broader highlight is less
 sensitive to small normal changes. New tests cover a full former scan cycle,
 alternating depth noise, and guide changes without dimming. Live RGB/IR
 confirmation remains distinct from these deterministic renderer checks.
+
+### Turn-specific correction
+
+User confirmed the flicker is most noticeable when turning. The prior pipeline
+computed shading for the latest camera pose, while independently springing
+visible particles toward it. This meant light and geometry represented different
+instants. Both now derive from a single uniformly filtered XYZ pose at display
+rate. Settled particles attach to that pose; spring motion remains for formation
+and dispersal. Uniform XYZ filtering avoids the transient shearing caused by
+different XY and depth delays. A 15 Hz camera / 60 Hz display turning regression
+checks that lighting and particle geometry remain synchronized.

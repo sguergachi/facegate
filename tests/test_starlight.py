@@ -143,7 +143,7 @@ class StarlightShadingTests(unittest.TestCase):
         stars.submit_mesh(self.canonical())
         stars.reset()
         self.assertIsNone(stars.surface)
-        self.assertIsNone(stars.dust_target)
+        self.assertIsNone(stars.mesh_target)
         self.assertIsNone(stars.dust)
 
     def test_iris_catchlights_inherit_valid_surface_orientation(self):
@@ -197,3 +197,24 @@ class StarlightShadingTests(unittest.TestCase):
             stars.advance(1 / 60)
         central = np.linalg.norm(stars.dust[0] - [156, 104], axis=1) < 45
         np.testing.assert_allclose(stars.light[stars.face_stars][central], before[central], atol=0.002)
+
+    def test_turning_face_and_its_shading_share_the_displayed_pose(self):
+        stars = Starlight(312, 208, STAR_STYLE)
+        points = self.canonical()
+        stars.submit_mesh(points)
+        for _ in range(180):
+            stars.advance(1 / 60)
+        for frame in range(120):
+            # Camera poses arrive at 15 Hz while rendering runs at 60 Hz.
+            if frame % 4 == 0:
+                angle = np.sin(frame / 60 * np.pi) * 0.5
+                turned = points.copy()
+                x, z = points[:, 0] - 156, points[:, 2]
+                turned[:, 0] = 156 + x * np.cos(angle) + z * np.sin(angle)
+                turned[:, 2] = -x * np.sin(angle) + z * np.cos(angle)
+                stars.submit_mesh(turned)
+            stars.advance(1 / 60)
+            rest, expected_light = stars._face_dust()
+            np.testing.assert_allclose(stars.dust[1], expected_light, atol=1e-6)
+            # Only the intentional subpixel dust drift can offset the surface.
+            self.assertLess(float(np.max(np.abs(stars.position[stars.face_stars] - rest))), 0.15)

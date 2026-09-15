@@ -518,8 +518,8 @@ and grows to fit (surface height 440).
   - *Lit like a sculpture:* a broad key from above-left, a quiet opposing fill,
     and a restrained rim. A broad, low-intensity highlight models the nose and
     cheek planes. Signed normals suppress back faces; every visible surface
-    grain remains present in the shadows. Input depth is smoothed over 140 ms
-    before normals are calculated; radiance interpolates over 160 ms.
+    grain remains present in the shadows. A single display-rate XYZ pose drives both shading and attached particles;
+    adaptive smoothing is 140 ms for noise and 50 ms for deliberate turns.
   - *Alive:* resting face motes drift only 0.08 pt with steady radiance; 240
     ambient motes stay drifting faintly around the face.
   - *Framing:* the view follows the face, eased, with the mesh filling
@@ -699,5 +699,5 @@ See [the pipeline audit](docs/preview-quality.md) for evidence and limits.
 A recognizable face takes precedence over dramatic side lighting. Use a broad
 frontal key and fill, keep shadow density constant, and confine scintillation to
 free dust. No automatic scan band, face glint pulses, or coaching-triggered face
-dimming. Smooth noisy depth before deriving normals (140 ms, XY 35 ms) and
-let radiance follow particle travel (160 ms) to avoid detached-looking shadows.
+dimming. Use one smoothed 3D pose for normals and particle positions so shadows cannot
+lead or trail a head turn.

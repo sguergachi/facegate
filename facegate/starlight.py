@@ -303,9 +303,8 @@ class Starlight:
         # The newest face mesh's points (x, y, z), when the face is dust,
         # and where on it each face mote rests and how lit it is there.
         self.vertices: numpy.ndarray | None = None
-        self.mesh_time: float | None = None
+        self.mesh_target: numpy.ndarray | None = None
         self.surface = None
-        self.dust_target = None
         self.dust: tuple[numpy.ndarray, numpy.ndarray] | None = None
         # Seconds the face has been condensing, eased back down when it's lost.
         self.formed = 0.0
@@ -353,20 +352,12 @@ class Starlight:
         points = numpy.asarray(points, numpy.float32)
         if self.surface is None:
             self._place_dust(points)
-        if self.vertices is not None and self.face and self.mesh_time is not None:
-            elapsed = max(1 / 120, min(0.2, self.clock - self.mesh_time))
-            # Depth estimates are noisier than tracked XY. Stabilize depth
-            # before deriving normals; smoothing light afterwards cannot stop
-            # noisy geometry from creating false creases and specular flashes.
-            blend = 1 - numpy.exp(-elapsed / numpy.array([0.035, 0.035, 0.14], numpy.float32))
-            self.vertices = self.vertices + (points - self.vertices) * blend
-        else:
+        self.mesh_target = points.copy()
+        if self.vertices is None:
             self.vertices = points.copy()
-        self.mesh_time = self.clock
-        # Where the dust rests and how it's lit change only with the mesh.
-        self.dust_target = self._face_dust()
-        if self.dust is None:
-            self.dust = self.dust_target
+            self.dust = self._face_dust()
+        # The display clock advances one common 3D pose for both position and
+        # lighting; neither channel independently chases the next camera pose.
         low, high = points[:468, :2].min(axis=0), points[:468, :2].max(axis=0)
         size = numpy.maximum(high - low, 1.0)
         self.parallax_target = numpy.clip((points[NOSE_TIP, :2] - (low + high) / 2) / size * 5, -1, 1).astype(numpy.float32)
@@ -687,6 +678,15 @@ class Starlight:
         cloud = self._cloud()
         twinkle = 1 - style["twinkle"] * (0.5 + 0.5 * numpy.sin(self.twinkle_rate * self.clock + self.twinkle_phase))
         if self.vertices is not None and self.surface is not None:
+            if self.mesh_target is not None and self.face:
+                delta = self.mesh_target - self.vertices
+                span = max(float(numpy.ptp(self.vertices[:468, 1])), 1.0)
+                motion = float(numpy.median(numpy.linalg.norm(delta[:468], axis=1))) / span
+                # Smooth small estimation noise, follow a deliberate turn
+                # promptly. One coefficient for XYZ avoids shearing the head.
+                response = 0.14 - 0.09 * float(smoothstep(0.006, 0.035, motion))
+                self.vertices += delta * (1 - math.exp(-elapsed / response))
+                self.dust = self._face_dust()
             target, light = self._advance_dust(elapsed, cloud)
             # Scintillation belongs to the free dust. Once on the face, grains
             # carry stable light so eyes/cheeks do not flicker independently.
@@ -719,7 +719,14 @@ class Starlight:
         damping = 2 * 0.82 * numpy.sqrt(stiffness)
         self.velocity += ((target - self.position) * stiffness - self.velocity * damping) * elapsed
         self.position += self.velocity * elapsed
+        if self.vertices is not None and self.surface is not None:
+            arrival = numpy.clip((self.formed - self.surface["delay"]) / ARRIVE_SECONDS, 0, 1)
+            attached = smoothstep(0.65, 1.0, arrival)[:, None]
+            stars = self.face_stars
+            self.position[stars] += (target[stars] - self.position[stars]) * attached
+            self.velocity[stars] *= 1 - attached
         if arrow:
+            stars = self.arrow_stars
             # Arrow dust follows its stream closely rather than on its spring,
             # which would smear it, once it has flown in.
             follow = 1 - math.exp(-elapsed * 30 * self.arrow_amount ** 2)
@@ -748,13 +755,6 @@ class Starlight:
         light = self.cloud_light * NEBULA_LIGHT
         stars = self.face_stars
         surface = self.surface
-        if self.dust_target is not None:
-            # Interpolate radiance as well as position; camera-rate lighting
-            # steps otherwise shimmer even when the particles move smoothly.
-            rest, old_light = self.dust
-            next_rest, next_light = self.dust_target
-            blend = 1 - math.exp(-elapsed / 0.16)
-            self.dust = (next_rest, old_light + (next_light - old_light) * blend)
         rest, lit = self.dust
         arrival = numpy.clip((self.formed - surface["delay"]) / ARRIVE_SECONDS, 0, 1)
         eased = 1 - (1 - arrival) ** 3
