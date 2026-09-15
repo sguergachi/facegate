@@ -11,13 +11,13 @@
 | Depth | Min/max normalization independently stretched depth every frame, then renderer rebuilt it using an arbitrary multiplier. | Preserve weak-perspective XYZ units through crop, framing, and versioned transport. Legacy helper payloads remain readable. |
 | Topology | Previous pass restored the missing forehead crown with canonical connectivity. | Retain all 468 vertices, add canonical positions for sampling only. Live model points still set face geometry. |
 | Particle sampling | Projected first-frame areas biased density by starting pose; contour bands and random clumps obscured shading. | Stratified canonical 3D area sampling, fewer feature strokes, no contour bands. |
-| Lighting | Independent triangle flipping lit hidden surfaces; hard dither thresholds punched holes; highlights changed at camera cadence. | Signed normals, key/fill/rim lights, view-dependent highlight, soft shadow density, 65 ms radiance interpolation. Iris catchlights inherit their socket orientation. |
+| Lighting | Independent triangle flipping lit hidden surfaces; hard dither thresholds punched holes; highlights changed at camera cadence. | Signed normals, broad frontal key/fill, subtle highlight, constant surface-grain occupancy, 140 ms depth filtering, and 160 ms radiance interpolation. Iris catchlights inherit their socket orientation. |
 | Raster / optics | Integer-rounded DPI, four-tap spots, and clipped accumulated intensity made grain coarse and highlights muddy. | Supersampled Gaussian grains, fractional scale, physical point size, soft highlight shoulder, selective bloom. |
 | Runtime | Higher-resolution dust increases CPU work. | Half-resolution atmosphere and separable Gaussian kernels; measured about 8 ms/frame CPU animation + node construction on this host. This excludes GPU rendering and camera inference. |
 
 ## Verification
 
-109 tests pass; Python compilation and diff checks pass.
+112 tests pass; Python compilation and diff checks pass.
 
 - Unit regressions: depth scale survives changes to unrelated points; uniform XYZ scale/translation preserves lighting; back-facing normals stay unlit; particle surface sampling is independent of first pose; camera detail survives decode; border crops replicate correctly; reset clears old face state.
 - Existing enrollment, security boundary, guides, loss/dissolution, and settings tests retained.
@@ -29,3 +29,14 @@
 This is a real-time monocular estimate, not a calibrated depth scan. MediaPipe does not supply hair, ears, skin pores, or hidden head geometry. Canonical sampling and added particles cannot invent those details. A denser reconstruction model would need a measured identity/pose/latency comparison before replacing the current model.
 
 Sources: [MediaPipe Face Landmarker models](https://developers.google.com/edge/mediapipe/solutions/vision/face_landmarker), [FaceMesh V2 model card](https://storage.googleapis.com/mediapipe-assets/Model%20Card%20MediaPipe%20Face%20Mesh%20V2.pdf), [coordinate conventions](https://github.com/google-ai-edge/mediapipe/blob/master/docs/solutions/face_mesh.md), and Gaze source inspected locally at `/tmp/gaze-src/gaze/src/preview.rs`.
+
+## Follow-up: reported facial flicker and shadow
+
+The earlier visual pass retained a periodic bright scan band, independent face
+glint pulses, and guide-induced dimming. Those effects could alter the portrait
+while the user held still. Removed all three from formed-face illumination;
+free dust continues scintillating. Shadowed planes now retain all their grains.
+Depth is smoothed before computing normals, and the broader highlight is less
+sensitive to small normal changes. New tests cover a full former scan cycle,
+alternating depth noise, and guide changes without dimming. Live RGB/IR
+confirmation remains distinct from these deterministic renderer checks.

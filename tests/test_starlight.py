@@ -151,3 +151,49 @@ class StarlightShadingTests(unittest.TestCase):
         normal = stars._normals(self.canonical())
         np.testing.assert_allclose(np.linalg.norm(normal[468:478], axis=1), np.ones(10), atol=1e-6)
         self.assertTrue(np.all(normal[468:478, 2] > 0))
+
+    def test_stationary_face_has_no_periodic_light_flicker(self):
+        stars = Starlight(312, 208, STAR_STYLE)
+        points = self.canonical()
+        stars.submit_mesh(points)
+        for _ in range(180):
+            stars.advance(1 / 60)
+        samples = []
+        for frame in range(420):
+            if frame % 6 == 0:
+                stars.submit_mesh(points)
+            stars.advance(1 / 60)
+            samples.append(stars.light[stars.face_stars].copy())
+        samples = np.asarray(samples)
+        # Central grains stay clear of the outer feather; this covers a full
+        # former six-second scan cycle plus the independent glint pulses.
+        central = np.linalg.norm(stars.dust[0] - [156, 104], axis=1) < 45
+        self.assertLess(float(np.max(np.ptp(samples[:, central], axis=0))), 0.002)
+
+    def test_depth_noise_is_smoothed_before_it_can_move_the_shading(self):
+        stars = Starlight(312, 208, STAR_STYLE)
+        points = self.canonical()
+        stars.submit_mesh(points)
+        noise = np.random.default_rng(42).normal(0, 0.9, len(points))
+        errors = []
+        for frame in range(30):
+            for _ in range(6):
+                stars.advance(1 / 60)
+            jittered = points.copy()
+            jittered[:, 2] += noise * (-1 if frame % 2 else 1)
+            stars.submit_mesh(jittered)
+            if frame > 10:
+                errors.append(np.abs(stars.vertices[:, 2] - points[:, 2]).mean())
+        self.assertLess(float(np.mean(errors)), float(np.abs(noise).mean()) * 0.45)
+
+    def test_coaching_does_not_dim_the_formed_face(self):
+        stars = Starlight(312, 208, STAR_STYLE)
+        stars.submit_mesh(self.canonical())
+        for _ in range(180):
+            stars.advance(1 / 60)
+        before = stars.light[stars.face_stars].copy()
+        stars.set_arrow("closer")
+        for _ in range(90):
+            stars.advance(1 / 60)
+        central = np.linalg.norm(stars.dust[0] - [156, 104], axis=1) < 45
+        np.testing.assert_allclose(stars.light[stars.face_stars][central], before[central], atol=0.002)

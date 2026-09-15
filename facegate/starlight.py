@@ -17,14 +17,14 @@ never quite hold still: each drifts a fraction of a point and scintillates.
 The face stands in a scene built in layers, back to front: a deep field of
 faint distant stars that shifts against the head's turn, a back light that
 separates the head from the dark and breathes slowly, haze orbiting through
-it, the face itself (now and then swept by a band of structured light), the
+it, the steadily illuminated face itself, the
 coaching guide, and a few out-of-focus motes drifting past the lens.
 
 To coach, a guide appears in precise hairline geometry with its own dust
 streaming along it: an arc orbiting the head for a turn or tilt, a straight
 arrow for a move, and a head contour approaching or receding for closer or back.
-Arrowheads lie flat on the screen so they read at any angle, and while the
-guide speaks the face steps back. When the scan ends the scene takes the
+Arrowheads lie flat on the screen so they read at any angle, and the
+face keeps its light as the guide changes. When the scan ends the scene takes the
 result's colour and winks out, in random order.
 
 Without a face mesh (no ONNX Runtime), each mote instead takes a spot on a
@@ -84,8 +84,8 @@ AMBIENT_MOTES = 240
 # A small share supports the lids/lips; the rest follows the anatomical surface.
 FEATURE_SHARE = 0.045
 # A large soft key, a quiet opposing fill, and a grazing rim separate planes.
-KEY_LIGHT = (-0.55, -0.50, 0.67)
-FILL_LIGHT = (0.65, 0.05, 0.76)
+KEY_LIGHT = (-0.28, -0.35, 0.90)
+FILL_LIGHT = (0.45, 0.05, 0.89)
 RIM_DIRECTION = (0.85, -0.15, -0.50)
 GRAIN = 0.72
 
@@ -97,7 +97,7 @@ SWIRL = 18.0
 LEAVE_SPEED = 1.8
 # How bright the nebula is, and on the face how far a mote drifts, in points.
 NEBULA_LIGHT = 0.45
-DRIFT = 0.22
+DRIFT = 0.08
 
 # The scene around the face, back to front, in preview points. A deep field of
 # faint distant stars shifts `PARALLAX` points against the head's turn (the
@@ -110,14 +110,6 @@ HALO = (220.0, 260.0, 0.035)
 HAZE_MOTES = 90
 BOKEH = ((0.12, 0.2, 13.0), (0.86, 0.14, 9.0), (0.93, 0.78, 16.0), (0.06, 0.84, 11.0), (0.7, 0.95, 7.0))
 BOKEH_ALPHA = 0.07
-# Futurism, restrained: a band of structured light sweeps down the formed face
-# every `SCAN_SECONDS`, taking `SCAN_SWEEP` of them, like a depth projector.
-SCAN_SECONDS = 6.0
-SCAN_SWEEP = 1.6
-SCAN_GAIN = 0.9
-SCAN_WIDTH = 5.0
-# When the guide speaks the face steps back, so one thing leads at a time.
-GUIDE_DIMS_FACE = 0.12
 
 # The coaching guide, in preview points, drawn twice: a hairline of precise
 # geometry that carries the reading, and dust that carries the life.
@@ -311,6 +303,7 @@ class Starlight:
         # The newest face mesh's points (x, y, z), when the face is dust,
         # and where on it each face mote rests and how lit it is there.
         self.vertices: numpy.ndarray | None = None
+        self.mesh_time: float | None = None
         self.surface = None
         self.dust_target = None
         self.dust: tuple[numpy.ndarray, numpy.ndarray] | None = None
@@ -360,7 +353,16 @@ class Starlight:
         points = numpy.asarray(points, numpy.float32)
         if self.surface is None:
             self._place_dust(points)
-        self.vertices = points
+        if self.vertices is not None and self.face and self.mesh_time is not None:
+            elapsed = max(1 / 120, min(0.2, self.clock - self.mesh_time))
+            # Depth estimates are noisier than tracked XY. Stabilize depth
+            # before deriving normals; smoothing light afterwards cannot stop
+            # noisy geometry from creating false creases and specular flashes.
+            blend = 1 - numpy.exp(-elapsed / numpy.array([0.035, 0.035, 0.14], numpy.float32))
+            self.vertices = self.vertices + (points - self.vertices) * blend
+        else:
+            self.vertices = points.copy()
+        self.mesh_time = self.clock
         # Where the dust rests and how it's lit change only with the mesh.
         self.dust_target = self._face_dust()
         if self.dust is None:
@@ -468,7 +470,6 @@ class Starlight:
             "feature": feature,
             "scatter": scatter,
             "delay": delay.astype(numpy.float32),
-            "dither": (random.uniform(0, 1, count) ** 0.8 * 0.85).astype(numpy.float32),
         }
 
     def _normals(self, points: numpy.ndarray) -> numpy.ndarray:
@@ -508,23 +509,21 @@ class Starlight:
         key_direction = direction(KEY_LIGHT)
         key = numpy.maximum(normal @ key_direction, 0)
         fill = numpy.maximum(normal @ direction(FILL_LIGHT), 0)
-        facing = numpy.clip(normal[:, 2], 0, 1)
         rim = numpy.maximum(normal @ direction(RIM_DIRECTION), 0) ** 1.5
         # Broad diffuse planes plus a restrained view-dependent highlight.
         # The specular lobe moves across the cheeks/nose as the head turns.
         half_vector = direction(key_direction + [0, 0, 1])
-        specular = numpy.maximum(normal @ half_vector, 0) ** 28 * key
-        shade = 0.055 + 0.72 * key + 0.14 * fill + 0.40 * rim
+        specular = numpy.maximum(normal @ half_vector, 0) ** 12 * key
+        shade = 0.13 + 0.64 * key + 0.22 * fill + 0.15 * rim
         feature = surface["feature"]
         shade = numpy.where(feature, shade * 1.12, shade)
         visibility = smoothstep(0.02, 0.20, normal[:, 2])
-        # Shadows retain fine dust; avoid hard thresholds that punch holes in
-        # broad planes and sparkle on/off when normals change by a fraction.
-        density = 0.22 + 0.78 * numpy.clip(shade, 0, 1)
-        shown = numpy.where(feature, 1.0, smoothstep(-0.18, 0.18, density - surface["dither"]))
+        # Every surface grain remains present. Lighting controls radiance,
+        # not occupancy: changing density with normals made moving shadows
+        # look like holes in the user's face.
         magnitude = self.magnitude[self.face_stars]
-        radiance = (shade ** 1.35 + 0.55 * specular) * GRAIN * (0.18 + 0.82 * magnitude)
-        return rest.astype(numpy.float32), (radiance * shown * visibility).astype(numpy.float32)
+        radiance = (shade ** 1.15 + 0.12 * specular) * GRAIN * (0.18 + 0.82 * magnitude)
+        return rest.astype(numpy.float32), (radiance * visibility).astype(numpy.float32)
 
     # The arrow's dust ---------------------------------------------------------------
 
@@ -689,9 +688,12 @@ class Starlight:
         twinkle = 1 - style["twinkle"] * (0.5 + 0.5 * numpy.sin(self.twinkle_rate * self.clock + self.twinkle_phase))
         if self.vertices is not None and self.surface is not None:
             target, light = self._advance_dust(elapsed, cloud)
-            # Sparks glint now and then.
+            # Scintillation belongs to the free dust. Once on the face, grains
+            # carry stable light so eyes/cheeks do not flicker independently.
+            face_light = light[self.face_stars].copy()
             glint = numpy.maximum(numpy.sin(self.glint_rate * self.clock + self.twinkle_phase), 0) ** 16
             light = light * (1 - (1 - twinkle) * (1.2 - self.magnitude)) + glint * self.spark * numpy.minimum(light * 2.0, 0.38) * min(1.0, self.formed)
+            light[self.face_stars] = face_light
         else:
             # A frame-lit face: light follows the camera closely; gathering eases.
             self.levels += (self.targets - self.levels) * (1 - math.exp(-elapsed / style["follow_seconds"]))
@@ -751,7 +753,7 @@ class Starlight:
             # steps otherwise shimmer even when the particles move smoothly.
             rest, old_light = self.dust
             next_rest, next_light = self.dust_target
-            blend = 1 - math.exp(-elapsed / 0.065)
+            blend = 1 - math.exp(-elapsed / 0.16)
             self.dust = (next_rest, old_light + (next_light - old_light) * blend)
         rest, lit = self.dust
         arrival = numpy.clip((self.formed - surface["delay"]) / ARRIVE_SECONDS, 0, 1)
@@ -766,13 +768,6 @@ class Starlight:
         target[stars] = start + path * eased[:, None] + swirl + drift
         flare = (4 * eased * (1 - eased)) ** 2 * 0.25 * self.magnitude[stars]
         settled = lit * eased
-        # The scan: a band of light sweeping down the formed face.
-        sweep = (self.clock % SCAN_SECONDS) / SCAN_SWEEP
-        if sweep < 1 and self.formed >= float(surface["delay"].max()) + ARRIVE_SECONDS - 0.01:
-            band = -20 + (self.height + 40) * sweep
-            strength = SCAN_GAIN * min(1.0, self.formed) * (1 - self.arrow_amount)
-            settled = settled * (1 + strength * numpy.exp(-(((rest[:, 1] - band) / SCAN_WIDTH) ** 2)))
-        settled = settled * (1 - GUIDE_DIMS_FACE * self.arrow_amount)
         light[stars] = self.cloud_light[stars] * NEBULA_LIGHT * (1 - eased) ** 2 + settled + flare
         # The deep field: distant stars, nearly still, shifting against the head.
         ambient = self.ambient_stars

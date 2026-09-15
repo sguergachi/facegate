@@ -490,8 +490,8 @@ Principles, in order:
 3. **One motivated light.** The key light that models the face also back-lights
    the haze; nothing is lit from nowhere.
 4. **Futurism is precision meeting the organic.** Hairline geometry carries
-   meaning; dust carries life. A band of structured light sweeps down the
-   formed face every 6 s, over 1.6 s, like a depth projector.
+   meaning; free dust carries life. The formed face keeps steady illumination;
+   no periodic scan band or independent spark pulses cross its features.
 5. **Restraint.** Cool monochrome only; ambient motion slow (7 s breaths,
    orbits under 0.05 rad/s); purposeful motion only in the guide
    (1.5–1.6 s cycles); no more than one thing moving with intent at a time.
@@ -516,11 +516,11 @@ and grows to fit (surface height 440).
     soft strokes along the upper lids, brows and mouth, including a five-mote
     glint in each iris. No scanline bands or first-camera-pose density bias.
   - *Lit like a sculpture:* a broad key from above-left, a quiet opposing fill,
-    and a grazing rim. A view-dependent highlight travels over the nose and
-    cheek planes. Signed normals suppress the back-facing surface; soft
-    density thresholds retain detail in the shadows. Radiance interpolates
-    over 65 ms so highlights do not snap at the camera frame rate.
-  - *Alive:* resting motes drift under half a point and scintillate; 240
+    and a restrained rim. A broad, low-intensity highlight models the nose and
+    cheek planes. Signed normals suppress back faces; every visible surface
+    grain remains present in the shadows. Input depth is smoothed over 140 ms
+    before normals are calculated; radiance interpolates over 160 ms.
+  - *Alive:* resting face motes drift only 0.08 pt with steady radiance; 240
     ambient motes stay drifting faintly around the face.
   - *Framing:* the view follows the face, eased, with the mesh filling
     1 / 1.35 of the height. Gaze switches between its colour and IR cameras
@@ -551,7 +551,7 @@ and grows to fit (surface height 440).
   viewer with outward-pointing chevrons, while "farther away" contracts with
   inward-pointing chevrons. A faint destination outline makes the change in
   scale legible. Each 1.8 s cycle fades before resetting. The guide nudges its way every 1.6 s and fades over 300 ms; while it
-  shows, the face dims by 12% and the scan pauses, so one thing leads.
+  shows, the face keeps its light so the guide cannot cast an apparent shadow.
 - **Distance coaching:** Gaze needs the face box to span 25–78% of the
   frame's short side. FaceGate measures it on whichever camera is sending
   previews and coaches closer or back from 15% and 8% inside those limits.
@@ -693,3 +693,11 @@ remove the forehead crown, and wrong edges bridge anatomical openings.
   Higher particle counts cannot recover details absent from that source.
 
 See [the pipeline audit](docs/preview-quality.md) for evidence and limits.
+
+#### Stable facial illumination
+
+A recognizable face takes precedence over dramatic side lighting. Use a broad
+frontal key and fill, keep shadow density constant, and confine scintillation to
+free dust. No automatic scan band, face glint pulses, or coaching-triggered face
+dimming. Smooth noisy depth before deriving normals (140 ms, XY 35 ms) and
+let radiance follow particle travel (160 ms) to avoid detached-looking shadows.
