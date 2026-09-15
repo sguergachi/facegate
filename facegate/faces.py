@@ -405,7 +405,7 @@ class GazeClient:
         events.
         """
         from .facemesh import Framing
-        from .guidance import Guide
+        from .guidance import Guide, arrow_for
 
         framing = Framing(width, height)
         guide = Guide() if mesh is not None else None
@@ -457,14 +457,16 @@ class GazeClient:
                 if preview is not None and mesh is not None:
                     try:
                         jpeg = preview.get_child_value(0).get_data_as_bytes().get_data()
-                        points = mesh.find(_decode_rgb(jpeg))
+                        image = _decode_rgb(jpeg)
+                        source = (image.shape[1], image.shape[0])
+                        points = mesh.find(image)
                     except Exception:  # noqa: BLE001 - one bad frame must not end enrollment
-                        points = None
-                    guide.pose(points)
+                        points, source = None, None
+                    guide.pose(points, source)
                     now = time.monotonic()
                     if points is not None:
                         face_seen, face_shown = now, True
-                        placed = framing.place(points)
+                        placed = framing.place(points, source)
                         yield {
                             "event": "mesh",
                             "w": width,
@@ -473,7 +475,7 @@ class GazeClient:
                         }
                     elif face_shown and now - face_seen > MESH_HOLD_SECONDS:
                         face_shown = False
-                        framing.view = None
+                        framing.reset()
                         yield {"event": "mesh", "w": width, "h": height, "points": ""}
                 elif preview is not None:
                     try:
@@ -525,7 +527,10 @@ class GazeClient:
                 if completed:
                     break
                 if guide is not None:
-                    yield from hint(guide.hint())
+                    advice = guide.hint()
+                    if advice:
+                        yield from hint(advice)
+                        yield {"event": "arrow", "arrow": arrow_for(advice)}
                 if time.monotonic() >= deadline:
                     raise GazeError("Gaze timed out while adding your face.")
                 if stopped():

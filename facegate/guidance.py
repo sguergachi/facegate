@@ -69,6 +69,19 @@ PROBLEMS = {
     "please back up...": "Move a little farther away.",
 }
 
+# Which star arrow each instruction shows: a turn, a tilt, or a move, and its
+# direction as seen in the mirrored preview.
+TURN_LEFT_TO_FACE = "Turn a little to the left, to face the camera."
+TURN_RIGHT_TO_FACE = "Turn a little to the right, to face the camera."
+CHIN_DOWN = "Lower your chin a little."
+CHIN_UP = "Raise your chin a little."
+MOVES = {
+    "left": "Move a little to the left.",
+    "right": "Move a little to the right.",
+    "up": "Move up a little.",
+    "down": "Move down a little.",
+}
+
 START = {
     "up": "Slowly tilt your chin up.",
     "down": "Slowly tilt your chin down.",
@@ -81,6 +94,20 @@ MORE = {
     "left": "A little more to the left…",
     "right": "A little more to the right…",
 }
+
+
+def arrow_for(text: str) -> str:
+    """The star arrow for an instruction: "turn-left", "tilt-up", "move-right", or ""."""
+    for direction in ("left", "right"):
+        if text in (START[direction], MORE[direction]):
+            return f"turn-{direction}"
+    for direction in ("up", "down"):
+        if text in (START[direction], MORE[direction]):
+            return f"tilt-{direction}"
+    for direction, move in MOVES.items():
+        if text == move:
+            return f"move-{direction}"
+    return {TURN_LEFT_TO_FACE: "turn-left", TURN_RIGHT_TO_FACE: "turn-right", CHIN_DOWN: "tilt-down", CHIN_UP: "tilt-up"}.get(text, "")
 
 
 def head_pose(points: numpy.ndarray) -> tuple[float, float] | None:
@@ -117,6 +144,9 @@ class Guide:
         self.baseline: tuple[float, float] | None = None
         self.poses: deque[tuple[float, float, float]] = deque()
         self.face = False
+        # Where the face's centre sits in its camera frame, 0..1 on each axis.
+        self.placement: tuple[float, float] | None = None
+        self.status_key = ""
         self.shown = ""
         self.pending = ""
         self.pending_since = 0.0
@@ -140,12 +170,20 @@ class Guide:
 
     def status(self, key: str) -> None:
         """A FaceStatus from Gaze."""
+        self.status_key = key
         self.problem = PROBLEMS.get(key)
 
-    def pose(self, points: numpy.ndarray | None) -> None:
-        """The newest preview's face mesh, or None when it shows no face."""
+    def pose(self, points: numpy.ndarray | None, source: tuple[int, int] | None = None) -> None:
+        """The newest preview's face mesh, or None when it shows no face.
+
+        ``source`` is the camera frame's (width, height).
+        """
         measured = head_pose(points) if points is not None else None
         self.face = measured is not None
+        if measured is not None and source:
+            low, high = points[:, :2].min(axis=0), points[:, :2].max(axis=0)
+            centre = (low + high) / 2
+            self.placement = (float(centre[0]) / source[0], float(centre[1]) / source[1])
         if measured is not None:
             now = self.clock()
             self.poses.append((now, *measured))
@@ -159,6 +197,8 @@ class Guide:
         if self.clock() - self.captured_at < 0.5:
             return GOT_IT
         if self.problem:
+            if self.status_key in ("not-centered", "please center your face...") and self.placement:
+                return self._centre()
             return self.problem
         if not self.face or not self.poses or self.pose_name is None:
             return LOOK if self.pose_name in (None, "straight") else START.get(self.pose_name, LOOK)
@@ -167,13 +207,13 @@ class Guide:
         if name == "straight":
             # Seen in the mirror: a nose right of centre means turn left.
             if yaw > STRAIGHT_YAW:
-                return "Turn a little to the left, to face the camera."
+                return TURN_LEFT_TO_FACE
             if yaw < -STRAIGHT_YAW:
-                return "Turn a little to the right, to face the camera."
+                return TURN_RIGHT_TO_FACE
             if pitch < STRAIGHT_PITCH[0]:
-                return "Lower your chin a little."
+                return CHIN_DOWN
             if pitch > STRAIGHT_PITCH[1]:
-                return "Raise your chin a little."
+                return CHIN_UP
             return HOLD
         if self.baseline is None:
             return START[name]
@@ -191,6 +231,14 @@ class Guide:
         if moved >= needed * 0.4:
             return MORE[name]
         return START[name]
+
+    def _centre(self) -> str:
+        """Which way to move a face that's off-centre, as seen in the mirror."""
+        x, y = self.placement
+        dx, dy = x - 0.5, y - 0.5
+        if abs(dx) >= abs(dy):
+            return MOVES["left" if dx > 0 else "right"]
+        return MOVES["up" if dy > 0 else "down"]
 
     def hint(self) -> str | None:
         """A new instruction to show, or None to keep the current one."""

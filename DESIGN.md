@@ -477,7 +477,9 @@ and grows to fit (surface height 440).
   the unprivileged helper) each take a star, lit by nearness (35% at the ears,
   full at the nose), with two dimmer stars scattered just around each point;
   the leftover stars go dark. The view follows the face, eased, with the mesh
-  filling 1 / 1.35 of the height. Without a face the stars wander in their
+  filling 1 / 1.35 of the height. Gaze switches between its colour and IR
+  cameras at every pose; the view is kept in face heights relative to the
+  face and carried across the switch, so the preview never jumps. Without a face the stars wander in their
   cloud. Where the mesh can't run, the stars take the frame's brightness
   instead (colour frames inverted under a head-and-shoulders spotlight). All
   of it is tinted a cool `#d6f0ff` and masked by a rounded rectangle
@@ -491,6 +493,13 @@ and grows to fit (surface height 440).
   Camera problems (too dark, clipped, off-centre, distance) outrank pose
   advice. A new instruction must hold 0.4 s before it replaces the one
   showing, so a wavering head doesn't make the words flicker.
+- **Coaching arrow:** each directional instruction also shows an arrow made
+  of 420 spare stars, drawn in 3D with perspective: a turn is an arc orbiting
+  the head, passing under the chin, with its chevron on the side to turn
+  toward; a tilt is an arc up the side of the head; a move is a straight
+  arrow beside the face, rocking slowly in depth. The shaft streams toward
+  the chevron and the arrow nudges its way every 1.1 s. It fades in and out
+  over 220 ms and never takes the face's stars.
 - **Fluidity:** IR emitters often light only every other frame, so unlit
   frames are skipped and each lit frame cross-fades into the next over 70 ms
   on the frame clock.

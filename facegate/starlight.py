@@ -6,7 +6,9 @@ wandering cloud. When the camera finds a face, each star flies to its own spot
 and takes that spot's brightness, so the bright ones form the face and the
 rest dim away; they keep following the face as it moves, and fall back into
 the cloud if it's lost. Given the face's surface points instead of a frame,
-each point takes its own star, and the stars left over go dark. When the scan ends they take the result's colour and
+each point takes its own star, and the stars left over go dark. To coach a pose,
+some of the spare stars stream into a 3D arrow: an arc swinging around the
+head for a turn or a tilt, a straight arrow for a move. When the scan ends they take the result's colour and
 wink out, in random order.
 
 The camera gives a lit frame about every 70 ms, but the stars move on springs
@@ -31,6 +33,29 @@ gi.require_version("Gsk", "4.0")
 gi.require_version("Gtk", "4.0")
 import numpy  # noqa: E402
 from gi.repository import Gdk, GLib, Graphene, Gsk, Gtk  # noqa: E402
+
+
+# The coaching arrow, in preview points. A turn is an arc of `ARROW_RADIUS`
+# orbiting the head under the chin, a tilt an arc up the side of the head, and a
+# move a straight arrow beside the face; each is seen `ARROW_VIEW` radians off its
+# plane with perspective from `ARROW_FOCAL` away. The shaft streams toward a
+# chevron head at `ARROW_FLOW` shaft lengths a second, and the whole arrow nudges
+# its way every `ARROW_NUDGE_SECONDS`.
+ARROW_STARS = 420
+ARROW_HEAD_SHARE = 0.26
+ARROW_SHAFT_WIDTH = 0.8
+ARROW_HEAD_WIDTH = 17.0
+ARROW_HEAD_LENGTH = 21.0
+ARROW_RADIUS = 118.0
+ARROW_SWEEP = {"turn": 0.85, "tilt": 0.6}
+ARROW_VIEW = 0.38
+ARROW_FOCAL = 420.0
+ARROW_LENGTH = 54.0
+ARROW_ASIDE = 98.0
+ARROW_FLOW = 0.6
+ARROW_NUDGE_SECONDS = 1.1
+ARROW_FADE_SECONDS = 0.22
+ARROWS = {"turn-left", "turn-right", "tilt-up", "tilt-down", "move-left", "move-right", "move-up", "move-down"}
 
 
 def rect(x: float, y: float, width: float, height: float) -> Graphene.Rect:
@@ -107,6 +132,15 @@ class Starlight:
         # third stars sit around it, so the mesh reads as dense starlight.
         self.mesh_order = random.permutation(count)
         self.mesh_jitter = random.uniform(-1.3, 1.3, (count, 2)).astype(numpy.float32)
+        # The arrow's stars are the last in that order, so the mesh never takes them.
+        arrow_count = min(ARROW_STARS, count // 4)
+        self.arrow_stars = self.mesh_order[count - arrow_count:]
+        # Shaft stars sit anywhere along it; head stars on the chevron's two wings.
+        self.arrow_head = random.uniform(0, 1, arrow_count) < ARROW_HEAD_SHARE
+        self.arrow_along = random.uniform(0, 1, arrow_count).astype(numpy.float32)
+        self.arrow_wing = random.uniform(0, 1, arrow_count).astype(numpy.float32)
+        self.arrow_side = numpy.where(random.uniform(0, 1, arrow_count) < 0.5, -1.0, 1.0).astype(numpy.float32)
+        self.arrow_jitter = random.normal(0, 0.5, (arrow_count, 2)).astype(numpy.float32)
         self.reset()
 
     def reset(self) -> None:
@@ -120,6 +154,10 @@ class Starlight:
         self.face = False
         # Where each star goes on the face's mesh, when there is one.
         self.mesh: numpy.ndarray | None = None
+        # The coaching arrow showing (kept while it fades) and how present it is.
+        self.arrow = ""
+        self.arrow_target = 0.0
+        self.arrow_amount = 0.0
         # 0..1 how gathered into the face the stars are, and how alive the field is.
         self.gathered = 0.0
         self.presence = 0.0
@@ -154,7 +192,7 @@ class Starlight:
         targets = numpy.zeros(total, numpy.float32)
         # Up to three stars per point: one on it at full light, the rest
         # scattered just around it, dimmer.
-        taken = min(total, count * 3)
+        taken = min(total - len(self.arrow_stars), count * 3)
         stars = self.mesh_order[:taken]
         which = numpy.arange(taken) % count
         extra = numpy.arange(taken) >= count
@@ -165,6 +203,73 @@ class Starlight:
         self.mesh = places.astype(numpy.float32)
         self.targets = targets
         self.face = True
+
+    def set_arrow(self, name: str) -> None:
+        """Show the coaching arrow ("turn-left", "tilt-up", "move-right", …), or none."""
+        if name in ARROWS:
+            self.arrow = name
+            self.arrow_target = 1.0
+        else:
+            self.arrow_target = 0.0
+
+    def arrow_shape(self, name: str, clock: float) -> tuple[numpy.ndarray, numpy.ndarray]:
+        """Where each arrow star is at `clock`, in preview points, and its light."""
+        kind, direction = name.split("-")
+        head = self.arrow_head
+        # 0..1 along the arrow: the shaft streams toward the head; the chevron's
+        # wings sweep back from the tip at 1.
+        length = ARROW_LENGTH if kind == "move" else 2 * ARROW_SWEEP[kind] * ARROW_RADIUS
+        head_share = ARROW_HEAD_LENGTH / length
+        shaft_end = 1 - head_share * 0.5
+        stream = (self.arrow_along + clock * ARROW_FLOW) % 1.0 * shaft_end
+        along = numpy.where(head, 1 - self.arrow_wing * head_share, stream)
+        across = numpy.where(head, self.arrow_side * self.arrow_wing * ARROW_HEAD_WIDTH, 0.0) + self.arrow_jitter[:, 0] * numpy.where(head, 0.35, ARROW_SHAFT_WIDTH)
+        depth = self.arrow_jitter[:, 1]
+        # A nudge its way: quick out, slow back.
+        phase = (clock / ARROW_NUDGE_SECONDS) % 1.0
+        nudge = math.sin(math.pi * phase ** 0.6) ** 2
+        forward = 1.0 if direction in ("right", "down") else -1.0
+        if kind == "move":
+            offset = ((along - 0.5) * ARROW_LENGTH + nudge * 8) * forward
+            if direction in ("left", "right"):
+                # Beside the face, on the side it points to.
+                x, y, z = forward * ARROW_ASIDE + offset, across, depth
+                yaw, pitch = 0.5 * math.sin(clock * 1.4), 0.0
+            else:
+                x, y, z = ARROW_ASIDE + across, offset, depth
+                yaw, pitch = 0.0, 0.5 * math.sin(clock * 1.4)
+        else:
+            angle = forward * ((along * 2 - 1) * ARROW_SWEEP[kind] + nudge * 0.12)
+            ring = ARROW_RADIUS + depth
+            if kind == "turn":
+                # Orbiting the head's vertical axis, seen from above, so its
+                # front passes under the chin.
+                x, y, z = ring * numpy.sin(angle), across, ring * numpy.cos(angle)
+                yaw, pitch = 0.0, ARROW_VIEW
+            else:
+                # Orbiting the ear-to-ear axis, seen from the side, so its
+                # front passes beside the face.
+                x, y, z = across, ring * numpy.sin(angle), ring * numpy.cos(angle)
+                yaw, pitch = ARROW_VIEW, 0.0
+        # Seen `pitch` from above and `yaw` from the side.
+        y, z = y * math.cos(pitch) + z * math.sin(pitch), z * math.cos(pitch) - y * math.sin(pitch)
+        x, z = x * math.cos(yaw) + z * math.sin(yaw), z * math.cos(yaw) - x * math.sin(yaw)
+        # Nudged clear of the face: the turn's front just under the mouth, the
+        # tilt's front beside the cheek.
+        if kind == "turn":
+            y = y + 24
+        elif kind == "tilt":
+            x = x + 31
+        scale = ARROW_FOCAL / numpy.maximum(ARROW_FOCAL - z, 60.0)
+        x = numpy.broadcast_to(x, along.shape)
+        y = numpy.broadcast_to(y, along.shape)
+        points = numpy.stack([self.width / 2 + x * scale, self.height / 2 + y * scale], axis=1).astype(numpy.float32)
+        # Brighter toward the head and nearer the viewer; the stream fades in at
+        # the tail and out where it meets the head.
+        shaft = numpy.clip(along / 0.1, 0, 1) * numpy.clip((shaft_end - along) / 0.06, 0, 1)
+        near = numpy.clip(scale, 0.6, 1.4) ** 1.5
+        light = numpy.where(head, 0.85, (0.3 + 0.7 * along / shaft_end) * shaft) * near
+        return points, numpy.clip(light, 0, 1.2).astype(numpy.float32)
 
     def fade_out(self) -> None:
         """The scan is over: the stars wink out."""
@@ -196,6 +301,17 @@ class Starlight:
         self.velocity += ((target - self.position) * stiffness - self.velocity * damping) * elapsed
         self.position += self.velocity * elapsed
 
+        self.arrow_amount += (self.arrow_target - self.arrow_amount) * (1 - math.exp(-elapsed / ARROW_FADE_SECONDS))
+        arrow = self.arrow_amount > 0.01 and self.arrow in ARROWS
+        if arrow:
+            # Arrow stars follow their stream closely rather than on springs,
+            # which would smear it; they fly in from wherever they were.
+            stars = self.arrow_stars
+            shape, arrow_light = self.arrow_shape(self.arrow, self.clock)
+            follow = 1 - math.exp(-elapsed * 18)
+            self.position[stars] += (shape - self.position[stars]) * follow
+            self.velocity[stars] = 0
+
         # A star is alive once the field's presence passes its threshold.
         alive = numpy.clip((self.presence * 1.25 - self.threshold) / 0.25, 0, 1)
         alive = alive * alive * (3 - 2 * alive)
@@ -203,6 +319,9 @@ class Starlight:
         # Cloud light gives way quickly as the stars gather, so stars bound for
         # the dark around a face fade on the way rather than filling the frame.
         light = self.cloud_light * (1 - self.gathered) ** 3 + numpy.sqrt(self.levels) * self.gathered
+        if arrow:
+            stars = self.arrow_stars
+            light[stars] = light[stars] * (1 - self.arrow_amount) + arrow_light * self.arrow_amount
         self.light = light * alive * twinkle * feather(self.position, self.width, self.height, style["corner"], style["feather"])
 
     @property

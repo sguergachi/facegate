@@ -2862,7 +2862,7 @@ class SettingsPanel(Gtk.Overlay):
 
     def _on_enroll_event(self, event: dict[str, Any]) -> None:
         kind = event.get("event")
-        if kind in ("frame", "mesh", "hint", "progress"):
+        if kind in ("frame", "mesh", "arrow", "hint", "progress"):
             if self.enroll_phase == "approving":
                 # The scan has begun; the island is already showing its preview.
                 self.enroll_phase = "scanning"
@@ -2870,6 +2870,8 @@ class SettingsPanel(Gtk.Overlay):
                 self._render()
             if kind == "frame":
                 self.island.send({"frame": event.get("data"), "w": event.get("w"), "h": event.get("h"), "face": event.get("face")})
+            elif kind == "arrow":
+                self.island.send({"arrow": event.get("arrow") or ""})
             elif kind == "mesh":
                 self.island.send({"mesh": event.get("points"), "w": event.get("w"), "h": event.get("h")})
             elif kind == "hint":

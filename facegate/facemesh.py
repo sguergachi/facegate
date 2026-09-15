@@ -139,7 +139,14 @@ class FaceMesh:
 
 
 class Framing:
-    """Where the preview looks: the face, eased, filling the frame's height."""
+    """Where the preview looks: the face, eased, filling the frame's height.
+
+    Gaze switches between its colour and IR cameras at every pose, and they
+    differ in resolution and field of view, so the same face lands on other
+    pixels. The view is therefore kept relative to the face (its offset and
+    zoom in face heights) and carried across a camera switch in those terms,
+    so the preview never jumps.
+    """
 
     # The face mesh spans forehead to chin; the preview shows it this many
     # times over, so the brow and jaw clear the rounded corners.
@@ -149,15 +156,30 @@ class Framing:
     def __init__(self, width: int, height: int) -> None:
         self.width, self.height = width, height
         self.view: numpy.ndarray | None = None
+        self.source: tuple[int, int] | None = None
+        # The view as (x offset, y offset, span), in face heights from the face's centre.
+        self.relative: numpy.ndarray | None = None
 
-    def place(self, mesh: numpy.ndarray) -> numpy.ndarray:
-        """The mesh in preview pixels: x, y, and the light each point carries."""
+    def reset(self) -> None:
+        self.view = self.source = self.relative = None
+
+    def place(self, mesh: numpy.ndarray, source: tuple[int, int] | None = None) -> numpy.ndarray:
+        """The mesh in preview pixels: x, y, and the light each point carries.
+
+        ``source`` is the camera frame's size, telling cameras apart.
+        """
         low, high = mesh[:, :2].min(axis=0), mesh[:, :2].max(axis=0)
-        view = numpy.array([*(low + high) / 2, (high[1] - low[1]) * self.ZOOM], numpy.float32)
-        if self.view is None or abs(view[2] - self.view[2]) > self.view[2] * 0.5:
-            self.view = view
+        centre = (low + high) / 2
+        face = max(float(high[1] - low[1]), 1.0)
+        target = numpy.array([*centre, face * self.ZOOM], numpy.float32)
+        if self.view is None or self.relative is None:
+            self.view = target
+        elif source != self.source:
+            self.view = numpy.array([*(centre + self.relative[:2] * face), self.relative[2] * face], numpy.float32)
         else:
-            self.view += (view - self.view) * self.EASE
+            self.view += (target - self.view) * self.EASE
+        self.source = source
+        self.relative = numpy.array([*(self.view[:2] - centre) / face, self.view[2] / face], numpy.float32)
         cx, cy, span = self.view
         scale = self.height / max(float(span), 1.0)
         light = 0.35 + 0.65 * mesh[:, 2] ** 1.5

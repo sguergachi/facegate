@@ -1836,6 +1836,8 @@ class EdgeHud:
             self.preview.take_frame(message)
         if "mesh" in message:
             self.preview.take_mesh(message)
+        if isinstance(message.get("arrow"), str):
+            self.preview.stars.set_arrow(message["arrow"])
         if "progress" in message:
             try:
                 self.preview.set_progress(float(message["progress"]))
@@ -1846,6 +1848,7 @@ class EdgeHud:
         result = message.get("result")
         if result in ("success", "failure"):
             enrollment.finished = True
+            self.preview.stars.set_arrow("")
             self._present(ENROLLED if result == "success" else enroll_failed(message.get("detail")))
             self.dismiss_timeout = GLib.timeout_add(1_600 if result == "success" else 2_600, self._end_enrollment_view)
         return False

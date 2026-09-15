@@ -470,6 +470,64 @@ class MeshPreviewTests(unittest.TestCase):
         self.assertFalse(stars.face)
 
 
+class CoachingArrowTests(unittest.TestCase):
+    def test_each_instruction_names_its_arrow(self):
+        from facegate import guidance
+
+        self.assertEqual(guidance.arrow_for("Slowly turn your head to the left."), "turn-left")
+        self.assertEqual(guidance.arrow_for("A little more to the right…"), "turn-right")
+        self.assertEqual(guidance.arrow_for("A little higher…"), "tilt-up")
+        self.assertEqual(guidance.arrow_for("Lower your chin a little."), "tilt-down")
+        self.assertEqual(guidance.arrow_for("Move a little to the left."), "move-left")
+        self.assertEqual(guidance.arrow_for("Hold it there…"), "")
+
+    def test_an_off_centre_face_is_told_which_way_to_move_as_seen_in_the_mirror(self):
+        guide = GuidanceTests.guide(self)
+        guide.prompt("look-straight")
+        guide.pose(GuidanceTests.face(), (80, 140))  # the face sits right of centre
+        guide.status("not-centered")
+        self.assertEqual(guide.hint(), "Move a little to the left.")
+
+    def test_arrow_stars_point_the_right_way_and_leave_the_face_alone(self):
+        import numpy
+
+        from facegate.edge_hud import STAR_STYLE
+        from facegate.starlight import Starlight
+
+        stars = Starlight(PREVIEW_WIDTH, PREVIEW_HEIGHT, STAR_STYLE)
+        mesh_stars = set(stars.mesh_order[: len(stars.spots) - len(stars.arrow_stars)].tolist())
+        self.assertFalse(mesh_stars & set(stars.arrow_stars.tolist()))
+        for name, axis, sign in (("turn-left", 0, -1), ("turn-right", 0, 1), ("tilt-up", 1, -1), ("move-down", 1, 1)):
+            points, light = stars.arrow_shape(name, 0.0)
+            tip = points[stars.arrow_head & (stars.arrow_wing < 0.1)].mean(axis=0)
+            tail = points[~stars.arrow_head].mean(axis=0)
+            self.assertGreater((tip[axis] - tail[axis]) * sign, 5, name)
+            self.assertTrue(numpy.isfinite(points).all())
+        stars.set_arrow("turn-left")
+        for _ in range(60):
+            stars.advance(1 / 60)
+        self.assertGreater(float(stars.light[stars.arrow_stars].max()), 0.3)
+        stars.set_arrow("")
+        for _ in range(90):
+            stars.advance(1 / 60)
+        self.assertLess(stars.arrow_amount, 0.01)
+
+    def test_switching_cameras_keeps_the_face_where_it_was(self):
+        import numpy
+
+        framing = faces_mesh.Framing(PREVIEW_WIDTH, PREVIEW_HEIGHT)
+        colour = numpy.array([[300, 200, 0.5], [340, 260, 1.0], [320, 300, 0.2]], numpy.float32)
+        for _ in range(3):
+            before = framing.place(colour + [8, 0, 0], (640, 480))
+        # The IR camera sees the same face larger and elsewhere.
+        infrared = numpy.array([[100, 80, 0.5], [160, 170, 1.0], [130, 230, 0.2]], numpy.float32)
+        after = framing.place(infrared, (340, 340))
+        centre = lambda points: (points[:, :2].min(axis=0) + points[:, :2].max(axis=0)) / 2
+        self.assertLess(float(numpy.abs(centre(after) - centre(before)).max()), 1.0)
+        height = lambda points: float(numpy.ptp(points[:, 1]))
+        self.assertAlmostEqual(height(after), height(before), delta=1.0)
+
+
 class CameraTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
