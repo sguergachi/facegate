@@ -547,9 +547,10 @@ and grows to fit (surface height 440).
   chin, from behind the head to just past its front, where the arc moves
   across the view; a tilt is that arc up beside the cheek; a move is a
   straight arrow beside the face. Arrowheads are slim 8 × 10 pt chevrons laid out flat on the screen,
-  so they read at any angle. "Move a little closer" and "farther away" are
-  four corner brackets around the face, opening outward or closing in every
-  1.5 s. The guide nudges its way every 1.6 s and fades over 300 ms; while it
+  so they read at any angle. "Move a little closer" uses a head-shaped contour expanding toward the
+  viewer with outward-pointing chevrons, while "farther away" contracts with
+  inward-pointing chevrons. A faint destination outline makes the change in
+  scale legible. Each 1.8 s cycle fades before resetting. The guide nudges its way every 1.6 s and fades over 300 ms; while it
   shows, the face dims by 12% and the scan pauses, so one thing leads.
 - **Distance coaching:** Gaze needs the face box to span 25–78% of the
   frame's short side. FaceGate measures it on whichever camera is sending
@@ -667,3 +668,7 @@ Results also release the dust spatially as it fades.
 The optical atmosphere of [GMUNK's work](https://gmunk.com/GMUNK) complements
 the Apple Watch pairing reference: individual light, depth, and coherent motion.
 Use that as art direction, with the user's own face as the recognizable subject.
+
+The particle surface uses MediaPipe's canonical triangle connectivity, covering
+all 468 landmarks. Do not triangulate a captured frame: pose-dependent gaps can
+remove the forehead crown, and wrong edges bridge anatomical openings.

@@ -4,7 +4,7 @@ import unittest
 import numpy as np
 
 from facegate.edge_hud import STAR_STYLE
-from facegate.starlight import Starlight
+from facegate.starlight import Starlight, load_triangles, DISTANCE_SECONDS
 
 
 class StarlightMotionTests(unittest.TestCase):
@@ -61,3 +61,35 @@ class StarlightMotionTests(unittest.TestCase):
             stars.advance(1 / 60)
         self.assertFalse(stars.visible)
         self.assertEqual(stars.arrow, "")
+
+
+class StarlightGeometryTests(unittest.TestCase):
+    def test_topology_covers_every_landmark_and_forehead_boundary(self):
+        triangles = load_triangles()
+        self.assertIsNotNone(triangles)
+        np.testing.assert_array_equal(np.unique(triangles), np.arange(468))
+        # The crown must connect to both sides of the forehead. The previous
+        # camera-derived topology omitted this point and produced a notch.
+        edges = np.sort(np.concatenate([triangles[:, [0, 1]], triangles[:, [1, 2]], triangles[:, [2, 0]]]), axis=1)
+        for edge in ([10, 109], [10, 338]):
+            self.assertEqual(int(np.sum(np.all(edges == edge, axis=1))), 1)
+        _, counts = np.unique(edges, axis=0, return_counts=True)
+        self.assertTrue(np.all(counts <= 2), "No overlapping/non-manifold edges")
+
+    def test_distance_cues_grow_for_closer_and_shrink_for_back(self):
+        stars = Starlight(312, 208, STAR_STYLE)
+        for name, direction in (("closer", 1), ("back", -1)):
+            widths = []
+            for phase in (0.15, 0.6):
+                points, light = stars.arrow_shape(name, phase * DISTANCE_SECONDS)
+                self.assertTrue(np.isfinite(points).all())
+                self.assertTrue(np.isfinite(light).all())
+                outline = stars.guide_lines[1][0]
+                widths.append(float(np.ptp(outline[:, 0])))
+                # At the right side the tip points out for closer, in for back.
+                chevron = stars.guide_lines[-1][0]
+                self.assertGreater(direction * float(chevron[1, 0] - chevron[0, 0]), 0)
+                for line, _ in stars.guide_lines:
+                    self.assertTrue(np.all(line >= [0, 0]))
+                    self.assertTrue(np.all(line <= [312, 208]))
+            self.assertGreater(direction * (widths[1] - widths[0]), 0)

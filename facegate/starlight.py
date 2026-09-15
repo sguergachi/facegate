@@ -22,7 +22,7 @@ coaching guide, and a few out-of-focus motes drifting past the lens.
 
 To coach, a guide appears in precise hairline geometry with its own dust
 streaming along it: an arc orbiting the head for a turn or tilt, a straight
-arrow for a move, and corner brackets opening or closing for closer or back.
+arrow for a move, and a head contour approaching or receding for closer or back.
 Arrowheads lie flat on the screen so they read at any angle, and while the
 guide speaks the face steps back. When the scan ends the scene takes the
 result's colour and winks out, in random order.
@@ -54,8 +54,9 @@ gi.require_version("Gtk", "4.0")
 import numpy  # noqa: E402
 from gi.repository import Gdk, GLib, Graphene, Gsk, Gtk  # noqa: E402
 
-# The face's surface: Delaunay triangles over Face Mesh's 468 surface points,
-# made once from a frontal face.
+# Canonical MediaPipe connectivity over all 468 surface landmarks. A
+# triangulation fitted to one camera frame can omit the forehead or bridge
+# eye/mouth openings; topology must stay anatomical across every pose.
 TRIANGLES = Path(__file__).resolve().parent / "models" / "face_triangles.npy"
 # Face Mesh's features, drawn as soft strokes of dust: (point indices along the
 # stroke, share of the feature dust, scatter in face heights). The upper lids and the line of the mouth
@@ -142,8 +143,7 @@ GUIDE_DIMS_FACE = 0.12
 # it; a tilt is the same arc up the side of the head. Each is seen `GUIDE_VIEW`
 # radians off its plane, with perspective from `GUIDE_FOCAL` away. A move is a
 # straight arrow beside the face. Arrowheads are laid out flat on the screen,
-# so they read at any angle. Closer and back are four corner brackets around
-# the face, opening outward or closing in.
+# so they read at any angle. Closer and back use a head silhouette changing scale with radial chevrons.
 GUIDE_TAIL = -1.55
 GUIDE_HEAD = 0.5
 # A tilt's arc starts this much nearer the front, so it stays within the frame's height.
@@ -159,11 +159,11 @@ GUIDE_TAIL_SPREAD = 3.0
 GUIDE_FLOW = 0.45
 GUIDE_NUDGE_SECONDS = 1.6
 GUIDE_FADE_SECONDS = 0.3
-# The brackets' corners around the face, how far they travel, and their arms.
-BRACKET_BOX = (62.0, 68.0)
-BRACKET_TRAVEL = 10.0
-BRACKET_ARM = 13.0
-BRACKET_SECONDS = 1.5
+# A head silhouette moves through depth: larger means closer to the lens.
+# A quiet destination silhouette and explicit radial chevrons explain scale.
+DISTANCE_RADIUS = (69.0, 81.0)
+DISTANCE_SECONDS = 1.8
+DISTANCE_SCALE = (0.84, 1.12)
 ARROW_WING_SHARE = 0.16
 ARROWS = {
     "turn-left", "turn-right", "tilt-up", "tilt-down",
@@ -580,7 +580,7 @@ class Starlight:
         # A nudge its way: quick out, slow back.
         nudge = math.sin(math.pi * phase ** 0.6) ** 2
         if name in ("closer", "back"):
-            return self._brackets(name, clock)
+            return self._distance_guide(name, clock)
         kind, direction = name.split("-")
         forward = 1.0 if direction in ("right", "down") else -1.0
 
@@ -644,32 +644,53 @@ class Starlight:
         self.guide_lines = [(path, path_alpha), (chevron, numpy.full(3, 0.72, numpy.float32))]
         return points, numpy.clip(light, 0, 1.3).astype(numpy.float32)
 
-    def _brackets(self, name: str, clock: float) -> tuple[numpy.ndarray, numpy.ndarray]:
-        """Four corner brackets around the face: opening outward for closer, closing in for back."""
-        cycle = (clock / BRACKET_SECONDS) % 1.0
-        travel = cycle if name == "closer" else 1 - cycle
-        eased = 1 - (1 - travel) ** 2
-        # Each bracket appears, travels, and fades before the next begins.
-        alpha = smoothstep(0.0, 0.2, cycle) * (1 - smoothstep(0.65, 1.0, cycle))
-        half_x = BRACKET_BOX[0] + BRACKET_TRAVEL * eased
-        half_y = BRACKET_BOX[1] + BRACKET_TRAVEL * eased
-        corners = numpy.array([(-1, -1), (1, -1), (1, 1), (-1, 1)], numpy.float32)
+    def _distance_guide(self, name: str, clock: float) -> tuple[numpy.ndarray, numpy.ndarray]:
+        """A head contour approaches the viewer for closer, recedes for back."""
+        cycle = (clock / DISTANCE_SECONDS) % 1.0
+        progress = 1 - (1 - cycle) ** 3
+        closer = name == "closer"
+        low, high = DISTANCE_SCALE
+        scale = low + (high - low) * (progress if closer else 1 - progress)
+        destination = high if closer else low
+        alpha = float(smoothstep(0.0, 0.12, cycle) * (1 - smoothstep(0.72, 1.0, cycle)))
         centre = numpy.array([self.width / 2, self.height / 2], numpy.float32)
-        corner = corners[(self.arrow_seed * 4).astype(int) % 4]
-        along = (self.arrow_seed * 4) % 1.0
-        # Half the dust on each bracket's horizontal arm, half on its vertical.
-        horizontal = self.arrow_side > 0
-        at = centre + corner * [half_x, half_y]
-        arm = numpy.where(horizontal[:, None], numpy.stack([-corner[:, 0], numpy.zeros(len(corner))], axis=1), numpy.stack([numpy.zeros(len(corner)), -corner[:, 1]], axis=1))
-        points = at + arm * (along * BRACKET_ARM)[:, None] + self.arrow_scatter * 0.45
-        light = alpha * (1 - 0.5 * along) * (0.4 + 0.9 * self.magnitude[self.arrow_stars])
-        lines = []
-        for x, y in corners:
-            start = centre + numpy.array([x, y]) * [half_x, half_y]
-            polyline = numpy.array([start + [-x * BRACKET_ARM, 0], start, start + [0, -y * BRACKET_ARM]], numpy.float32)
-            lines.append((polyline, numpy.full(3, 0.8 * alpha, numpy.float32)))
-        self.guide_lines = lines
-        return points.astype(numpy.float32), numpy.clip(light, 0, 1.3).astype(numpy.float32)
+
+        def contour(angle: numpy.ndarray, size: float) -> numpy.ndarray:
+            # Broad forehead, narrower jaw, rounded chin: a head, not a ring.
+            width = DISTANCE_RADIUS[0] * (0.88 + 0.12 * numpy.cos(angle))
+            return centre + size * numpy.stack([
+                width * numpy.sin(angle), -DISTANCE_RADIUS[1] * numpy.cos(angle),
+            ], axis=1)
+
+        angles = numpy.linspace(0, math.tau, 97)
+        target = contour(angles, destination)
+        moving = contour(angles, scale)
+        self.guide_lines = [
+            (target, numpy.full(len(target), 0.16, numpy.float32)),
+            (moving, numpy.full(len(moving), 0.52 * alpha, numpy.float32)),
+        ]
+        # Outward/inward chevrons make direction legible even in a still frame.
+        direction = 1 if closer else -1
+        tips = []
+        for side in (-1, 1):
+            tip = centre + [side * (DISTANCE_RADIUS[0] * scale + 13), 0]
+            heading = numpy.array([side * direction, 0], numpy.float32)
+            wings = numpy.array([tip - heading * 6 + [0, -4], tip, tip - heading * 6 + [0, 4]], numpy.float32)
+            self.guide_lines.append((wings, numpy.full(3, 0.8 * alpha, numpy.float32)))
+            tips.append((tip, heading))
+
+        # Dust runs along the changing silhouette; some collects on each arrow.
+        angle = math.tau * ((self.arrow_seed + clock * 0.07) % 1)
+        points = contour(angle, scale) + self.arrow_scatter * 0.5
+        light = alpha * (0.18 + 0.35 * self.magnitude[self.arrow_stars])
+        wing = self.arrow_wing_star
+        for side, (tip, heading) in zip((-1, 1), tips):
+            selected = wing & (self.arrow_side == side)
+            run = (self.arrow_seed[selected] * 7) % 1
+            wing_side = numpy.where(self.arrow_scatter[selected, 0] < 0, -1, 1)
+            points[selected] = tip - heading * (run * 6)[:, None] + numpy.stack([numpy.zeros(len(run)), wing_side * run * 4], axis=1)
+            light[selected] = alpha * 0.55
+        return points.astype(numpy.float32), light.astype(numpy.float32)
 
     # Motion ---------------------------------------------------------------------
 
