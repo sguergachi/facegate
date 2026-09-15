@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from facegate import faces, faces_helper
+from facegate import cameras, faces, faces_helper
 from facegate.edge_hud import HudServer
 from facegate.protocol import MAX_STREAM_BYTES, PREVIEW_HEIGHT, PREVIEW_WIDTH, decode, encode
 
@@ -238,6 +238,92 @@ class PreviewTests(unittest.TestCase):
         kinds = [event["event"] for event in events]
         self.assertEqual(kinds.count("frame"), 1)
         self.assertEqual(kinds[-2:], ["progress", "completed"])
+
+class CameraTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.sysfs = Path(self.directory.name)
+
+    def tearDown(self):
+        self.directory.cleanup()
+
+    def node(self, name, modalias=None):
+        device = self.sysfs / name / "device"
+        device.mkdir(parents=True)
+        if modalias:
+            (device / "modalias").write_text(modalias + "\n")
+
+    def test_the_luma_only_node_is_the_infrared_camera(self):
+        # A BRIO: colour, metadata, IR, metadata, all under one USB id.
+        for name in ("video0", "video1", "video2", "video3"):
+            self.node(name, "usb:v046Dp085Ed0317dcEFdsc02dp01ic0Eisc02ip00in03")
+        formats = {"/dev/video0": [b"YUYV", b"MJPG"], "/dev/video2": [b"GREY"]}
+        found = cameras.find_ir_camera(self.sysfs, lambda node: formats.get(node, []))
+        self.assertEqual(found, "usb:046d:085e")
+
+    def test_colour_cameras_are_not_mistaken_for_infrared(self):
+        self.node("video0", "usb:v1234p5678")
+        found = cameras.find_ir_camera(self.sysfs, lambda _node: [b"YUYV", b"GREY"])
+        self.assertIsNone(found)
+
+    def test_a_non_usb_ir_node_is_named_by_path(self):
+        self.node("video10")
+        self.node("video4")
+        found = cameras.find_ir_camera(self.sysfs, lambda node: [b"Y16 "] if node == "/dev/video10" else [])
+        self.assertEqual(found, "/dev/video10")
+
+    class Gaze:
+        def __init__(self, ir=""):
+            self.settings = {"rgb": "primary", "ir": ir, "emitter_enabled": False, "dark_luma": 20, "parallel": "never"}
+            self.changes = []
+
+        def cameras(self):
+            return dict(self.settings)
+
+        def set_cameras(self, **changes):
+            self.changes.append(changes)
+
+    def test_gaze_is_given_the_infrared_camera_it_lacks(self):
+        gaze = self.Gaze()
+        cameras.configure_ir_camera(gaze, lambda: "usb:046d:085e")
+        self.assertEqual(gaze.changes, [{"ir": "usb:046d:085e", "emitter_enabled": True}])
+
+    def test_a_chosen_infrared_camera_is_never_replaced(self):
+        gaze = self.Gaze(ir="/dev/video6")
+        cameras.configure_ir_camera(gaze, lambda: "usb:046d:085e")
+        self.assertEqual(gaze.changes, [])
+
+    def test_only_the_camera_struct_changes_in_gaze_config(self):
+        from gi.repository import GLib
+
+        signature = "((ss)(sssdds)(ssbys)(bbbbbtts)(ud)(bdd)(b))"
+        config = (
+            ("cpu", "cpu"),
+            ("medium", "", "", 0.0, 0.0, ""),
+            ("primary", "", False, 20, "never"),
+            (True, True, False, False, False, 0, 0, "screen_lock"),
+            (2, 0.25),
+            (True, 0.8, 2.0),
+            (True,),
+        )
+
+        class ConfigBus:
+            written = None
+
+            def call_sync(self, _service, _path, _interface, method, parameters, *_rest):
+                if method == "Get":
+                    return GLib.Variant("(v)", (GLib.Variant(signature, config),))
+                self.written = parameters.unpack()
+                return GLib.Variant("()", ())
+
+        bus = ConfigBus()
+        faces.GazeClient(bus=bus).set_cameras(ir="usb:046d:085e", emitter_enabled=True)
+        interface, name, value = bus.written
+        self.assertEqual((interface, name), ("com.gundulabs.Gaze", "Config"))
+        expected = list(config)
+        expected[2] = ("primary", "usb:046d:085e", True, 20, "never")
+        self.assertEqual(value, tuple(expected))
+
 
 class StreamTests(unittest.TestCase):
     def test_a_frame_line_fits_the_stream_limit(self):

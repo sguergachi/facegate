@@ -111,7 +111,11 @@ Run setup as your normal user. It installs:
    module.
 3. FaceGate's native consent module and UI, then replaces standalone Howdy/Gaze
    rules in the `sudo` and polkit PAM services with one fail-closed managed block.
-4. The onboarding experience in a top-edge island, where you can add a face.
+4. Your infrared camera, if it has one, as Gaze's IR camera. Gaze ships
+   colour-only; the installer finds the luma-only V4L2 node and sets it through
+   Gaze's own `Config` API, keeping any IR camera you already chose. Gaze then
+   matches colour and IR together, and the enrollment preview shows both.
+5. The onboarding experience in a top-edge island, where you can add a face.
 
 `setup.sh` no longer installs, calls, or configures Howdy. If Howdy is already
 installed, the migration removes its active rules from the two PAM services but

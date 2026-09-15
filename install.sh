@@ -111,6 +111,11 @@ systemctl daemon-reload
 systemctl enable --now gazed.service
 systemctl try-restart polkit.service >/dev/null 2>&1 || true
 
+# Gaze ships colour-only. Hand it the infrared camera, if there is one, through
+# its own validated Config API; a camera already chosen for IR is kept.
+python3 -I -c 'import sys; sys.path.insert(0, "/usr/local/lib/facegate"); from facegate.cameras import main; raise SystemExit(main())' ||
+  echo "Continuing without infrared; run the installer again once gazed is running." >&2
+
 target_uid=$(id -u "${target_user}")
 user_systemctl=(runuser -u "${target_user}" -- env
   "XDG_RUNTIME_DIR=/run/user/${target_uid}"

@@ -28,6 +28,12 @@ from .protocol import PREVIEW_HEIGHT, PREVIEW_WIDTH
 GAZE_SERVICE = "com.gundulabs.Gaze"
 GAZE_PATH = "/com/gundulabs/Gaze"
 GAZE_INTERFACE = "com.gundulabs.Gaze"
+PROPERTIES_INTERFACE = "org.freedesktop.DBus.Properties"
+# Gaze's Config property is (inference, security, cameras, ...); FaceGate only
+# ever touches the cameras struct and passes everything else back untouched.
+CONFIG_PREFIX = "((ss)(sssdds)(ssbys)"
+CAMERAS_INDEX = 2
+CAMERA_FIELDS = ("rgb", "ir", "emitter_enabled", "dark_luma", "parallel")
 DBUS_TIMEOUT_MS = 35_000
 ENROLL_TIMEOUT_SECONDS = 90
 LABEL_CHARS = 24
@@ -194,12 +200,20 @@ class GazeClient:
             raise GazeError("Couldn't connect to the Gaze daemon.") from error
         self.timeout_ms = max(250, min(int(timeout_ms), DBUS_TIMEOUT_MS))
 
-    def _call(self, method: str, parameters: GLib.Variant, reply: str) -> tuple[Any, ...]:
+    def _call(
+        self, method: str, parameters: GLib.Variant, reply: str, interface: str = GAZE_INTERFACE
+    ) -> tuple[Any, ...]:
+        result = self._call_variant(method, parameters, reply, interface)
+        return result.unpack()
+
+    def _call_variant(
+        self, method: str, parameters: GLib.Variant, reply: str, interface: str = GAZE_INTERFACE
+    ) -> GLib.Variant:
         try:
             result = self.bus.call_sync(
                 GAZE_SERVICE,
                 GAZE_PATH,
-                GAZE_INTERFACE,
+                interface,
                 method,
                 parameters,
                 GLib.VariantType.new(reply),
@@ -210,7 +224,36 @@ class GazeClient:
         except GLib.Error as error:
             message = error.message.rsplit(":", 1)[-1].strip()
             raise GazeError(message or "Gaze didn't answer.") from error
-        return result.unpack()
+        return result
+
+    def _config(self) -> GLib.Variant:
+        return self._call_variant(
+            "Get", GLib.Variant("(ss)", (GAZE_INTERFACE, "Config")), "(v)", PROPERTIES_INTERFACE
+        ).get_child_value(0).get_variant()
+
+    def cameras(self) -> dict[str, Any]:
+        """Gaze's camera settings: rgb, ir, emitter_enabled, dark_luma, parallel."""
+        config = self._config()
+        if not config.get_type_string().startswith(CONFIG_PREFIX):
+            raise GazeError("This Gaze version's settings aren't supported.")
+        return dict(zip(CAMERA_FIELDS, config.unpack()[CAMERAS_INDEX]))
+
+    def set_cameras(self, **changes: Any) -> None:
+        """Change camera settings through Gaze, which validates and saves them."""
+        config = self._config()
+        signature = config.get_type_string()
+        if not signature.startswith(CONFIG_PREFIX):
+            raise GazeError("This Gaze version's settings aren't supported.")
+        values = list(config.unpack())
+        cameras = dict(zip(CAMERA_FIELDS, values[CAMERAS_INDEX]))
+        cameras.update(changes)
+        values[CAMERAS_INDEX] = tuple(cameras[field] for field in CAMERA_FIELDS)
+        self._call(
+            "Set",
+            GLib.Variant("(ssv)", (GAZE_INTERFACE, "Config", GLib.Variant(signature, tuple(values)))),
+            "()",
+            PROPERTIES_INTERFACE,
+        )
 
     def list_faces(self, username: str) -> list[tuple[str, int, bool, bool]]:
         try:
