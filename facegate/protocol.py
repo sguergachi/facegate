@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
+from pathlib import Path
 from typing import Any
 
+SOCKET_NAME = "facegate.sock"
 MAX_MESSAGE_BYTES = 4_096
 # An enrollment keeps its connection open and streams preview frames: one
 # greyscale PREVIEW_WIDTH x PREVIEW_HEIGHT image, base64, per line.
@@ -26,3 +29,10 @@ def decode(raw: bytes, limit: int = MAX_MESSAGE_BYTES) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError("FaceGate messages must be JSON objects")
     return value
+
+
+def default_socket_path() -> Path:
+    if os.environ.get("FACEGATE_SOCKET"):
+        # Lets a checkout's HUD and clients talk without touching the installed one.
+        return Path(os.environ["FACEGATE_SOCKET"])
+    return Path(os.environ.get("XDG_RUNTIME_DIR", "/run/user/%d" % os.getuid())) / SOCKET_NAME

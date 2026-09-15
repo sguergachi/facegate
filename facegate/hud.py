@@ -2,7 +2,7 @@
 """FaceGate's user-session HUD service.
 
 The service owns a 0600 UNIX socket in the logged-in user's runtime directory.
-PAM asks it for consent; a successful consent only starts Howdy.  It is never an
+PAM asks it for consent; a successful consent only starts Gaze. It is never an
 authentication decision, so an untrusted client cannot obtain sudo by replying
 to this socket.
 """

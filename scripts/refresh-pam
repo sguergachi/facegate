@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+# Rebuild FaceGate's fail-closed Gaze gate after install or a Gaze package update.
+set -euo pipefail
+
+if [[ ${EUID} -ne 0 ]]; then
+  echo "facegate refresh-pam must run as root" >&2
+  exit 1
+fi
+[[ -f /usr/local/lib/security/facegate/consent.so ]] || {
+  echo "FaceGate's native consent module is missing; refusing to change PAM." >&2
+  exit 1
+}
+
+gaze_pam=
+gaze_pam_real=
+for candidate in /usr/lib/security/pam_gaze.so /usr/lib64/security/pam_gaze.so /lib/security/pam_gaze.so /lib/*/security/pam_gaze.so; do
+  if [[ -f ${candidate} ]]; then
+    gaze_pam=${candidate}
+    gaze_pam_real=$(readlink -f "${candidate}")
+    break
+  fi
+done
+[[ -n ${gaze_pam} ]] || {
+  echo "Gaze's official pam_gaze.so is missing; leaving password authentication unchanged." >&2
+  exit 1
+}
+if [[ $(stat -c '%u' "${gaze_pam_real}") != 0 ]] ||
+  find "${gaze_pam_real}" -maxdepth 0 -perm /022 -print -quit | grep -q .; then
+  echo "Refusing ${gaze_pam}: the Gaze PAM module is not securely root-owned." >&2
+  exit 1
+fi
+install -d -o root -g root -m 0700 /etc/facegate
+work_dir=$(mktemp -d)
+cleanup() { rm -rf -- "${work_dir}"; }
+trap cleanup EXIT
+
+pam_begin='# FaceGate Gaze consent gate - BEGIN'
+pam_end='# FaceGate Gaze consent gate - END'
+pam_block=$(cat <<EOF
+# FaceGate Gaze consent gate - BEGIN
+# FaceGate can only skip or start the scan; official pam_gaze.so owns the verdict.
+auth  [success=ignore default=1]  /usr/local/lib/security/facegate/consent.so consent
+auth  [success=2 default=ignore]  ${gaze_pam}
+auth  [default=ignore]            /usr/local/lib/security/facegate/consent.so notify-failure
+auth  [default=2]                 pam_deny.so
+auth  [default=ignore]            /usr/local/lib/security/facegate/consent.so notify-success
+auth  sufficient                  pam_permit.so
+# FaceGate Gaze consent gate - END
+EOF
+)
+
+write_gated_pam() {
+  local source=$1 target=$2 label=$3 temporary staged backup
+  temporary="${work_dir}/${label}.pam"
+  backup="/etc/facegate/${label}.pam.$(date +%Y%m%d-%H%M%S-%N).bak"
+  cp -a "${target}" "${backup}" 2>/dev/null || cp -a "${source}" "${backup}"
+  awk -v begin="${pam_begin}" -v end="${pam_end}" -v block="${pam_block}" '
+    $0 == begin { managed = 1; next }
+    $0 == end   { managed = 0; next }
+    managed { next }
+    /^# Managed by FaceGate:.*Howdy gated[.]$/ { next }
+    ($0 ~ /\/lib\/security\/howdy\/pam[.]py([[:space:]]|$)/ ||
+     $0 ~ /pam_howdy[.]so([[:space:]]|$)/ ||
+     $0 ~ /\/usr\/local\/lib\/security\/facegate\/pam[.]py([[:space:]]|$)/ ||
+     $0 ~ /\/usr\/local\/lib\/security\/facegate\/gaze-auth[.]so([[:space:]]|$)/ ||
+     $0 ~ /\/usr\/local\/lib\/security\/facegate\/consent[.]so([[:space:]]|$)/) { next }
+    /^[[:space:]]*auth[[:space:]]/ &&
+      $0 ~ /pam_gaze(_grosshack)?[.]so([[:space:]]|$)/ { next }
+    !added && /^[[:space:]]*auth[[:space:]]/ { print block; added = 1 }
+    { print }
+    END { if (!added || managed) exit 42 }
+  ' "${source}" > "${temporary}" || {
+    echo "Refusing to change ${target}: could not construct a complete auth stack." >&2
+    exit 1
+  }
+  [[ $(grep -Fxc "${pam_begin}" "${temporary}") -eq 1 ]] || {
+    echo "Refusing to install an invalid FaceGate PAM block in ${target}." >&2
+    exit 1
+  }
+  staged=$(mktemp "${target}.facegate.XXXXXX")
+  install -o root -g root -m 0644 "${temporary}" "${staged}"
+  mv -f -- "${staged}" "${target}"
+  echo "Updated ${target}; backup: ${backup}"
+}
+
+sudo_pam=/etc/pam.d/sudo
+[[ -f ${sudo_pam} ]] || {
+  echo "Refusing to install: ${sudo_pam} does not exist." >&2
+  exit 1
+}
+write_gated_pam "${sudo_pam}" "${sudo_pam}" sudo
+
+polkit_pam=/etc/pam.d/polkit-1
+polkit_vendor=/usr/lib/pam.d/polkit-1
+if [[ -f ${polkit_pam} ]]; then
+  polkit_source=${polkit_pam}
+elif [[ -f ${polkit_vendor} ]]; then
+  polkit_source=${polkit_vendor}
+else
+  polkit_source="${work_dir}/polkit-1.base"
+  cat > "${polkit_source}" <<'EOF'
+#%PAM-1.0
+auth       include      system-auth
+account    include      system-auth
+password   include      system-auth
+session    include      system-auth
+EOF
+fi
+write_gated_pam "${polkit_source}" "${polkit_pam}" polkit-1
+
+systemctl try-restart polkit.service >/dev/null 2>&1 || true

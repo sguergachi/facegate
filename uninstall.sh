@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Restores the original sudo PAM configuration from FaceGate's latest backup.
+# Remove FaceGate while leaving Gaze installed and directly usable.
 set -euo pipefail
 
 if [[ ${EUID} -ne 0 ]]; then
@@ -7,34 +7,80 @@ if [[ ${EUID} -ne 0 ]]; then
   exit 1
 fi
 
-backup=$(find /etc/facegate -maxdepth 1 -name 'sudo.pam.*.bak' -type f -printf '%T@ %p\n' | sort -nr | head -n 1 | cut -d' ' -f2-)
-if [[ -z ${backup} ]]; then
-  echo "No FaceGate sudo PAM backup found; no PAM file was changed." >&2
-  exit 1
-fi
-install -m 0644 "${backup}" /etc/pam.d/sudo
-polkit_pam=/etc/pam.d/polkit-1
-if [[ -f ${polkit_pam} ]] && head -n 1 "${polkit_pam}" | grep -Fq '# Managed by FaceGate'; then
-  rm -f "${polkit_pam}"
-  echo "Removed ${polkit_pam}; polkit uses /usr/lib/pam.d/polkit-1 again."
-else
-  polkit_backup=$(find /etc/facegate -maxdepth 1 -name 'polkit-1.pam.*.bak' -type f -printf '%T@ %p\n' | sort -nr | head -n 1 | cut -d' ' -f2-)
-  if [[ -n ${polkit_backup} ]]; then
-    install -m 0644 "${polkit_backup}" "${polkit_pam}"
-    echo "Restored ${polkit_pam} from ${polkit_backup}."
+pam_begin='# FaceGate Gaze consent gate - BEGIN'
+pam_end='# FaceGate Gaze consent gate - END'
+upstream_rule=
+for candidate in /usr/lib/security/pam_gaze.so /usr/lib64/security/pam_gaze.so /lib/security/pam_gaze.so /lib/*/security/pam_gaze.so; do
+  [[ -f ${candidate} ]] && { upstream_rule='auth        sufficient    pam_gaze.so'; break; }
+done
+work_dir=$(mktemp -d)
+cleanup() { rm -rf -- "${work_dir}"; }
+trap cleanup EXIT
+
+# Replace FaceGate's whole managed block with Gaze's normal upstream rule. This
+# does not restore old Howdy references from historical backups.
+ungate_pam() {
+  local target=$1 label=$2 temporary staged
+  [[ -f ${target} ]] || return 0
+  grep -Fxq "${pam_begin}" "${target}" || return 0
+  temporary="${work_dir}/${label}.pam"
+  awk -v begin="${pam_begin}" -v end="${pam_end}" -v replacement="${upstream_rule}" '
+    $0 == begin {
+      if (replacement != "") print replacement
+      managed = 1
+      found = 1
+      next
+    }
+    $0 == end { managed = 0; next }
+    managed { next }
+    { print }
+    END { if (!found || managed) exit 42 }
+  ' "${target}" > "${temporary}" || {
+    echo "Refusing to alter malformed FaceGate block in ${target}." >&2
+    return 1
+  }
+  staged=$(mktemp "${target}.facegate.XXXXXX")
+  install -o root -g root -m 0644 "${temporary}" "${staged}"
+  mv -f -- "${staged}" "${target}"
+  if [[ -n ${upstream_rule} ]]; then
+    echo "Removed FaceGate's gate from ${target}; Gaze remains enabled."
+  else
+    echo "Removed FaceGate's gate from ${target}; Gaze is not installed."
   fi
-fi
+}
+
+ungate_pam /etc/pam.d/sudo sudo
+ungate_pam /etc/pam.d/polkit-1 polkit-1
+
 target_user=${SUDO_USER:-}
 if [[ -n ${target_user} && ${target_user} != root ]]; then
   target_uid=$(id -u "${target_user}")
-  # Stop FaceGate's polkit agent and give the session back to KDE's.
-  runuser -u "${target_user}" -- env \
-    XDG_RUNTIME_DIR="/run/user/${target_uid}" \
-    DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${target_uid}/bus" \
-    sh -c 'systemctl --user disable --now facegate.service 2>/dev/null; systemctl --user unmask plasma-polkit-agent.service 2>/dev/null; systemctl --user start plasma-polkit-agent.service 2>/dev/null || true'
+  user_systemctl=(runuser -u "${target_user}" -- env
+    "XDG_RUNTIME_DIR=/run/user/${target_uid}"
+    "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${target_uid}/bus"
+    systemctl --user)
+  "${user_systemctl[@]}" disable --now facegate.service 2>/dev/null || true
+  "${user_systemctl[@]}" disable --now facegate-tray.service 2>/dev/null || true
+  "${user_systemctl[@]}" unmask plasma-polkit-agent.service 2>/dev/null || true
+  "${user_systemctl[@]}" start plasma-polkit-agent.service 2>/dev/null || true
 fi
-rm -f /usr/local/bin/facegate-hud /usr/local/bin/facegate-settings /usr/local/lib/security/facegate/pam.py \
-  /usr/local/lib/systemd/user/facegate.service /usr/share/polkit-1/actions/org.facegate.faces.policy \
-  /usr/local/share/applications/org.facegate.Settings.desktop
+
+rm -f \
+  /usr/local/bin/facegate-hud \
+  /usr/local/bin/facegate-settings \
+  /usr/local/bin/facegate-tray \
+  /usr/local/lib/systemd/user/facegate.service \
+  /usr/local/lib/systemd/user/facegate-tray.service \
+  /usr/local/share/applications/org.facegate.Settings.desktop \
+  /usr/local/share/icons/hicolor/scalable/apps/facegate-symbolic.svg \
+  /etc/pacman.d/hooks/facegate-gaze.hook \
+  /usr/share/polkit-1/actions/org.facegate.faces.policy
 rm -rf /usr/local/lib/facegate /usr/local/lib/security/facegate
-echo "Restored /etc/pam.d/sudo from ${backup}; KDE's polkit agent is back in charge of admin prompts."
+systemctl daemon-reload
+systemctl try-restart polkit.service >/dev/null 2>&1 || true
+
+if [[ -n ${upstream_rule} ]]; then
+  echo "FaceGate removed. Gaze and its face templates were left intact."
+else
+  echo "FaceGate removed. The normal password stacks remain active."
+fi

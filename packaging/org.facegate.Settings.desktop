@@ -7,5 +7,5 @@ Exec=/usr/local/bin/facegate-settings
 Icon=user-identity
 Terminal=false
 Categories=Settings;Security;
-Keywords=face;howdy;sudo;biometric;camera;
+Keywords=face;gaze;sudo;biometric;camera;
 StartupNotify=true

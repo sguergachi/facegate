@@ -1,0 +1,11 @@
+[Unit]
+Description=FaceGate tray menu
+After=facegate.service
+PartOf=facegate.service
+
+[Service]
+Type=simple
+Environment=GDK_BACKEND=wayland
+ExecStart=/usr/local/bin/facegate-tray
+Restart=on-failure
+RestartSec=2

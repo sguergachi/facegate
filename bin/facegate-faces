@@ -1,5 +1,5 @@
 #!/usr/bin/python3 -I
-"""The root helper behind FaceGate Settings, started through pkexec."""
+"""Unprivileged FaceGate Settings client for Gaze's system daemon."""
 
 import sys
 

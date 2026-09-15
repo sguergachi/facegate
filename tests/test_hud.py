@@ -1,12 +1,34 @@
+import socket
 import unittest
+from unittest import mock
 
 import cairo
 
-from facegate.edge_hud import APPROVAL, ISLAND_WIDTH, approval_view, MARK_PROFILES, MarkModel, Spring, Tween, island_path, mark_values, paint_mark, ring_head
+from facegate.edge_hud import APPROVAL, ISLAND_WIDTH, approval_view, face_scan_available, MARK_PROFILES, MarkModel, Spring, Tween, island_path, mark_values, paint_mark, ring_head
 from facegate.hud import approval_timeout_ms
 
 
 class HudRequestTests(unittest.TestCase):
+    def test_no_gaze_enrollment_skips_straight_to_password(self):
+        import os
+        import pwd
+
+        username = pwd.getpwuid(os.getuid()).pw_name
+
+        class Faces:
+            def __init__(self, records=None, error=None):
+                self.records = records or []
+                self.error = error
+
+            def list_faces(self, requested):
+                if self.error:
+                    raise self.error
+                return self.records
+
+        self.assertFalse(face_scan_available(username, Faces()))
+        self.assertTrue(face_scan_available(username, Faces([("Face", 5, True, True)])))
+        self.assertFalse(face_scan_available("a-different-user", Faces([("Face", 5, True, True)])))
+
     def test_approval_timeout_is_clamped_without_an_int_base_error(self):
         self.assertEqual(approval_timeout_ms(12_000), 12_000)
         self.assertEqual(approval_timeout_ms(80_000), 30_000)
@@ -14,7 +36,7 @@ class HudRequestTests(unittest.TestCase):
 
     def test_presence_mark_draws_all_interaction_states_and_blends(self):
         """The animated mark must never disappear because one state raises."""
-        states = ("approval", "scanning", "success", "failure")
+        states = tuple(MARK_PROFILES)
         for previous in states:
             for state in states:
                 for transition in (0.0, 0.5, 1.0):
@@ -137,6 +159,12 @@ class PolkitCopyTests(unittest.TestCase):
         with_command = approval_view({"service": "polkit-1", "app": "Konsole", "command": "pkexec true", "message": "Authentication is needed to run true"})
         self.assertNotIn("Authentication is needed", with_command.detail)
 
+    def test_account_lock_message_is_preserved_without_helper_chatter(self):
+        from facegate.polkit_agent import LOCKED_PASSWORD, friendly_pam_message
+
+        self.assertEqual(friendly_pam_message("The account is locked due to 3 failed logins."), LOCKED_PASSWORD)
+        self.assertEqual(friendly_pam_message("Authentication failure"), "")
+
 
 class RequesterModuleTests(unittest.TestCase):
     def test_command_line_is_quoted_flattened_and_bounded(self):
@@ -164,3 +192,111 @@ class RequesterModuleTests(unittest.TestCase):
         self.assertEqual(chosen.get_uid(), os.getuid())
         self.assertEqual(choose_identity([("unix-user", {"uid": 0})]).get_uid(), 0)
         self.assertIsNone(choose_identity([("unix-group", {"gid": 10})]))
+
+
+class SudoPasswordTests(unittest.TestCase):
+    def setUp(self):
+        from facegate import edge_hud
+
+        self.edge_hud = edge_hud
+        hud = edge_hud.EdgeHud.__new__(edge_hud.EdgeHud)
+        hud.pending = hud.enrollment = hud.expected_enrollment = hud.polkit = hud.view = None
+        hud.sudo_password = hud.sudo_password_watch = hud.sudo_lock_timer = hud.dismiss_timeout = hud.enrollment_start = None
+        hud.silenced = False
+        hud.config_active = False
+        hud.enabled = True
+        hud.present_password = mock.Mock()
+        hud.dismiss = mock.Mock(return_value=False)
+        self.hud = hud
+        self.pam_side, self.hud_side = socket.socketpair()
+
+    def tearDown(self):
+        if self.hud.sudo_password_watch:
+            self.edge_hud.GLib.source_remove(self.hud.sudo_password_watch)
+        self.pam_side.close()
+        self.hud_side.close()
+
+    def test_typed_password_goes_back_to_pam_and_waits_for_its_verdict(self):
+        self.hud.handle_request({"phase": "password", "requester": {"app": "Konsole"}}, self.hud_side)
+        on_password = self.hud.present_password.call_args[0][1]
+        on_password("hunter2")
+        self.assertEqual(self.pam_side.recv(4096), b'{"password":"hunter2"}\n')
+        self.assertIsNone(self.hud.sudo_password)
+        self.edge_hud.GLib.source_remove(self.hud.dismiss_timeout)
+
+    def test_escape_hands_sudo_back_to_its_own_prompt(self):
+        self.hud.handle_request({"phase": "password"}, self.hud_side)
+        self.edge_hud.EdgeHud.cancel(self.hud)
+        self.assertEqual(self.pam_side.recv(4096), b'{"password":null}\n')
+        self.hud.dismiss.assert_called_once()
+
+    def test_a_locked_sudo_says_when_instead_of_taking_a_password(self):
+        import time
+
+        self.hud._show_sudo_lock = mock.Mock()
+        until = time.time() + 300
+        self.hud.handle_request({"phase": "password", "locked_until": until}, self.hud_side)
+        self.hud._show_sudo_lock.assert_called_once_with(None, False, until)
+        self.hud.present_password.assert_not_called()
+        # An expired lock just asks for the password.
+        self.hud.sudo_password = None
+        self.edge_hud.GLib.source_remove(self.hud.sudo_password_watch)
+        self.hud.handle_request({"phase": "password", "locked_until": time.time() - 5}, socket.socketpair()[1])
+        self.hud.present_password.assert_called_once()
+
+    def test_a_retry_always_starts_with_an_empty_field(self):
+        hud = self.edge_hud.EdgeHud.__new__(self.edge_hud.EdgeHud)
+        hud.silenced = False
+        hud.entry = mock.Mock()
+        hud.mark = mock.Mock()
+        hud._present = mock.Mock()
+        hud.password_busy = mock.Mock()
+        with mock.patch.object(self.edge_hud.GLib, "timeout_add"):
+            self.edge_hud.EdgeHud.present_password(hud, {"app": "paru"}, lambda _p: None, lambda: None, error=True)
+        hud.entry.set_text.assert_called_once_with("")
+        hud.mark.set_state.assert_called_once_with("denied")
+
+    def test_approval_waits_until_answered(self):
+        self.hud.approval_timeout = None
+        self.hud.present_approval = mock.Mock()
+        self.hud.handle_request({"id": "a", "phase": "approval", "requester": {}}, self.hud_side)
+        self.hud.present_approval.assert_called_once()
+        self.assertIsNone(self.hud.approval_timeout)
+        # Ctrl+C on sudo closes its end: the island goes, rather than waiting forever.
+        self.pam_side.close()
+        self.hud._approval_hung_up()
+        self.assertIsNone(self.hud.pending)
+        self.hud.dismiss.assert_called_once()
+
+    def test_turned_off_never_shows_and_lets_pam_use_the_usual_prompt(self):
+        self.hud.enabled = False
+        self.hud.present_approval = mock.Mock()
+        self.hud.handle_request({"phase": "password"}, self.hud_side)
+        self.assertEqual(self.pam_side.recv(4096), b'{"password":null,"reason":"disabled"}\n')
+        pam_side, hud_side = socket.socketpair()
+        self.hud.handle_request({"phase": "approval"}, hud_side)
+        self.assertEqual(pam_side.recv(4096), b'{"approved":false,"reason":"disabled"}\n')
+        pam_side.close()
+        self.hud.present_password.assert_not_called()
+        self.hud.present_approval.assert_not_called()
+
+
+class PreferencesTests(unittest.TestCase):
+    def test_placement_and_enabled_defaults_and_updates_keep_other_keys(self):
+        import tempfile
+        from pathlib import Path
+
+        from facegate import preferences
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.json"
+            self.assertTrue(preferences.enabled(preferences.load(path)))
+            self.assertEqual(preferences.placement({}), ("follow", ""))
+            preferences.save({"onboarded": True}, path)
+            preferences.update(path, enabled=False, placement="fixed", monitor="DP-1")
+            settings = preferences.load(path)
+            self.assertTrue(settings["onboarded"])
+            self.assertFalse(preferences.enabled(settings))
+            self.assertEqual(preferences.placement(settings), ("fixed", "DP-1"))
+            # A fixed choice without a monitor still follows the pointer.
+            self.assertEqual(preferences.placement({"placement": "fixed"}), ("follow", ""))

@@ -1,0 +1,11 @@
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Package
+Target = gaze-bin
+Target = gaze
+
+[Action]
+Description = Restoring FaceGate's Gaze consent boundary...
+When = PostTransaction
+Exec = /usr/local/lib/facegate/refresh-pam

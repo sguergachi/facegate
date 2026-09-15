@@ -1,0 +1,10 @@
+#!/usr/bin/env python3
+"""Launch the installed FaceGate tray companion."""
+
+import sys
+
+sys.path.insert(0, "/usr/local/lib/facegate")
+
+from facegate.tray import main
+
+raise SystemExit(main())

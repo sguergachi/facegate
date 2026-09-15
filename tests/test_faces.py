@@ -4,39 +4,41 @@ import os
 import socket
 import tempfile
 import unittest
-
-import cairo
+from pathlib import Path
 
 from facegate import faces, faces_helper
-from facegate.edge_hud import PREVIEW_FEATHER, HudServer, PreviewModel, feather_mask, grey_surface, paint_preview
+from facegate.edge_hud import HudServer
 from facegate.protocol import MAX_STREAM_BYTES, PREVIEW_HEIGHT, PREVIEW_WIDTH, decode, encode
 
 
-class ModelStoreTests(unittest.TestCase):
+class FaceRecordTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
-        self.path = os.path.join(self.directory.name, "models", "someone.dat")
+        self.metadata = Path(self.directory.name) / "faces.json"
 
     def tearDown(self):
         self.directory.cleanup()
 
-    def test_round_trip_keeps_howdys_format(self):
-        model = faces.new_model([], "Face", [[0.1, 0.2]], 1_700_000_000)
-        faces.save_models(self.path, [model])
-        with open(self.path) as stored:
-            self.assertEqual(json.load(stored), [{"time": 1_700_000_000, "label": "Face", "id": 0, "data": [[0.1, 0.2]]}])
-        self.assertEqual(oct(os.stat(self.path).st_mode & 0o777), "0o600")
+    def test_summary_contains_only_display_metadata(self):
+        records = [("Face 2", 5, True, True), ("Face", 3, True, False)]
+        result = faces.summarize(records, {"Face": 1_700_000_000})
+        self.assertEqual(
+            result,
+            [
+                {"id": "Face", "label": "Face", "time": 1_700_000_000, "samples": 3, "rgb": True, "ir": False},
+                {"id": "Face 2", "label": "Face 2", "time": 0, "samples": 5, "rgb": True, "ir": True},
+            ],
+        )
+        self.assertNotIn("embedding", json.dumps(result))
 
-    def test_removing_the_last_face_deletes_the_file_like_howdy(self):
-        faces.save_models(self.path, [faces.new_model([], "Face", [[0.0]], 1)])
-        faces.save_models(self.path, faces.remove_model(faces.load_models(self.path), 0))
-        self.assertFalse(os.path.exists(self.path))
-        self.assertEqual(faces.load_models(self.path), [])
+    def test_display_timestamps_are_private_and_atomic(self):
+        faces.save_metadata({"Face": 1_700_000_000}, self.metadata)
+        self.assertEqual(faces.load_metadata(self.metadata), {"Face": 1_700_000_000})
+        self.assertEqual(oct(os.stat(self.metadata).st_mode & 0o777), "0o600")
 
-    def test_ids_never_repeat_after_a_removal(self):
-        models = [{"id": 0, "label": "Face", "data": []}, {"id": 1, "label": "Face 2", "data": []}]
-        remaining = faces.remove_model(models, 0)
-        self.assertEqual(faces.new_model(remaining, "x", [], 0)["id"], 2)
+    def test_invalid_metadata_is_ignored(self):
+        self.metadata.write_text('["not", "a", "mapping"]')
+        self.assertEqual(faces.load_metadata(self.metadata), {})
 
     def test_labels_skip_names_in_use(self):
         self.assertEqual(faces.next_label([]), "Face")
@@ -44,129 +46,152 @@ class ModelStoreTests(unittest.TestCase):
         self.assertEqual(faces.next_label([{"label": "Face"}, {"label": "Face 2"}]), "Face 3")
         self.assertEqual(faces.clean_label("  Glasses\x00 on and a very long label indeed "), "Glasses on and a very lo")
 
+    def test_gaze_missing_user_means_no_faces_but_other_errors_propagate(self):
+        client = object.__new__(faces.GazeClient)
 
-class FramingTests(unittest.TestCase):
-    def test_no_face_shows_the_widest_view_at_the_preview_aspect(self):
-        self.assertEqual(faces.crop_target(340, 340, None, 1.5), (170, 170, 340 / 1.5))
+        def missing(*_args):
+            raise faces.GazeError("User 'someone' not found")
 
-    def test_crop_stays_inside_the_frame(self):
-        x, y, width, height = faces.crop_rect(330, 5, 200, 340, 340, 1.5)
-        self.assertGreaterEqual(x, 0)
-        self.assertGreaterEqual(y, 0)
-        self.assertLessEqual(x + width, 340)
-        self.assertLessEqual(y + height, 340)
+        client._call = missing
+        self.assertEqual(client.list_faces("someone"), [])
 
-    def test_follow_eases_rather_than_jumping(self):
-        follow = faces.Follow()
-        follow.step((100, 100, 200), 1 / 30)
-        follow.step((200, 100, 200), 1 / 30)
-        self.assertTrue(100 < follow.center_x < 200)
+        def unavailable(*_args):
+            raise faces.GazeError("Gaze daemon unavailable.")
 
-    def test_samples_need_novelty_or_patience(self):
-        state = faces.ScanState(samples=[[0.0, 0.0]], last_sample=10.0)
-        self.assertFalse(faces.accepts(state, [0.01, 0.0], 10.4))
-        self.assertTrue(faces.accepts(state, [0.5, 0.0], 10.4))
-        self.assertTrue(faces.accepts(state, [0.01, 0.0], 10.0 + faces.SAMPLE_PATIENCE + 0.1))
+        client._call = unavailable
+        with self.assertRaisesRegex(faces.GazeError, "daemon unavailable"):
+            client.list_faces("someone")
 
 
-class FakeScanner:
-    def __init__(self, events):
-        self.events = events
+class FakeGazeClient:
+    def __init__(self, records=None, stream=None, error=None):
+        self.records = list(records or [])
+        self.stream = list(stream or [])
+        self.error = error
+        self.deleted = []
+        self.renamed = []
+        self.enrollments = []
 
-    def scan(self, width, height, stopped):
-        for event in self.events:
+    def list_faces(self, username):
+        if self.error:
+            raise self.error
+        return list(self.records)
+
+    def delete_face(self, username, face_name):
+        self.deleted.append((username, face_name))
+        self.records = [record for record in self.records if record[0] != face_name]
+        return True
+
+    def rename_face(self, username, old_name, new_name):
+        self.renamed.append((username, old_name, new_name))
+        self.records = [
+            (new_name, samples, rgb, ir) if name == old_name else (name, samples, rgb, ir)
+            for name, samples, rgb, ir in self.records
+        ]
+        return True
+
+    def enroll(self, username, face_name, stopped, width, height):
+        self.enrollments.append((username, face_name, width, height))
+        if self.error:
+            raise self.error
+        for event in self.stream:
             if stopped():
                 return
+            if event.get("event") == "completed":
+                self.records.append((face_name, 5, True, True))
             yield event
 
 
 class HelperTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
-        os.makedirs(os.path.join(self.directory.name, "models"))
+        self.metadata = Path(self.directory.name) / "faces.json"
         self.output = io.BytesIO()
-        self.helper = faces_helper.Helper("someone", self.output, self.directory.name)
+        self.client = FakeGazeClient()
+        self.helper = faces_helper.Helper(
+            "someone",
+            self.output,
+            client=self.client,
+            metadata_file=self.metadata,
+        )
         self.helper.commands.read = lambda timeout: None
-        self.original = faces.howdy_scanner
 
     def tearDown(self):
-        faces.howdy_scanner = self.original
         self.directory.cleanup()
 
     def events(self):
         return [json.loads(line) for line in self.output.getvalue().splitlines()]
 
-    def test_enroll_streams_then_saves_one_model_with_every_sample(self):
-        released = []
-        stream = [{"event": "hint", "text": "Hold still"}, {"event": "progress", "value": 0.5}, {"event": "captured", "encodings": [[0.1], [0.2]]}]
-        faces.howdy_scanner = lambda _dir: (FakeScanner(stream), lambda: released.append(True))
+    def test_enroll_streams_events_and_gaze_owns_the_saved_face(self):
+        self.client.stream = [
+            {"event": "hint", "text": "Hold still"},
+            {"event": "progress", "value": 0.5},
+            {"event": "completed"},
+        ]
         self.helper.handle({"cmd": "enroll", "width": PREVIEW_WIDTH, "height": PREVIEW_HEIGHT})
-        kinds = [event["event"] for event in self.events()]
-        self.assertEqual(kinds, ["hint", "progress", "added"])
+        self.assertEqual([event["event"] for event in self.events()], ["hint", "progress", "added"])
         self.assertEqual(self.events()[-1]["faces"][0]["label"], "Face")
-        self.assertEqual(faces.load_models(self.helper.path)[0]["data"], [[0.1], [0.2]])
-        self.assertEqual(released, [True])
+        self.assertEqual(self.client.enrollments, [("someone", "Face", PREVIEW_WIDTH, PREVIEW_HEIGHT)])
+        self.assertGreater(faces.load_metadata(self.metadata)["Face"], 0)
 
-    def test_cancel_stops_the_scan_without_saving(self):
-        faces.howdy_scanner = lambda _dir: (FakeScanner([{"event": "progress", "value": 0.2}] * 3), lambda: None)
+    def test_cancel_stops_enrollment_without_writing_metadata(self):
+        self.client.stream = [{"event": "progress", "value": 0.2}] * 3
         commands = iter([None, {"cmd": "cancel"}])
         self.helper.commands.read = lambda timeout: next(commands, None)
         self.helper.handle({"cmd": "enroll"})
         self.assertEqual(self.events()[-1], {"event": "cancelled"})
-        self.assertFalse(os.path.exists(self.helper.path))
+        self.assertFalse(self.metadata.exists())
 
-    def test_scan_errors_are_reported(self):
-        def broken(_dir):
-            raise faces.EnrollError("Howdy has no camera configured.")
-
-        faces.howdy_scanner = broken
+    def test_gaze_errors_are_reported(self):
+        self.client.error = faces.GazeError("Gaze daemon unavailable.")
         self.helper.handle({"cmd": "enroll"})
-        self.assertEqual(self.events(), [{"event": "error", "message": "Howdy has no camera configured."}])
+        self.assertEqual(self.events(), [{"event": "error", "message": "Gaze daemon unavailable."}])
 
     def test_oversized_previews_are_refused(self):
         self.helper.handle({"cmd": "enroll", "width": 4000, "height": 4000})
         self.assertEqual(self.events()[0]["event"], "error")
 
     def test_command_line_runs_one_operation(self):
-        faces.save_models(self.helper.path, [faces.new_model([], "Face", [[0.0]], 1)])
+        self.client.records = [("Face", 5, True, True)]
         self.assertEqual(self.helper.run(["list"]), 0)
         self.assertEqual(self.events()[-1]["faces"][0]["label"], "Face")
-        self.assertEqual(self.helper.run(["remove", "0"]), 0)
+        self.assertEqual(self.helper.run(["remove", "Face"]), 0)
         self.assertEqual(self.events()[-1]["faces"], [])
+        self.assertEqual(self.client.deleted, [("someone", "Face")])
         self.assertEqual(self.helper.run(["rm", "-rf", "/"]), 2)
         self.assertEqual(self.events()[-1]["event"], "error")
 
-    def test_remove(self):
-        faces.save_models(self.helper.path, [faces.new_model([], "Face", [[0.0]], 1)])
-        self.helper.handle({"cmd": "remove", "id": 0})
-        self.assertEqual(self.events()[-1]["faces"], [])
+    def test_rename_is_owned_by_gaze_and_preserves_the_added_time(self):
+        self.client.records = [("Face", 5, True, True)]
+        faces.save_metadata({"Face": 1_700_000_000}, self.metadata)
+        self.assertEqual(self.helper.run(["rename", "Face", "Glasses"]), 0)
+        self.assertEqual(self.client.renamed, [("someone", "Face", "Glasses")])
+        self.assertEqual(faces.load_metadata(self.metadata), {"Glasses": 1_700_000_000})
+        self.assertEqual(self.events()[-1]["faces"][0]["label"], "Glasses")
+
+    def test_remove_rejects_unknown_face_without_calling_gaze(self):
+        self.helper.handle({"cmd": "remove", "id": "Not enrolled"})
+        self.assertEqual(self.events()[-1]["event"], "error")
+        self.assertEqual(self.client.deleted, [])
 
 
 class PreviewTests(unittest.TestCase):
-    def test_feather_is_opaque_inside_and_clear_at_the_rim(self):
-        mask = feather_mask(PREVIEW_WIDTH, PREVIEW_HEIGHT)
-        data, stride = mask.get_data(), mask.get_stride()
-        self.assertEqual(data[(PREVIEW_HEIGHT // 2) * stride + PREVIEW_WIDTH // 2], 255)
-        self.assertEqual(data[0], 0)
-        self.assertEqual(data[(PREVIEW_HEIGHT // 2) * stride], 0)
-        self.assertLess(data[(PREVIEW_HEIGHT // 2) * stride + PREVIEW_FEATHER // 2], 255)
+    def test_live_signal_dispatch_is_bounded(self):
+        class BusyContext:
+            def __init__(self):
+                self.iterations = 0
 
-    def test_grey_frames_pad_rows_to_the_surface_stride(self):
-        surface = grey_surface(bytes(range(30)) * 2, 30, 2)
-        self.assertEqual(surface.get_stride(), 32)
-        self.assertEqual(bytes(surface.get_data())[32:62], bytes(range(30)))
-        with self.assertRaises(ValueError):
-            grey_surface(b"\x00" * 10, 30, 2)
+            def pending(self):
+                return True
 
-    def test_every_state_paints_with_and_without_frames(self):
-        frame = grey_surface(bytes(PREVIEW_WIDTH * PREVIEW_HEIGHT), PREVIEW_WIDTH, PREVIEW_HEIGHT)
-        for state in ("scanning", "success", "failure"):
-            for progress, blend in ((0.0, 0.0), (0.6, 0.5), (1.0, 1.0)):
-                for current, previous in ((None, None), (frame, None), (frame, frame)):
-                    surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, PREVIEW_WIDTH, PREVIEW_HEIGHT)
-                    model = PreviewModel(state=state, progress=progress, result=progress, pulse=blend, blend=blend, elapsed=1.3)
-                    paint_preview(cairo.Context(surface), PREVIEW_WIDTH, PREVIEW_HEIGHT, current, model, previous)
+            def iteration(self, may_block):
+                self.iterations += 1
+                self.asserted_may_block = may_block
 
+        context = BusyContext()
+        self.assertEqual(faces.drain_main_context(context), 32)
+        self.assertEqual(context.iterations, 32)
+        self.assertFalse(context.asserted_may_block)
 
 class StreamTests(unittest.TestCase):
     def test_a_frame_line_fits_the_stream_limit(self):

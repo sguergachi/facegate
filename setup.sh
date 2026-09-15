@@ -1,14 +1,9 @@
 #!/usr/bin/env bash
-# First-run setup: installs Howdy and FaceGate's dependencies, picks the
-# camera, wires FaceGate into sudo and polkit, then opens FaceGate's
-# onboarding, which walks you through adding your face.
-# Run it as yourself (not with sudo); it asks for sudo when it needs it.
+# First-run setup for Gaze-backed FaceGate on Arch/KDE Plasma Wayland.
+# Run as yourself; the script asks for sudo only for system changes.
 set -euo pipefail
 
 project_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-howdy_dir=/usr/lib/security/howdy
-howdy_config=${howdy_dir}/config.ini
-
 bold=$'\e[1m' dim=$'\e[2m' green=$'\e[32m' red=$'\e[31m' reset=$'\e[0m'
 step_number=0
 step() { step_number=$((step_number + 1)); printf '\n%s%d. %s%s\n' "${bold}" "${step_number}" "$1" "${reset}"; }
@@ -18,102 +13,80 @@ fail() { printf '\n%s✗ %s%s\n' "${red}" "$1" "${reset}" >&2; exit 1; }
 ask() { local reply; read -r -p "   $1 [y/N] " reply; [[ ${reply} == [yY]* ]]; }
 
 if [[ ${EUID} -eq 0 ]]; then
-  fail "Run ./setup.sh as your normal user. It asks for sudo when it needs it."
+  fail "Run ./setup.sh as your normal user. It asks for sudo when needed."
 fi
 
 printf '%sFaceGate setup%s\n' "${bold}" "${reset}"
-printf '%sFace approval for sudo and admin prompts, powered by Howdy.%s\n' "${dim}" "${reset}"
+printf '%sExplicit face approval for sudo and admin prompts, secured by Gaze.%s\n' "${dim}" "${reset}"
 
 step "Checking this computer"
 command -v pacman >/dev/null || fail "FaceGate currently supports Arch-based systems (pacman) only."
 [[ ${XDG_CURRENT_DESKTOP:-} == *KDE* ]] || fail "FaceGate supports KDE Plasma only."
 [[ ${XDG_SESSION_TYPE:-} == wayland ]] || fail "Run this from a Plasma Wayland session."
 sudo -v || fail "sudo is needed to install packages and configure PAM."
-# Keep the sudo ticket fresh through long AUR builds.
+# Keep the sudo ticket fresh through an AUR package installation.
 while true; do sudo -n true 2>/dev/null; sleep 50; kill -0 "$$" 2>/dev/null || exit; done &
 keepalive=$!
-trap 'kill "${keepalive}" 2>/dev/null || true' EXIT
+cleanup() { kill "${keepalive}" 2>/dev/null || true; }
+trap cleanup EXIT
 done_ "Arch-based KDE Plasma Wayland session"
 
 step "Installing FaceGate's dependencies"
 sudo pacman -S --needed --noconfirm \
-  base-devel git python python-gobject python-cairo gtk4 gtk4-layer-shell polkit v4l-utils
+  base-devel git pam python python-gobject python-cairo python-numpy \
+  gtk4 gtk4-layer-shell libappindicator polkit
 done_ "Packages from the official repositories"
 
-step "Installing Howdy (face recognition)"
-if pacman -Q howdy >/dev/null 2>&1; then
-  done_ "Howdy $(pacman -Q howdy | cut -d' ' -f2) is already installed"
+step "Installing Gaze (biometric security backend)"
+gaze_pam=
+for candidate in /usr/lib/security/pam_gaze.so /usr/lib64/security/pam_gaze.so /lib/security/pam_gaze.so /lib/*/security/pam_gaze.so; do
+  [[ -f ${candidate} ]] && { gaze_pam=${candidate}; break; }
+done
+if command -v gazed >/dev/null && command -v gaze >/dev/null && [[ -n ${gaze_pam} ]]; then
+  done_ "Gaze's daemon, CLI, and PAM module are already installed"
 else
   aur_helper=
   for helper in paru yay; do
     command -v "${helper}" >/dev/null && { aur_helper=${helper}; break; }
   done
   if [[ -z ${aur_helper} ]]; then
-    info "Howdy lives in the AUR, and no AUR helper (paru or yay) was found."
+    info "Gaze is distributed through the AUR, and no AUR helper was found."
     ask "Install paru now?" || fail "Install paru or yay, then run ./setup.sh again."
-    build_dir=$(mktemp -d)
-    git clone --depth 1 https://aur.archlinux.org/paru-bin.git "${build_dir}/paru-bin"
-    (cd "${build_dir}/paru-bin" && makepkg -si --noconfirm)
-    rm -rf "${build_dir}"
+    helper_dir=$(mktemp -d)
+    git clone --depth 1 https://aur.archlinux.org/paru-bin.git "${helper_dir}/paru-bin"
+    (cd "${helper_dir}/paru-bin" && makepkg -si --noconfirm)
+    rm -rf -- "${helper_dir}"
     aur_helper=paru
   fi
-  info "Building Howdy with ${aur_helper}. Compiling dlib can take 10+ minutes."
-  "${aur_helper}" -S --needed howdy
-  pacman -Q howdy >/dev/null 2>&1 || fail "Howdy did not install."
-  done_ "Howdy installed"
+  info "Installing Gaze's prebuilt daemon, CLI, and official PAM module with ${aur_helper}."
+  "${aur_helper}" -S --needed gaze-bin
+  pacman -Q gaze-bin >/dev/null 2>&1 || fail "Gaze did not install."
+  done_ "Gaze installed"
 fi
-pacman -Q pam-python >/dev/null 2>&1 || fail "pam-python is missing; it should come with Howdy."
+sudo systemctl enable --now gazed.service
+systemctl_status=$(sudo systemctl is-active gazed.service 2>/dev/null || true)
+[[ ${systemctl_status} == active ]] || fail "gazed.service did not start; run: sudo journalctl -u gazed -n 100"
+done_ "Gaze daemon is active"
 
-step "Choosing a camera"
-current_camera=$(sudo sed -n 's/^device_path *= *//p' "${howdy_config}")
-if [[ -n ${current_camera} && ${current_camera} != none && -e ${current_camera} ]]; then
-  camera=${current_camera}
-  done_ "Howdy already uses ${camera}"
+if pacman -Q howdy >/dev/null 2>&1; then
+  info "Howdy is installed but FaceGate will no longer call it or reference its PAM module."
+  info "After confirming Gaze works, you may remove it with: paru -Rns howdy pam-python"
+fi
+
+step "Checking the Gaze backend"
+if gaze doctor; then
+  done_ "Gaze health check passed"
 else
-  # Collect capture devices once each (by-id links are stable across reboots).
-  # Metadata nodes list no formats; an IR sensor streams 8-bit greyscale.
-  declare -A seen=()
-  cameras=() labels=() ir_cameras=()
-  for link in /dev/v4l/by-id/* /dev/v4l/by-path/* /dev/video*; do
-    [[ -e ${link} ]] || continue
-    node=$(readlink -f "${link}")
-    [[ -z ${seen[${node}]:-} ]] || continue
-    seen[${node}]=1
-    formats=$(v4l2-ctl -d "${node}" --list-formats 2>/dev/null | grep -o "'[A-Z0-9 ]*'" || true)
-    [[ -n ${formats} ]] || continue
-    name=$(cat "/sys/class/video4linux/${node##*/}/name" 2>/dev/null || echo camera)
-    kind=color
-    if grep -q "'GREY'" <<<"${formats}"; then kind=infrared; ir_cameras+=("${link}"); fi
-    cameras+=("${link}")
-    labels+=("${name} (${kind}) ${dim}${link}${reset}")
-  done
-  if ((${#cameras[@]} == 0)); then
-    fail "No camera found. Connect one and run ./setup.sh again."
-  elif ((${#ir_cameras[@]} == 1)); then
-    camera=${ir_cameras[0]}
-    info "Using the infrared camera: it works in the dark and resists photos."
-  elif ((${#cameras[@]} == 1)); then
-    camera=${cameras[0]}
-  else
-    for i in "${!cameras[@]}"; do printf '   %d) %s\n' "$((i + 1))" "${labels[i]}"; done
-    read -r -p "   Which camera should recognise you? [1] " choice
-    choice=${choice:-1}
-    [[ ${choice} =~ ^[0-9]+$ ]] && ((choice >= 1 && choice <= ${#cameras[@]})) || fail "No camera ${choice}."
-    camera=${cameras[choice - 1]}
-  fi
-  sudo sed -i "s#^device_path *=.*#device_path = ${camera}#" "${howdy_config}"
-  done_ "Howdy will use ${camera}"
+  info "Gaze reported setup warnings. No face may be enrolled yet; review the output above."
 fi
 
-step "Connecting FaceGate to sudo and admin prompts"
+step "Connecting the existing FaceGate experience to Gaze"
 sudo "${project_dir}/install.sh"
-done_ "FaceGate is active"
+done_ "FaceGate is active; only Gaze can return biometric success"
 
 step "Meeting FaceGate"
 info "FaceGate opens to show how it works and add your face."
-# Onboarding asks for admin approval in the island before it adds a face.
 setsid facegate-settings --welcome >/dev/null 2>&1 < /dev/null &
 done_ "Opened FaceGate"
 
-printf '\n%sAll set.%s Finish in the FaceGate window. You can reopen it any time\n' "${bold}" "${reset}"
-printf 'from your app menu to add or remove faces. Your password always works too.\n'
+printf '\n%sAll set.%s Finish in the FaceGate window. Your password remains the fallback.\n' "${bold}" "${reset}"
