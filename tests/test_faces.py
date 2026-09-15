@@ -211,7 +211,11 @@ class PreviewTests(unittest.TestCase):
         # Luma of 0x4080C0 is 0x74; inverted, it lights like an IR-lit face.
         grey = faces._jpeg_to_greyscale(self.jpeg(), PREVIEW_WIDTH, PREVIEW_HEIGHT)
         self.assertEqual(len(grey), PREVIEW_WIDTH * PREVIEW_HEIGHT)
-        self.assertLess(abs(grey[0] - (255 - 0x74)), 8)
+        middle = (PREVIEW_HEIGHT // 2) * PREVIEW_WIDTH + PREVIEW_WIDTH // 2
+        self.assertLess(abs(grey[middle] - (255 - 0x74)), 8)
+        # The spotlight darkens the room at the frame's edges.
+        self.assertEqual(grey[0], 0)
+        self.assertEqual(grey[PREVIEW_WIDTH - 1], 0)
 
     def test_a_flood_of_previews_keeps_only_the_newest_and_never_delays_progress(self):
         from gi.repository import GLib

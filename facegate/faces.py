@@ -38,6 +38,13 @@ CAMERA_FIELDS = ("rgb", "ir", "emitter_enabled", "dark_luma", "parallel")
 # Mean channel difference above which a preview is a colour frame; a grey IR
 # frame only differs by JPEG rounding.
 COLOUR_SPREAD = 3.0
+# The colour spotlight, as fractions of the frame: an oval 60% as wide as the
+# frame, taller than it, centred a little low so it takes the shoulders too,
+# fully lit inside 0.3 of its radius and dark beyond 0.85.
+SPOTLIGHT_WIDTH = 0.6
+SPOTLIGHT_HEIGHT = 1.3
+SPOTLIGHT_CENTRE = 0.62
+SPOTLIGHT_EDGE = (0.3, 0.85)
 DBUS_TIMEOUT_MS = 35_000
 ENROLL_TIMEOUT_SECONDS = 90
 LABEL_CHARS = 24
@@ -188,8 +195,31 @@ def _jpeg_to_greyscale(jpeg: bytes, width: int, height: int) -> bytes:
     colour = numpy.abs(rgb[:, :, 0] - rgb[:, :, 1]).mean() + numpy.abs(rgb[:, :, 1] - rgb[:, :, 2]).mean()
     luma = (77 * rgb[:, :, 0] + 150 * rgb[:, :, 1] + 29 * rgb[:, :, 2]) >> 8
     if colour > COLOUR_SPREAD:
-        luma = 255 - luma
+        luma = (255 - luma) * _spotlight(width, height)
     return luma.astype(numpy.uint8).tobytes()
+
+
+_spotlights: dict[tuple[int, int], numpy.ndarray] = {}
+
+
+def _spotlight(width: int, height: int) -> numpy.ndarray:
+    """A soft oval over where Gaze asks for the head and shoulders.
+
+    IR light falls off with distance, so the room behind a face goes dark;
+    an inverted colour frame has no such falloff and lights whatever is dark
+    in the room. The spotlight stands in for the emitter.
+    """
+    key = (width, height)
+    if key not in _spotlights:
+        y, x = numpy.mgrid[0:height, 0:width]
+        distance = numpy.hypot(
+            (x + 0.5 - width / 2) / (width / 2 * SPOTLIGHT_WIDTH),
+            (y + 0.5 - height * SPOTLIGHT_CENTRE) / (height / 2 * SPOTLIGHT_HEIGHT),
+        )
+        inner, outer = SPOTLIGHT_EDGE
+        amount = numpy.clip((outer - distance) / (outer - inner), 0, 1)
+        _spotlights[key] = amount * amount * (3 - 2 * amount)
+    return _spotlights[key]
 
 
 def drain_main_context(context: GLib.MainContext, limit: int = 32) -> int:
