@@ -207,6 +207,14 @@ class PreviewTests(unittest.TestCase):
         self.assertEqual(len(set(grey)), 1)
         self.assertLess(abs(grey[0] - 0x30), 4)
 
+    def test_a_bright_colour_preview_does_not_overflow_under_the_spotlight(self):
+        # Luma 0xF1 inverts to 0x0E; 16-bit channel weighting wrapped it.
+        grey = faces._jpeg_to_greyscale(self.jpeg(rgba=0xFFFF80FF), PREVIEW_WIDTH, PREVIEW_HEIGHT)
+        spotlight = faces._spotlight(PREVIEW_WIDTH, PREVIEW_HEIGHT).ravel()
+        # Where the spotlight is half lit, a wrapped value lands far from dark.
+        half = int(abs(spotlight - 0.5).argmin())
+        self.assertLess(grey[half], 0x20)
+
     def test_a_colour_preview_is_inverted_so_the_face_gets_the_bright_stars(self):
         # Luma of 0x4080C0 is 0x74; inverted, it lights like an IR-lit face.
         grey = faces._jpeg_to_greyscale(self.jpeg(), PREVIEW_WIDTH, PREVIEW_HEIGHT)

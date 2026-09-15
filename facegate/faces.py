@@ -173,8 +173,8 @@ def _jpeg_to_greyscale(jpeg: bytes, width: int, height: int) -> bytes:
     two apart.
 
     Every per-pixel step stays in C or NumPy: libjpeg scales while decoding and
-    GdkPixbuf desaturates. A pure-Python pixel loop cannot keep up with a live
-    camera.
+    NumPy weighs the channels. A pure-Python pixel loop cannot keep up with a
+    live camera.
     """
     loader = GdkPixbuf.PixbufLoader.new_with_type("jpeg")
     loader.connect("size-prepared", lambda source, _w, _h: source.set_size(width, height))
@@ -191,7 +191,7 @@ def _jpeg_to_greyscale(jpeg: bytes, width: int, height: int) -> bytes:
     stride = pixbuf.get_rowstride()
     rows = numpy.frombuffer(pixbuf.get_pixels(), numpy.uint8)
     rows = numpy.pad(rows, (0, stride * height - len(rows))).reshape(height, stride)
-    rgb = rows[:, : width * channels].reshape(height, width, channels)[:, :, :3].astype(numpy.int16)
+    rgb = rows[:, : width * channels].reshape(height, width, channels)[:, :, :3].astype(numpy.int32)
     colour = numpy.abs(rgb[:, :, 0] - rgb[:, :, 1]).mean() + numpy.abs(rgb[:, :, 1] - rgb[:, :, 2]).mean()
     luma = (77 * rgb[:, :, 0] + 150 * rgb[:, :, 1] + 29 * rgb[:, :, 2]) >> 8
     if colour > COLOUR_SPREAD:
