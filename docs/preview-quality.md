@@ -51,3 +51,28 @@ rate. Settled particles attach to that pose; spring motion remains for formation
 and dispersal. Uniform XYZ filtering avoids the transient shearing caused by
 different XY and depth delays. A 15 Hz camera / 60 Hz display turning regression
 checks that lighting and particle geometry remain synchronized.
+
+
+## Composition review — 2026-09-16
+
+Reviewed actual GTK/GSK renders from the same saved camera image after each
+change, including isolated layers, all coaching guides, and tracking-loss
+release. Portrait artifacts remain local in `/tmp/facegate-review`.
+
+| Layer | Critique | Implemented decision |
+| --- | --- | --- |
+| Progress rim | Heavy cyan tube competes with the portrait; searching comet persists after capture begins. | 1.25 pt core with blurred halo; comet fades out at the first sample. |
+| Face grains | Uniform optical footprints give the surface a mechanical stipple. | Stable magnitude-based widths (~0.27–0.34 pt) and a wider radiance hierarchy; no animated surface sparkle. |
+| Capture feedback | Each sample brightens the entire face by up to 14 percentage points of tint multiplier. | Confine capture pulse to the rim. Regression verifies constant facial exposure across pulse strengths. |
+| Haze / back light | Annular placement suggests a second head outline. | Spread haze through a filled elliptical volume and reduce its opacity from .55 to .38. Keep back light. |
+| Distance guide | Bright contour competes with facial silhouette. | Reduce moving/target contour opacity from .52/.16 to .36/.11; preserve directional chevrons. |
+| Turn / tilt guides | Slim curves and clear tips read without covering features. | Retain. |
+| Selective bloom | Soft light separates grains without filling facial openings. | Retain. |
+| Distant field / foreground bokeh | Restrained depth cues leave the face dominant. | Retain. |
+
+114 tests pass. CPU animation + node construction measured 11.18 ms/frame in
+this pass; this excludes GPU rendering and camera inference. These are saved-frame
+offscreen comparisons, not proof of live RGB/IR head-turn quality. The source
+remains a monocular facial surface; missing hair, ears and hidden geometry still
+limit full-head CGI realism. Next useful evidence is a live turning sequence
+on the installed version, particularly across Gaze RGB/IR camera transitions.

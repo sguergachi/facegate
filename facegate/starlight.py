@@ -277,7 +277,7 @@ class Starlight:
         # The atmosphere: haze motes orbiting the head, and soft discs for the
         # back light and the bokeh.
         self.haze_angle = random.uniform(0, math.tau, HAZE_MOTES).astype(numpy.float32)
-        self.haze_radius = (0.55 + 0.6 * numpy.sqrt(random.uniform(0, 1, HAZE_MOTES))).astype(numpy.float32)
+        self.haze_radius = (1.30 * numpy.sqrt(random.uniform(0, 1, HAZE_MOTES))).astype(numpy.float32)
         self.haze_speed = random.uniform(0.015, 0.05, HAZE_MOTES).astype(numpy.float32) * numpy.where(random.uniform(0, 1, HAZE_MOTES) < 0.5, -1, 1)
         self.haze_light = random.uniform(0.2, 0.6, HAZE_MOTES).astype(numpy.float32)
         self.disc = soft_disc(64)
@@ -513,7 +513,7 @@ class Starlight:
         # not occupancy: changing density with normals made moving shadows
         # look like holes in the user's face.
         magnitude = self.magnitude[self.face_stars]
-        radiance = (shade ** 1.15 + 0.12 * specular) * GRAIN * (0.18 + 0.82 * magnitude)
+        radiance = (shade ** 1.15 + 0.12 * specular) * GRAIN * (0.10 + 0.90 * magnitude)
         return rest.astype(numpy.float32), (radiance * visibility).astype(numpy.float32)
 
     # The arrow's dust ---------------------------------------------------------------
@@ -632,8 +632,8 @@ class Starlight:
         target = contour(angles, destination)
         moving = contour(angles, scale)
         self.guide_lines = [
-            (target, numpy.full(len(target), 0.16, numpy.float32)),
-            (moving, numpy.full(len(moving), 0.52 * alpha, numpy.float32)),
+            (target, numpy.full(len(target), 0.11, numpy.float32)),
+            (moving, numpy.full(len(moving), 0.36 * alpha, numpy.float32)),
         ]
         # Outward/inward chevrons make direction legible even in a still frame.
         direction = 1 if closer else -1
@@ -796,8 +796,12 @@ class Starlight:
         y = self.position[lit, 1] * scale - 0.5
         # A compact optical point-spread function replaces four square taps.
         # Width is in logical points, so dust keeps its size on every monitor.
-        sigma = 0.30 * scale
-        radius = max(1, math.ceil(2 * sigma - 0.5))
+        # Stable grain identities vary the optical footprint without animated
+        # sparkle or pose-dependent changes in particle size.
+        sigma = numpy.full((len(lit), 1), 0.30 * scale, numpy.float32)
+        if len(self.position) == len(self.magnitude):
+            sigma[:, 0] = (0.23 + 0.11 * numpy.sqrt(self.magnitude[lit])) * scale
+        radius = max(1, math.ceil(2 * 0.34 * scale - 0.5))
         offsets = numpy.arange(-radius, radius + 1)
         columns_x = numpy.rint(x).astype(numpy.int64)[:, None] + offsets
         rows_y = numpy.rint(y).astype(numpy.int64)[:, None] + offsets
@@ -868,7 +872,7 @@ class Starlight:
             halo_width, halo_height, halo_alpha * (0.35 + 0.65 * self.scene) * (0.85 + 0.15 * breath) * presence, look.glow,
         )
         # Haze lit by it: motes softened out of focus.
-        snapshot.push_opacity(0.55 * (0.4 + 0.6 * self.scene) * presence)
+        snapshot.push_opacity(0.38 * (0.4 + 0.6 * self.scene) * presence)
         snapshot.push_blur(2.5)
         snapshot.append_node(self._tinted(self._haze(device_scale), bounds, look.glow))
         snapshot.pop()

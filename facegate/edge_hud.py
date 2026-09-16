@@ -546,8 +546,8 @@ def preview_look(model: PreviewModel) -> tuple[tuple[float, float, float], tuple
     """The stars' core and halo colours, and the shake."""
     color = PREVIEW_COLORS.get(model.state, PREVIEW_COLORS["scanning"])
     # Starlight white while looking, taking on the result's colour at the end;
-    # each captured sample brightens the stars for a moment.
-    bright = 0.86 + 0.14 * model.pulse
+    # capture feedback stays on the rim so facial exposure remains steady.
+    bright = 0.86
     tint = tuple(min(1.0, mix(IR_TINT[index], color[index], 0.55 * model.result) * bright) for index in range(3))
     # Halos lean toward the state's colour: cyan while looking.
     glow = tuple(mix(IR_TINT[index], color[index], 0.5 + 0.4 * model.result) for index in range(3))
@@ -670,17 +670,21 @@ class PreviewArea(Gtk.Widget):
         snapshot.translate(Graphene.Point().init(PREVIEW_BLEED + look.shake, PREVIEW_BLEED))
         self.stars.snapshot(snapshot, scale, look)
         color = PREVIEW_COLORS.get(model.state, PREVIEW_COLORS["scanning"])
-        searching = (1 - model.progress) * (1 - model.result)
+        searching = max(0.0, 1 - model.progress / 0.04) * (1 - model.result)
         if searching > 0.01:
             # A short comet circles until the first sample lands.
             phase = (model.elapsed * 0.4) % 1.0
-            self._stroke(snapshot, 2.0, color, 0.55 * searching, [length * 0.12, length * 0.88], (1 - phase) * length)
+            self._stroke(snapshot, 1.25, color, 0.48 * searching, [length * 0.12, length * 0.88], (1 - phase) * length)
         progress = max(model.progress, model.result if model.state == "success" else 0.0)
         if progress > 0.002:
             # Captured samples fill the rim clockwise from the top.
             dash = None if progress >= 0.999 else [length * progress, length * 2]
-            for width, alpha in ((7.0, 0.14 + 0.22 * model.pulse), (2.0, 0.95)):
-                self._stroke(snapshot, width, color, alpha, dash)
+            # A thin luminous trace, not a second solid border. Blur the halo
+            # itself so progress reads as light rather than a thick neon tube.
+            snapshot.push_blur(2.0)
+            self._stroke(snapshot, 2.5, color, 0.18 + 0.18 * model.pulse, dash)
+            snapshot.pop()
+            self._stroke(snapshot, 1.25, color, 0.72 + 0.14 * model.pulse, dash)
         snapshot.restore()
 
 

@@ -563,7 +563,8 @@ and grows to fit (surface height 440).
   on the frame clock.
 - **Progress:** a trace on the preview's rim, clockwise from top center. A
   short comet circles until the first sample. Each of the five samples springs
-  the trace forward with a brief glow. Success closes it green and tints the
+  the 1.25 pt trace forward with a soft blurred glow. Capture pulses affect
+  only the rim, preserving steady face exposure. Success closes it green and tints the
   image green. Failure turns it red with the mark's decaying shake.
 - **Copy:** "Adding your face", with the detail line as the scan's live hint.
   The hint cross-fades (100 ms out, 240 ms in) while the island eases to the
@@ -684,7 +685,7 @@ remove the forehead crown, and wrong edges bridge anatomical openings.
 - Canonical surface coordinates control sampling area only; live landmarks
   still determine the user's shape. All 468 vertices and anatomical openings
   are retained. New enrollments release old sampling/lighting state.
-- Render 0.30 pt Gaussian grains at at least 2× resolution; preserve fractional
+- Render stable 0.27–0.34 pt Gaussian grains at at least 2× resolution; preserve fractional
   monitor scales. Accumulate light before a soft exponential highlight
   shoulder. Bloom remains selective, and atmosphere uses a cheaper half-size
   texture because it is intentionally out of focus.

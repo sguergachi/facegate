@@ -9,6 +9,16 @@ from facegate.hud import approval_timeout_ms
 
 
 class HudRequestTests(unittest.TestCase):
+    def test_capture_feedback_does_not_flash_face_exposure(self):
+        from facegate.edge_hud import PreviewModel, preview_look
+
+        for progress in (0.0, 0.2, 0.8, 1.0):
+            model = PreviewModel(progress=progress)
+            steady = preview_look(model)
+            for pulse in (0.25, 0.5, 1.0):
+                model.pulse = pulse
+                self.assertEqual(preview_look(model), steady)
+
     def test_no_gaze_enrollment_skips_straight_to_password(self):
         import os
         import pwd
