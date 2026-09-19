@@ -12,6 +12,9 @@
  * on to the normal password stack, an empty one starts the face scan.  Either
  * way the result only picks the next step, never the verdict.
  *
+ * "scanning" mode serves the lock screen's biometric slot, which KScreenLocker
+ * starts by itself: it only tells the island a scan is starting.
+ *
  * "hud_user=NAME" sends HUD messages to NAME's island instead of the PAM
  * user's; the login screen's island runs as the greeter's own user.
  */
@@ -234,6 +237,26 @@ static bool consent_from_hud(uid_t uid, const char *service, const char *usernam
     return strstr(response, "\"approved\":true") != NULL;
 }
 
+/* A scan is starting; the service tells the island which screen it is on. */
+static void notify_scanning(uid_t uid, const char *service)
+{
+    char service_token[64] = {0};
+    char message[128];
+    int length;
+    int fd;
+
+    safe_token(service, service_token, sizeof(service_token));
+    length = snprintf(message, sizeof(message),
+                      "{\"phase\":\"scanning\",\"service\":\"%s\"}\n", service_token);
+    if (length <= 0 || length >= (int)sizeof(message))
+        return;
+    fd = connect_hud(uid, 1);
+    if (fd < 0)
+        return;
+    (void)send_all(fd, message, (size_t)length);
+    close(fd);
+}
+
 static void notify_hud(uid_t uid, const char *phase, const char *result)
 {
     char message[192];
@@ -313,8 +336,13 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc,
             return PAM_AUTHINFO_UNAVAIL;
         }
         log_message("login submitted without a password; delegating to Gaze");
-        notify_hud(hud, "scanning", NULL);
+        notify_scanning(hud, service);
         return PAM_SUCCESS;
+    }
+    if (strcmp(mode, "scanning") == 0) {
+        if (local_request(pamh))
+            notify_scanning(hud, service);
+        return PAM_IGNORE;
     }
     if (strcmp(mode, "consent") != 0 || !local_request(pamh))
         return PAM_AUTHINFO_UNAVAIL;
@@ -327,7 +355,7 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc,
         return PAM_AUTHINFO_UNAVAIL;
     }
     log_message("face scan approved; delegating authentication to Gaze");
-    notify_hud(uid, "scanning", NULL);
+    notify_scanning(uid, service);
     return PAM_SUCCESS;
 }
 

@@ -64,8 +64,8 @@ The detailed component boundary, failure invariants, and known limitations are
 documented in [SECURITY.md](SECURITY.md).
 
 FaceGate gates `sudo` and polkit elevation and, if you opt in, shows the
-island on the login screen. The lock screen uses Gaze's own KDE integration
-(see [Lock screen and login](#lock-screen-and-login)).
+island for face sign-in on the lock screen and the login screen (see
+[Lock screen and login](#lock-screen-and-login)).
 
 ## Experience
 
@@ -114,20 +114,27 @@ step, because sitting down at them is the request.
   face), and `pam_gaze.so` alone decides. A face mismatch ends that attempt
   without counting as a failed password in `pam_faillock`. A locked-out or
   `nologin` account can't sign in by face.
-- **Lock screen:** Gaze's official `gaze-kde-bin` runs Gaze in KScreenLocker's
-  biometric slot (`/etc/pam.d/kde-fingerprint`) as soon as the screen locks.
-  Look at the camera and it unlocks. The island can't appear here yet, because
-  KWin hides every other surface while the session is locked. You get one scan
-  per lock; if it gives up while you're away, press Enter on the empty password
-  field to scan again.
+- **Lock screen:** KScreenLocker starts its biometric slot
+  (`/etc/pam.d/kde-fingerprint`) as soon as the screen locks. FaceGate's block
+  there tells your island to drop over the lock screen ("Looking for you"), and
+  Gaze decides. The island then says "Welcome back" and the screen unlocks.
+  You get one scan per lock; if it gives up while you're away, press Enter on
+  the empty password field to scan again.
+
+  KWin hides every other surface while the session is locked, unless the
+  executable is trusted with `kde_lockscreen_overlay_v1` (plasmashell holds the
+  same grant). That's why the island is a small root-owned native launcher,
+  `/usr/local/bin/facegate-hud`, that embeds Python and only ever runs
+  FaceGate's installed island. The grant lives in
+  `org.facegate.Island.desktop`. Trusting `/usr/bin/python3` instead would let
+  every Python program draw over the lock screen.
 
 After a face login, KWallet asks for your password once, because no password
 was typed for it to reuse.
 
-To turn the login island off, run `sudo rm /etc/facegate/greeter` and then
-`sudo /usr/local/lib/facegate/refresh-pam`, and restore `/etc/pam.d/plasmalogin`
-from its backup in `/etc/facegate/`. To turn off the lock screen, run
-`sudo gaze-kde-pam disable`.
+To turn face sign-in off, run `sudo rm /etc/facegate/greeter`, then restore
+`/etc/pam.d/plasmalogin`
+and `/etc/pam.d/kde-fingerprint` from their backups in `/etc/facegate/`.
 
 ## Install
 
@@ -152,9 +159,8 @@ Run setup as your normal user. It installs:
    colour-only; the installer finds the luma-only V4L2 node and sets it through
    Gaze's own `Config` API, keeping any IR camera you already chose. Gaze then
    matches colour and IR together, and the enrollment preview shows both.
-5. Optionally, face sign-in: the island at the login screen, and Gaze's
-   `gaze-kde-bin` at the lock screen (see
-   [Lock screen and login](#lock-screen-and-login)).
+5. Optionally, face sign-in with the island at the lock screen and login
+   screen (see [Lock screen and login](#lock-screen-and-login)).
 6. The onboarding experience in a top-edge island, where you can add a face.
 
 `setup.sh` no longer installs, calls, or configures Howdy. If Howdy is already

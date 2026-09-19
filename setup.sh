@@ -34,7 +34,7 @@ done_ "Arch-based KDE Plasma Wayland session"
 step "Installing FaceGate's dependencies"
 sudo pacman -S --needed --noconfirm \
   base-devel git pam python python-gobject python-cairo python-numpy \
-  gtk4 gtk4-layer-shell libappindicator polkit
+  gtk4 gtk4-layer-shell libappindicator polkit wayland plasma-wayland-protocols
 # The enrollment preview's face mesh; any system ONNX Runtime will do.
 if ! python3 -I -c 'import onnxruntime' 2>/dev/null; then
   sudo pacman -S --needed --noconfirm python-onnxruntime-cpu
@@ -92,19 +92,12 @@ sudo "${project_dir}/install.sh"
 done_ "FaceGate is active; only Gaze can return biometric success"
 
 step "Face unlock at the lock screen and login (optional)"
-info "At the login screen, press Enter on an empty password field: the island"
-info "looks for you and signs you in. A typed password signs in as usual."
-info "The lock screen unlocks as soon as Gaze sees you (Gaze's own KDE"
-info "integration; no island there). There is no Approve step on either:"
-info "you asked by sitting down. KWallet asks for its password once after a"
-info "face login."
+info "The lock screen starts looking for you as soon as it locks, with the"
+info "island over it. At the login screen, press Enter on an empty password"
+info "field and the island looks for you; a typed password signs in as usual."
+info "There is no Approve step on either: you asked by sitting down. KWallet"
+info "asks for its password once after a face login."
 if ask "Use your face at the lock screen and login?"; then
-  if ! command -v gaze-kde-pam >/dev/null; then
-    find_aur_helper
-    "${aur_helper}" -S --needed gaze-kde-bin
-    command -v gaze-kde-pam >/dev/null || fail "gaze-kde-bin did not install."
-  fi
-  sudo gaze-kde-pam enable --force
   sudo touch /etc/facegate/greeter
   sudo /usr/local/lib/facegate/refresh-pam
   done_ "Face unlock is on at the lock screen and login"

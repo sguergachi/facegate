@@ -14,7 +14,7 @@ if [[ -z ${target_user} || ${target_user} == root ]]; then
   exit 1
 fi
 
-for command in cc awk install; do
+for command in cc awk install pkg-config wayland-scanner; do
   command -v "${command}" >/dev/null || {
     echo "Missing required command: ${command}" >&2
     exit 1
@@ -65,6 +65,8 @@ trap cleanup EXIT
 cc -std=c11 -fPIC -shared -O2 -Wall -Wextra -Werror \
   -Wl,-z,relro,-z,now -o "${build_dir}/consent.so" \
   "${project_dir}/pam/facegate-consent.c" -lpam
+# The island is a native launcher so KWin can trust it over the lock screen.
+"${project_dir}/native/build.sh" "${build_dir}/native"
 
 install -d -m 0755 \
   /usr/local/bin \
@@ -83,7 +85,7 @@ cp -r --no-preserve=mode,ownership "${project_dir}/facegate" /usr/local/lib/face
 find /usr/local/lib/facegate/facegate -name __pycache__ -prune -exec rm -rf {} +
 chown -R root:root /usr/local/lib/facegate
 chmod -R u=rwX,go=rX /usr/local/lib/facegate
-install -o root -g root -m 0755 "${project_dir}/bin/facegate-hud" /usr/local/bin/facegate-hud
+install -o root -g root -m 0755 "${build_dir}/native/facegate-hud" /usr/local/bin/facegate-hud
 install -o root -g root -m 0755 "${project_dir}/bin/facegate-settings" /usr/local/bin/facegate-settings
 install -o root -g root -m 0755 "${project_dir}/bin/facegate-tray" /usr/local/bin/facegate-tray
 install -o root -g root -m 0755 "${project_dir}/bin/facegate-faces" /usr/local/lib/facegate/facegate-faces
@@ -93,6 +95,7 @@ install -o root -g root -m 0644 "${project_dir}/packaging/facegate.service" /usr
 install -o root -g root -m 0644 "${project_dir}/packaging/facegate-tray.service" /usr/local/lib/systemd/user/facegate-tray.service
 install -o root -g root -m 0644 "${project_dir}/packaging/facegate-greeter.service" /usr/local/lib/systemd/user/facegate-greeter.service
 install -o root -g root -m 0644 "${project_dir}/packaging/org.facegate.Settings.desktop" /usr/local/share/applications/org.facegate.Settings.desktop
+install -o root -g root -m 0644 "${project_dir}/packaging/org.facegate.Island.desktop" /usr/local/share/applications/org.facegate.Island.desktop
 install -o root -g root -m 0644 "${project_dir}/packaging/facegate-symbolic.svg" /usr/local/share/icons/hicolor/scalable/apps/facegate-symbolic.svg
 install -o root -g root -m 0644 "${project_dir}/packaging/facegate-gaze.hook" /etc/pacman.d/hooks/facegate-gaze.hook
 
@@ -127,6 +130,8 @@ user_systemctl=(runuser -u "${target_user}" -- env
   "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${target_uid}/bus"
   systemctl --user)
 "${user_systemctl[@]}" daemon-reload
+# KWin reads the island's lock screen grant from the application database.
+runuser -u "${target_user}" -- env "XDG_RUNTIME_DIR=/run/user/${target_uid}" kbuildsycoca6 >/dev/null 2>&1 || true
 # Preserve the current FaceGate password-in-island experience by keeping its
 # polkit agent as the only session agent. polkitd/PAM still validate passwords.
 "${user_systemctl[@]}" stop plasma-polkit-agent.service 2>/dev/null || true

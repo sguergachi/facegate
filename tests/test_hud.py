@@ -315,6 +315,30 @@ class SudoPasswordTests(unittest.TestCase):
         self.assertEqual(self.hud._present.call_args[0][0].title, "Looking for you")
 
 
+    def test_the_lock_screen_scan_says_it_is_unlocking(self):
+        self.hud.greeter = False
+        self.hud._present = mock.Mock()
+        self.hud.present_scanning = mock.Mock()
+        self.hud.handle_request({"phase": "scanning", "service": "kde-fingerprint"}, self.hud_side)
+        self.assertTrue(self.hud.unlocking)
+        with mock.patch.object(self.edge_hud.GLib, "timeout_add", return_value=0):
+            self.hud.present_result(False)
+        self.assertEqual(self.hud._present.call_args[0][0].detail, "Type your password to unlock.")
+        pam_side, hud_side = socket.socketpair()
+        self.hud.handle_request({"phase": "scanning", "service": "sudo"}, hud_side)
+        pam_side.close()
+        self.assertFalse(self.hud.unlocking)
+
+
+class LockScreenTests(unittest.TestCase):
+    def test_without_the_native_launcher_the_island_stays_under_the_lock(self):
+        from facegate import lockscreen
+
+        # Tests run under plain python3, which has no overlay grant to use.
+        self.assertIsNone(lockscreen._allow)
+        self.assertFalse(lockscreen.allow(mock.Mock()))
+
+
 class PreferencesTests(unittest.TestCase):
     def test_placement_and_enabled_defaults_and_updates_keep_other_keys(self):
         import tempfile
