@@ -108,4 +108,58 @@ EOF
 fi
 write_gated_pam "${polkit_source}" "${polkit_pam}" polkit-1
 
+# The login screen, when setup opted in: Plasma Login Manager's island runs as
+# its greeter user.
+greeter_flag=/etc/facegate/greeter
+greeter_user=plasmalogin
+greeter_pam=/etc/pam.d/plasmalogin
+greeter_vendor=/usr/lib/pam.d/plasmalogin
+greeter_begin='# FaceGate greeter gate - BEGIN'
+greeter_end='# FaceGate greeter gate - END'
+consent=/usr/local/lib/security/facegate/consent.so
+if [[ -f ${greeter_flag} ]] && getent passwd "${greeter_user}" >/dev/null &&
+  [[ -f ${greeter_pam} || -f ${greeter_vendor} ]]; then
+  # One scan per login: FaceGate's gate replaces Gaze's own greeter rule, and
+  # clearing Gaze's opt-in keeps its package upgrades from adding it back.
+  if command -v gaze-kde-pam >/dev/null; then
+    gaze-kde-pam disable-login >/dev/null || true
+  fi
+  [[ -f ${greeter_pam} ]] && greeter_source=${greeter_pam} || greeter_source=${greeter_vendor}
+  greeter_block=$(cat <<EOF
+${greeter_begin}
+# A typed password skips to the normal stack; an empty one asks Gaze, whose
+# verdict alone decides. A face mismatch ends here rather than counting as a
+# failed password in pam_faillock.
+-auth requisite                   pam_nologin.so
+-auth requisite                   pam_faillock.so preauth
+auth  [success=ignore default=5]  ${consent} greeter hud_user=${greeter_user}
+auth  [success=2 default=ignore]  ${gaze_pam}
+auth  [default=ignore]            ${consent} notify-failure hud_user=${greeter_user}
+auth  requisite                   pam_deny.so
+auth  [default=ignore]            ${consent} notify-success hud_user=${greeter_user}
+auth  sufficient                  pam_permit.so
+${greeter_end}
+EOF
+)
+  temporary="${work_dir}/plasmalogin.pam"
+  backup="/etc/facegate/plasmalogin.pam.$(date +%Y%m%d-%H%M%S-%N).bak"
+  cp -a "${greeter_source}" "${backup}"
+  awk -v begin="${greeter_begin}" -v end="${greeter_end}" -v block="${greeter_block}" '
+    $0 == begin || /^# BEGIN gaze / { managed = 1; next }
+    $0 == end || $0 == "# END gaze" { managed = 0; next }
+    managed { next }
+    /^[[:space:]]*-?auth[[:space:]]/ && $0 ~ /pam_gaze(_grosshack)?[.]so([[:space:]]|$)/ { next }
+    !added && /^[[:space:]]*-?auth[[:space:]]/ { print block; added = 1 }
+    { print }
+    END { if (!added || managed) exit 42 }
+  ' "${greeter_source}" > "${temporary}" || {
+    echo "Refusing to change ${greeter_pam}: could not construct a complete auth stack." >&2
+    exit 1
+  }
+  staged=$(mktemp "${greeter_pam}.facegate.XXXXXX")
+  install -o root -g root -m 0644 "${temporary}" "${staged}"
+  mv -f -- "${staged}" "${greeter_pam}"
+  echo "Updated ${greeter_pam}; backup: ${backup}"
+fi
+
 systemctl try-restart polkit.service >/dev/null 2>&1 || true

@@ -291,6 +291,30 @@ class SudoPasswordTests(unittest.TestCase):
         self.hud.present_approval.assert_not_called()
 
 
+    def test_the_login_screen_island_only_reports_scans(self):
+        self.hud.greeter = True
+        self.hud.present_approval = mock.Mock()
+        self.hud.handle_request({"phase": "approval"}, self.hud_side)
+        self.assertEqual(self.pam_side.recv(4096), b'{"approved":false,"reason":"greeter"}\n')
+        pam_side, hud_side = socket.socketpair()
+        self.hud.handle_request({"phase": "password"}, hud_side)
+        self.assertEqual(pam_side.recv(4096), b'{"password":null,"reason":"greeter"}\n')
+        pam_side.close()
+        self.hud.present_approval.assert_not_called()
+        self.hud.present_password.assert_not_called()
+
+    def test_the_login_screen_welcomes_you_back(self):
+        self.hud.greeter = True
+        self.hud._present = mock.Mock()
+        with mock.patch.object(self.edge_hud.GLib, "timeout_add", return_value=0):
+            self.hud.present_result(True)
+            self.assertEqual(self.hud._present.call_args[0][0].title, "Welcome back")
+            # Escape silenced the last login attempt, not the next one.
+            self.hud.silenced = True
+            self.hud.present_scanning()
+        self.assertEqual(self.hud._present.call_args[0][0].title, "Looking for you")
+
+
 class PreferencesTests(unittest.TestCase):
     def test_placement_and_enabled_defaults_and_updates_keep_other_keys(self):
         import tempfile

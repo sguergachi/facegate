@@ -61,10 +61,15 @@ session is outside this boundary.
 
 FaceGate changes only the `sudo` and `polkit-1` PAM services. It does not alter
 SSH or Gaze's integrations with other authentication surfaces. If you accept the
-optional setup step, the lock screen and login greeter get Gaze's own upstream
-`gaze-kde-pam` blocks. FaceGate doesn't manage those blocks, and there's no
-consent step on those screens; Gaze's block keeps `pam_nologin` and
-`pam_faillock preauth` ahead of the face match. Uninstalling FaceGate leaves Gaze installed and replaces the managed
+optional setup step, the lock screen gets Gaze's own upstream `gaze-kde-pam`
+block, and `plasmalogin` gets a FaceGate greeter block. In that block, the
+consent module's `greeter` mode reads the password the greeter already holds:
+a typed password goes to the normal stack, and an empty field goes to
+`pam_gaze.so`, whose verdict alone authenticates. The module sends only
+display updates to the greeter user's island socket, and it checks that
+socket's owner and peer uid the same way it does for sudo. Both blocks keep
+`pam_nologin` and `pam_faillock preauth` ahead of the face match. There's no
+consent step on either screen. Uninstalling FaceGate leaves Gaze installed and replaces the managed
 block with Gaze's normal upstream PAM rule.
 
 Biometrics are a convenience credential, not a substitute for a strong

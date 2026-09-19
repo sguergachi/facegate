@@ -91,6 +91,7 @@ install -o root -g root -m 0755 "${project_dir}/scripts/refresh-pam" /usr/local/
 install -o root -g root -m 0755 "${build_dir}/consent.so" /usr/local/lib/security/facegate/consent.so
 install -o root -g root -m 0644 "${project_dir}/packaging/facegate.service" /usr/local/lib/systemd/user/facegate.service
 install -o root -g root -m 0644 "${project_dir}/packaging/facegate-tray.service" /usr/local/lib/systemd/user/facegate-tray.service
+install -o root -g root -m 0644 "${project_dir}/packaging/facegate-greeter.service" /usr/local/lib/systemd/user/facegate-greeter.service
 install -o root -g root -m 0644 "${project_dir}/packaging/org.facegate.Settings.desktop" /usr/local/share/applications/org.facegate.Settings.desktop
 install -o root -g root -m 0644 "${project_dir}/packaging/facegate-symbolic.svg" /usr/local/share/icons/hicolor/scalable/apps/facegate-symbolic.svg
 install -o root -g root -m 0644 "${project_dir}/packaging/facegate-gaze.hook" /etc/pacman.d/hooks/facegate-gaze.hook
@@ -109,6 +110,10 @@ rm -f \
 
 systemctl daemon-reload
 systemctl enable --now gazed.service
+# The login screen's island starts with Plasma Login Manager's greeter session.
+if getent passwd plasmalogin >/dev/null; then
+  systemctl --global enable facegate-greeter.service
+fi
 systemctl try-restart polkit.service >/dev/null 2>&1 || true
 
 # Gaze ships colour-only. Hand it the infrared camera, if there is one, through

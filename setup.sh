@@ -92,10 +92,12 @@ sudo "${project_dir}/install.sh"
 done_ "FaceGate is active; only Gaze can return biometric success"
 
 step "Face unlock at the lock screen and login (optional)"
-info "Gaze's own KDE integration can unlock the lock screen as soon as it sees you,"
-info "and log you in when you press Enter on an empty password field at the login"
-info "screen. There is no Approve step there: you asked by sitting down. Your"
-info "password keeps working, and KWallet asks for it once after a face login."
+info "At the login screen, press Enter on an empty password field: the island"
+info "looks for you and signs you in. A typed password signs in as usual."
+info "The lock screen unlocks as soon as Gaze sees you (Gaze's own KDE"
+info "integration; no island there). There is no Approve step on either:"
+info "you asked by sitting down. KWallet asks for its password once after a"
+info "face login."
 if ask "Use your face at the lock screen and login?"; then
   if ! command -v gaze-kde-pam >/dev/null; then
     find_aur_helper
@@ -103,10 +105,11 @@ if ask "Use your face at the lock screen and login?"; then
     command -v gaze-kde-pam >/dev/null || fail "gaze-kde-bin did not install."
   fi
   sudo gaze-kde-pam enable --force
-  sudo gaze-kde-pam enable-login
-  done_ "Face unlock is on; turn it off with: sudo gaze-kde-pam disable && sudo gaze-kde-pam disable-login"
+  sudo touch /etc/facegate/greeter
+  sudo /usr/local/lib/facegate/refresh-pam
+  done_ "Face unlock is on at the lock screen and login"
 else
-  info "Skipped. Run ./setup.sh again, or sudo gaze-kde-pam enable/enable-login, to add it later."
+  info "Skipped. Run ./setup.sh again to add it later."
 fi
 
 step "Meeting FaceGate"
