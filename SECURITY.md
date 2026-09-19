@@ -60,8 +60,11 @@ session is outside this boundary.
 ## Scope
 
 FaceGate changes only the `sudo` and `polkit-1` PAM services. It does not alter
-SDDM, the KDE lock screen, SSH, or Gaze's integrations with other authentication
-surfaces. Uninstalling FaceGate leaves Gaze installed and replaces the managed
+SSH or Gaze's integrations with other authentication surfaces. If you accept the
+optional setup step, the lock screen and login greeter get Gaze's own upstream
+`gaze-kde-pam` blocks. FaceGate doesn't manage those blocks, and there's no
+consent step on those screens; Gaze's block keeps `pam_nologin` and
+`pam_faillock preauth` ahead of the face match. Uninstalling FaceGate leaves Gaze installed and replaces the managed
 block with Gaze's normal upstream PAM rule.
 
 Biometrics are a convenience credential, not a substitute for a strong

@@ -63,8 +63,9 @@ model.
 The detailed component boundary, failure invariants, and known limitations are
 documented in [SECURITY.md](SECURITY.md).
 
-SDDM and the lock screen are deliberately untouched. FaceGate gates only `sudo`
-and polkit elevation; Gaze integrations for other surfaces remain separate.
+FaceGate gates only `sudo` and polkit elevation. The lock screen and login
+screen are handled by Gaze's own KDE integration, which setup offers to turn on
+(see [Lock screen and login](#lock-screen-and-login)).
 
 ## Experience
 
@@ -94,6 +95,35 @@ Face names and sample counts come from Gaze. Gaze owns all template storage and
 authorization, so the same faces appear in `gaze list-faces` and its official
 tools.
 
+## Lock screen and login
+
+Setup can also turn on Gaze's official KDE integration (`gaze-kde-bin`,
+`gaze-kde-pam`). FaceGate doesn't change anything on these screens:
+
+- **Lock screen:** KScreenLocker runs Gaze in its biometric slot
+  (`/etc/pam.d/kde-fingerprint`) as soon as the screen locks, next to the
+  password field. Look at the camera and it unlocks. You get one scan per lock.
+  If it gives up while you're away, press Enter on the empty password field to
+  start another scan.
+- **Login (Plasma Login Manager or SDDM):** these greeters call PAM only when
+  you submit the form. Press Enter with the password field empty and look at
+  the camera. A face scan runs before your password is checked, just as a
+  fingerprint reader would.
+
+There is no island or **Approve** step on these screens: they run before or
+outside your desktop session, and sitting down at them is the request. A
+locked-out (`faillock`) or `nologin` account can't be unlocked by face. Your
+password still works on both screens. After a face login, KWallet asks for
+your password once because no password was typed for it to reuse.
+
+Turn it on or off yourself:
+
+```bash
+sudo gaze-kde-pam enable && sudo gaze-kde-pam enable-login     # on
+sudo gaze-kde-pam disable && sudo gaze-kde-pam disable-login   # off
+gaze-kde-pam status
+```
+
 ## Install
 
 Requirements: an Arch-based system, KDE Plasma on Wayland, Gaze 0.2.7 or newer,
@@ -117,7 +147,9 @@ Run setup as your normal user. It installs:
    colour-only; the installer finds the luma-only V4L2 node and sets it through
    Gaze's own `Config` API, keeping any IR camera you already chose. Gaze then
    matches colour and IR together, and the enrollment preview shows both.
-5. The onboarding experience in a top-edge island, where you can add a face.
+5. Optionally, Gaze's `gaze-kde-bin` package, for face unlock at the lock
+   screen and login (see [Lock screen and login](#lock-screen-and-login)).
+6. The onboarding experience in a top-edge island, where you can add a face.
 
 `setup.sh` no longer installs, calls, or configures Howdy. If Howdy is already
 installed, the migration removes its active rules from the two PAM services but

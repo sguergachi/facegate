@@ -41,6 +41,21 @@ if ! python3 -I -c 'import onnxruntime' 2>/dev/null; then
 fi
 done_ "Packages from the official repositories"
 
+aur_helper=
+find_aur_helper() {
+  [[ -n ${aur_helper} ]] && return
+  for helper in paru yay; do
+    command -v "${helper}" >/dev/null && { aur_helper=${helper}; return; }
+  done
+  info "Gaze is distributed through the AUR, and no AUR helper was found."
+  ask "Install paru now?" || fail "Install paru or yay, then run ./setup.sh again."
+  helper_dir=$(mktemp -d)
+  git clone --depth 1 https://aur.archlinux.org/paru-bin.git "${helper_dir}/paru-bin"
+  (cd "${helper_dir}/paru-bin" && makepkg -si --noconfirm)
+  rm -rf -- "${helper_dir}"
+  aur_helper=paru
+}
+
 step "Installing Gaze (biometric security backend)"
 gaze_pam=
 for candidate in /usr/lib/security/pam_gaze.so /usr/lib64/security/pam_gaze.so /lib/security/pam_gaze.so /lib/*/security/pam_gaze.so; do
@@ -49,19 +64,7 @@ done
 if command -v gazed >/dev/null && command -v gaze >/dev/null && [[ -n ${gaze_pam} ]]; then
   done_ "Gaze's daemon, CLI, and PAM module are already installed"
 else
-  aur_helper=
-  for helper in paru yay; do
-    command -v "${helper}" >/dev/null && { aur_helper=${helper}; break; }
-  done
-  if [[ -z ${aur_helper} ]]; then
-    info "Gaze is distributed through the AUR, and no AUR helper was found."
-    ask "Install paru now?" || fail "Install paru or yay, then run ./setup.sh again."
-    helper_dir=$(mktemp -d)
-    git clone --depth 1 https://aur.archlinux.org/paru-bin.git "${helper_dir}/paru-bin"
-    (cd "${helper_dir}/paru-bin" && makepkg -si --noconfirm)
-    rm -rf -- "${helper_dir}"
-    aur_helper=paru
-  fi
+  find_aur_helper
   info "Installing Gaze's prebuilt daemon, CLI, and official PAM module with ${aur_helper}."
   "${aur_helper}" -S --needed gaze-bin
   pacman -Q gaze-bin >/dev/null 2>&1 || fail "Gaze did not install."
@@ -87,6 +90,24 @@ fi
 step "Connecting the existing FaceGate experience to Gaze"
 sudo "${project_dir}/install.sh"
 done_ "FaceGate is active; only Gaze can return biometric success"
+
+step "Face unlock at the lock screen and login (optional)"
+info "Gaze's own KDE integration can unlock the lock screen as soon as it sees you,"
+info "and log you in when you press Enter on an empty password field at the login"
+info "screen. There is no Approve step there: you asked by sitting down. Your"
+info "password keeps working, and KWallet asks for it once after a face login."
+if ask "Use your face at the lock screen and login?"; then
+  if ! command -v gaze-kde-pam >/dev/null; then
+    find_aur_helper
+    "${aur_helper}" -S --needed gaze-kde-bin
+    command -v gaze-kde-pam >/dev/null || fail "gaze-kde-bin did not install."
+  fi
+  sudo gaze-kde-pam enable --force
+  sudo gaze-kde-pam enable-login
+  done_ "Face unlock is on; turn it off with: sudo gaze-kde-pam disable && sudo gaze-kde-pam disable-login"
+else
+  info "Skipped. Run ./setup.sh again, or sudo gaze-kde-pam enable/enable-login, to add it later."
+fi
 
 step "Meeting FaceGate"
 info "FaceGate opens to show how it works and add your face."
