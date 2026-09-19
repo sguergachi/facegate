@@ -6,6 +6,17 @@
  * PAM stack installed by FaceGate treats that result as "continue to Gaze",
  * never as authentication success.  The notification modes always return
  * PAM_IGNORE and are best-effort UI updates only.
+ *
+ * "greeter" mode serves the login screen, where submitting the form is the
+ * request.  It takes the password the greeter already holds: a typed one goes
+ * on to the normal password stack, an empty one starts the face scan.  Either
+ * way the result only picks the next step, never the verdict.
+ *
+ * "scanning" mode serves the lock screen's biometric slot, which KScreenLocker
+ * starts by itself: it only tells the island a scan is starting.
+ *
+ * "hud_user=NAME" sends HUD messages to NAME's island instead of the PAM
+ * user's; the login screen's island runs as the greeter's own user.
  */
 
 #define _GNU_SOURCE
@@ -13,6 +24,7 @@
 #include <errno.h>
 #include <pwd.h>
 #include <security/pam_appl.h>
+#include <security/pam_ext.h>
 #include <security/pam_modules.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -46,6 +58,18 @@ static void log_message(const char *message)
 static const char *module_mode(int argc, const char **argv)
 {
     return argc > 0 && argv != NULL && argv[0] != NULL ? argv[0] : "consent";
+}
+
+/* The island to talk to: NAME from "hud_user=NAME", else the PAM user. */
+static uid_t hud_uid(int argc, const char **argv, uid_t user_uid)
+{
+    for (int index = 1; index < argc && argv != NULL; index++) {
+        if (argv[index] != NULL && strncmp(argv[index], "hud_user=", 9) == 0) {
+            const struct passwd *entry = getpwnam(argv[index] + 9);
+            return entry != NULL ? entry->pw_uid : (uid_t)-1;
+        }
+    }
+    return user_uid;
 }
 
 static bool local_request(pam_handle_t *pamh)
@@ -213,6 +237,26 @@ static bool consent_from_hud(uid_t uid, const char *service, const char *usernam
     return strstr(response, "\"approved\":true") != NULL;
 }
 
+/* A scan is starting; the service tells the island which screen it is on. */
+static void notify_scanning(uid_t uid, const char *service)
+{
+    char service_token[64] = {0};
+    char message[128];
+    int length;
+    int fd;
+
+    safe_token(service, service_token, sizeof(service_token));
+    length = snprintf(message, sizeof(message),
+                      "{\"phase\":\"scanning\",\"service\":\"%s\"}\n", service_token);
+    if (length <= 0 || length >= (int)sizeof(message))
+        return;
+    fd = connect_hud(uid, 1);
+    if (fd < 0)
+        return;
+    (void)send_all(fd, message, (size_t)length);
+    close(fd);
+}
+
 static void notify_hud(uid_t uid, const char *phase, const char *result)
 {
     char message[192];
@@ -232,6 +276,28 @@ static void notify_hud(uid_t uid, const char *phase, const char *result)
     close(fd);
 }
 
+/* Whether the greeter was submitted with a password.  The greeter answers this
+ * prompt with what was typed, exactly as it answers pam_unix; a typed password
+ * is kept as PAM_AUTHTOK for pam_unix (try_first_pass) and pam_kwallet5. */
+static bool greeter_password_typed(pam_handle_t *pamh)
+{
+    const void *item = NULL;
+    char *response = NULL;
+    bool typed;
+
+    if (pam_get_item(pamh, PAM_AUTHTOK, &item) == PAM_SUCCESS && item != NULL)
+        return ((const char *)item)[0] != '\0';
+    if (pam_prompt(pamh, PAM_PROMPT_ECHO_OFF, &response, "Password: ") != PAM_SUCCESS ||
+        response == NULL)
+        return false;
+    typed = response[0] != '\0';
+    if (typed)
+        typed = pam_set_item(pamh, PAM_AUTHTOK, response) == PAM_SUCCESS;
+    explicit_bzero(response, strlen(response));
+    free(response);
+    return typed;
+}
+
 PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc,
                                    const char **argv)
 {
@@ -246,17 +312,36 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc,
     (void)flags;
     context = user_context(pamh, &username, &uid, &service);
     if (context != PAM_SUCCESS)
-        return strcmp(mode, "consent") == 0 ? context : PAM_IGNORE;
+        return strcmp(mode, "consent") == 0 || strcmp(mode, "greeter") == 0 ? context
+                                                                            : PAM_IGNORE;
+    const uid_t hud = hud_uid(argc, argv, uid);
 
     if (strcmp(mode, "notify-failure") == 0) {
         if (pam_get_data(pamh, FACEGATE_PASSWORD_ONLY_DATA,
                          &password_only_data) != PAM_SUCCESS ||
             password_only_data != &password_only_marker)
-            notify_hud(uid, "result", "failure");
+            notify_hud(hud, "result", "failure");
         return PAM_IGNORE;
     }
     if (strcmp(mode, "notify-success") == 0) {
-        notify_hud(uid, "result", "success");
+        notify_hud(hud, "result", "success");
+        return PAM_IGNORE;
+    }
+    if (strcmp(mode, "greeter") == 0) {
+        if (!local_request(pamh))
+            return PAM_AUTHINFO_UNAVAIL;
+        if (greeter_password_typed(pamh)) {
+            (void)pam_set_data(pamh, FACEGATE_PASSWORD_ONLY_DATA,
+                               &password_only_marker, NULL);
+            return PAM_AUTHINFO_UNAVAIL;
+        }
+        log_message("login submitted without a password; delegating to Gaze");
+        notify_scanning(hud, service);
+        return PAM_SUCCESS;
+    }
+    if (strcmp(mode, "scanning") == 0) {
+        if (local_request(pamh))
+            notify_scanning(hud, service);
         return PAM_IGNORE;
     }
     if (strcmp(mode, "consent") != 0 || !local_request(pamh))
@@ -270,7 +355,7 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc,
         return PAM_AUTHINFO_UNAVAIL;
     }
     log_message("face scan approved; delegating authentication to Gaze");
-    notify_hud(uid, "scanning", NULL);
+    notify_scanning(uid, service);
     return PAM_SUCCESS;
 }
 

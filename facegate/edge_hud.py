@@ -37,7 +37,7 @@ gi.require_version("Gtk4LayerShell", "1.0")
 gi.require_version("Pango", "1.0")
 from gi.repository import Gdk, Gio, GLib, Graphene, Gsk, Gtk, Gtk4LayerShell, Pango  # noqa: E402
 
-from . import preferences
+from . import lockscreen, preferences
 from .faces import GazeClient, GazeError
 from .protocol import MAX_MESSAGE_BYTES, MAX_STREAM_BYTES, PREVIEW_HEIGHT, PREVIEW_WIDTH, decode, default_socket_path, encode
 
@@ -770,6 +770,13 @@ VERIFIED_HOLD_MS = 600
 SCANNING = View("scanning", "Looking for you", "Hold still for a moment.", False)
 SUCCESS = View("success", "Verified", "Continuing securely.", False)
 FAILURE = View("failure", "Not recognized", "Use your password instead.", False)
+# The login and lock screens, where the island only ever reports the scan.
+GREETER_SUCCESS = View("success", "Welcome back", "Signing you in…", False)
+GREETER_FAILURE = View("failure", "Not recognized", "Type your password to sign in.", False)
+UNLOCK_SUCCESS = View("success", "Welcome back", "Unlocking…", False)
+UNLOCK_FAILURE = View("failure", "Not recognized", "Type your password to unlock.", False)
+# PAM services of KScreenLocker's biometric slots.
+LOCK_SCREEN_SERVICES = ("kde-fingerprint", "kde-smartcard")
 ENROLLING = View("scanning", "Adding your face", "Waiting for the camera…", True, primary="", secondary="Cancel", preview=True)
 ENROLLED = View("success", "Face added", "You can now approve with a glance.", False, preview=True)
 
@@ -877,7 +884,13 @@ DISABLED_REPLIES = {"approval": {"approved": False}, "password": {"password": No
 
 
 class EdgeHud:
-    def __init__(self) -> None:
+    # On the login screen: no approvals, passwords or configuration.
+    greeter = False
+    # The current scan unlocks the lock screen.
+    unlocking = False
+
+    def __init__(self, greeter: bool = False) -> None:
+        self.greeter = greeter
         self.window = Gtk.Window()
         self.window.set_decorated(False)
         self.window.set_resizable(False)
@@ -889,10 +902,12 @@ class EdgeHud:
         Gtk4LayerShell.set_keyboard_mode(self.window, Gtk4LayerShell.KeyboardMode.ON_DEMAND)
         self.positioned = False
         self.window.connect("map", self._position_on_mapped_monitor)
+        # Each map is a new layer surface; KWin needs the mark before its first buffer.
+        self.window.connect("map", lambda *_: lockscreen.allow(self.window))
 
         self.pending: PendingApproval | None = None
         # Off: prompts fall back to their usual password dialogs, unseen.
-        self.enabled = preferences.enabled(preferences.load())
+        self.enabled = greeter or preferences.enabled(preferences.load())
         # sudo waiting for a password typed in the island (no face enrolled).
         self.sudo_password: socket.socket | None = None
         self.sudo_password_watch: int | None = None
@@ -1701,11 +1716,15 @@ class EdgeHud:
 
     def present_approval(self, requester: object = None) -> None:
         self.silenced = False
+        self.unlocking = False
         self._present(approval_view(requester))
 
     def present_scanning(self) -> None:
         # Howdy cannot be interrupted once running, so no action is offered.
         # If sudo is cancelled mid-scan no result ever arrives; never linger.
+        if self.greeter or self.unlocking:
+            # Each attempt is a fresh request; Escape silenced only the last.
+            self.silenced = False
         if self.silenced or self.enrolling:
             return
         self._present(SCANNING)
@@ -1716,7 +1735,12 @@ class EdgeHud:
         # replace the preview that has already taken over.
         if self.silenced or self.enrolling:
             return
-        view = SUCCESS if success else FAILURE
+        if self.greeter:
+            view = GREETER_SUCCESS if success else GREETER_FAILURE
+        elif self.unlocking:
+            view = UNLOCK_SUCCESS if success else UNLOCK_FAILURE
+        else:
+            view = SUCCESS if success else FAILURE
         if title or detail:
             view = View(view.state, title or view.title, detail or view.detail, False)
         if self.view and self.view.password:
@@ -1967,6 +1991,9 @@ class EdgeHud:
 
     def handle_request(self, message: dict[str, Any], connection: socket.socket) -> bool:
         phase = message.get("phase")
+        if self.greeter and phase not in ("scanning", "result"):
+            self.reply(connection, {**DISABLED_REPLIES.get(phase, {"ok": False}), "reason": "greeter"})
+            return False
         if not self.enabled and phase in DISABLED_REPLIES:
             # Turned off: never show; PAM falls through to the usual prompt.
             self.reply(connection, {**DISABLED_REPLIES[phase], "reason": "disabled"})
@@ -2009,6 +2036,7 @@ class EdgeHud:
                 self.approval_timeout = GLib.timeout_add(max(1_000, requested), self._approval_timed_out)
         elif phase == "scanning":
             self.reply(connection, {"ok": True})
+            self.unlocking = message.get("service") in LOCK_SCREEN_SERVICES
             self.present_scanning()
         elif phase == "result":
             self.reply(connection, {"ok": True})
@@ -2181,6 +2209,7 @@ def main() -> int:
     parser.add_argument("--demo-enroll", action="store_true", help="loop the Add Face scan with the real camera, saving nothing")
     parser.add_argument("--camera", help="camera for --demo-enroll (default: the first infrared one)")
     parser.add_argument("--no-polkit-agent", action="store_true", help="leave polkit prompts to the desktop's own agent")
+    parser.add_argument("--greeter", action="store_true", help="run on the login screen: show face scans only")
     args = parser.parse_args()
     if args.demo_enroll:
         from .enroll_demo import main as enroll_demo
@@ -2195,11 +2224,11 @@ def main() -> int:
             return 0
     args.socket.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     args.socket.unlink(missing_ok=True)
-    hud = EdgeHud()
+    hud = EdgeHud(greeter=args.greeter)
     server = HudServer(args.socket, hud)
     server.start()
     agent = None
-    if not args.no_polkit_agent:
+    if not (args.no_polkit_agent or args.greeter):
         try:
             from .polkit_agent import FaceGatePolkitAgent
 

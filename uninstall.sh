@@ -52,6 +52,27 @@ ungate_pam() {
 ungate_pam /etc/pam.d/sudo sudo
 ungate_pam /etc/pam.d/polkit-1 polkit-1
 
+# The login and lock screens go back to their plain password stacks. Gaze's
+# own KDE rules stay off; `sudo gaze-kde-pam enable` brings them back.
+for service in plasmalogin:greeter kde-fingerprint:'lock screen'; do
+  face_pam="/etc/pam.d/${service%%:*}"
+  face_begin="# FaceGate ${service#*:} gate - BEGIN"
+  face_end="# FaceGate ${service#*:} gate - END"
+  [[ -f ${face_pam} ]] && grep -Fxq "${face_begin}" "${face_pam}" || continue
+  temporary="${work_dir}/${service%%:*}.pam"
+  awk -v begin="${face_begin}" -v end="${face_end}" '
+    $0 == begin { managed = 1; next }
+    $0 == end { managed = 0; next }
+    !managed { print }
+  ' "${face_pam}" > "${temporary}"
+  staged=$(mktemp "${face_pam}.facegate.XXXXXX")
+  install -o root -g root -m 0644 "${temporary}" "${staged}"
+  mv -f -- "${staged}" "${face_pam}"
+  echo "Removed FaceGate's gate from ${face_pam}."
+done
+rm -f /etc/facegate/greeter
+systemctl --global disable facegate-greeter.service 2>/dev/null || true
+
 target_user=${SUDO_USER:-}
 if [[ -n ${target_user} && ${target_user} != root ]]; then
   target_uid=$(id -u "${target_user}")
@@ -71,7 +92,9 @@ rm -f \
   /usr/local/bin/facegate-tray \
   /usr/local/lib/systemd/user/facegate.service \
   /usr/local/lib/systemd/user/facegate-tray.service \
+  /usr/local/lib/systemd/user/facegate-greeter.service \
   /usr/local/share/applications/org.facegate.Settings.desktop \
+  /usr/local/share/applications/org.facegate.Island.desktop \
   /usr/local/share/icons/hicolor/scalable/apps/facegate-symbolic.svg \
   /etc/pacman.d/hooks/facegate-gaze.hook \
   /usr/share/polkit-1/actions/org.facegate.faces.policy
