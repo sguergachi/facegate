@@ -582,6 +582,25 @@ class CoachingArrowTests(unittest.TestCase):
         height = lambda points: float(numpy.ptp(points[:, 1]))
         self.assertAlmostEqual(height(after), height(before), delta=1.0)
 
+    def test_moving_closer_or_back_grows_or_shrinks_the_preview_face(self):
+        import numpy
+
+        framing = faces_mesh.Framing(PREVIEW_WIDTH, PREVIEW_HEIGHT)
+        face = numpy.array([[300, 200, 0.5], [340, 260, 1.0], [320, 300, 0.2]], numpy.float32)
+        centre = face[:, :2].mean(axis=0)
+        height = lambda points: float(numpy.ptp(points[:, 1]))
+        start = height(framing.place(face, (640, 480)))
+        for _ in range(20):
+            near = framing.place(numpy.hstack([(face[:, :2] - centre) * 1.2 + centre, face[:, 2:]]), (640, 480))
+        self.assertAlmostEqual(height(near), start * 1.2, delta=1.0)
+        for _ in range(20):
+            far = framing.place(numpy.hstack([(face[:, :2] - centre) * 0.7 + centre, face[:, 2:]]), (640, 480))
+        self.assertAlmostEqual(height(far), start * 0.7, delta=1.0)
+        # Far past the limits, the zoom gives way rather than lose the face.
+        for _ in range(40):
+            huge = framing.place(numpy.hstack([(face[:, :2] - centre) * 3 + centre, face[:, 2:]]), (640, 480))
+        self.assertAlmostEqual(height(huge), PREVIEW_HEIGHT * faces_mesh.Framing.FILL[1], delta=1.0)
+
 
 class CameraTests(unittest.TestCase):
     def setUp(self):

@@ -149,18 +149,24 @@ class FaceMesh:
 
 
 class Framing:
-    """Where the preview looks: the face, eased, filling the frame's height.
+    """Where the preview looks: centred on the face, at a steady zoom.
+
+    The zoom is chosen when a face first appears and then held in camera
+    pixels, so moving closer or farther grows or shrinks the face in the
+    preview as it would in a mirror. Only the centre follows the face.
 
     Gaze switches between its colour and IR cameras at every pose, and they
     differ in resolution and field of view, so the same face lands on other
-    pixels. The view is therefore kept relative to the face (its offset and
-    zoom in face heights) and carried across a camera switch in those terms,
-    so the preview never jumps.
+    pixels. The view is therefore carried across a camera switch relative to
+    the face (its offset and zoom in face heights), so the preview never jumps.
     """
 
-    # The face mesh spans forehead to chin; the preview shows it this many
-    # times over, so the brow and jaw clear the rounded corners.
+    # The face mesh spans forehead to chin; when it first appears the preview
+    # shows it this many times over, so the brow and jaw clear the corners.
     ZOOM = 1.35
+    # How much of the preview's height the face may fill, from far to near.
+    # Past these the zoom gives way, so the face neither overflows nor vanishes.
+    FILL = (0.3, 0.95)
     EASE = 0.35
 
     def __init__(self, width: int, height: int) -> None:
@@ -181,13 +187,16 @@ class Framing:
         low, high = mesh[:, :2].min(axis=0), mesh[:, :2].max(axis=0)
         centre = (low + high) / 2
         face = max(float(high[1] - low[1]), 1.0)
-        target = numpy.array([*centre, face * self.ZOOM], numpy.float32)
         if self.view is None or self.relative is None:
-            self.view = target
+            self.view = numpy.array([*centre, face * self.ZOOM], numpy.float32)
         elif source != self.source:
             self.view = numpy.array([*(centre + self.relative[:2] * face), self.relative[2] * face], numpy.float32)
         else:
-            self.view += (target - self.view) * self.EASE
+            self.view[:2] += (centre - self.view[:2]) * self.EASE
+            # The span stays put, so distance shows as size, until the face
+            # would fill too much or too little of the preview.
+            span = float(numpy.clip(self.view[2], face / self.FILL[1], face / self.FILL[0]))
+            self.view[2] += (span - self.view[2]) * self.EASE
         self.source = source
         self.relative = numpy.array([*(self.view[:2] - centre) / face, self.view[2] / face], numpy.float32)
         cx, cy, span = self.view
