@@ -56,12 +56,15 @@ is the material; content is light on it.
 | Failure (red) | `#ff453a` | Not recognized, errors, destructive buttons |
 
 Rules:
-- Colour carries meaning, never decoration. Cyan means looking, green means
-  done, red means failed or destructive. Nothing else is coloured.
+- Colour carries meaning, never decoration. Cyan means looking, and what the
+  camera is asking of you; green means done, red means failed or
+  destructive. Nothing else is coloured.
 - Primary buttons are white with black text. Secondary buttons are `#1c1c1e`
   with white text. There is no blue accent button.
-- The enrollment starlight is the only imagery. It is tinted cool
-  (`#d6f0ff`), and takes on the result colour only at a result.
+- The enrollment starlight is the only imagery. The face is tinted cool
+  (`#d6f0ff`), and takes on the result colour only at a result. The coaching
+  guide is cyan: it is an instruction, not part of your reflection, so it
+  must never look like dust shed by the face.
 
 ### Typography
 
@@ -522,10 +525,12 @@ and grows to fit (surface height 440).
     adaptive smoothing is 140 ms for noise and 50 ms for deliberate turns.
   - *Alive:* resting face motes drift only 0.08 pt with steady radiance; 240
     ambient motes stay drifting faintly around the face.
-  - *Framing:* the view follows the face, eased, with the mesh filling
-    1 / 1.35 of the height. Gaze switches between its colour and IR cameras
-    at every pose; the view is kept in face heights relative to the face and
-    carried across the switch, so the preview never jumps.
+  - *Framing:* the view follows the face's centre, eased. Its zoom is set
+    when a face appears (the mesh filling 1 / 1.35 of the height) and then
+    held in camera pixels, so moving closer or back grows or shrinks the face
+    as in a mirror; past 30–95% of the height the zoom gives way. Gaze
+    switches between its colour and IR cameras at every pose; the view is
+    carried across the switch in face heights, so the preview never jumps.
   - *Fallback:* where the mesh can't run, motes take a field over the frame
     and its brightness (colour frames inverted under a head-and-shoulders
     spotlight).
@@ -540,7 +545,8 @@ and grows to fit (surface height 440).
   Camera problems (too dark, clipped, off-centre, distance) outrank pose
   advice. A new instruction must hold 0.4 s before it replaces the one
   showing, so a wavering head doesn't make the words flicker.
-- **Coaching guide:** each directional instruction also draws a guide, in
+- **Coaching guide:** each directional instruction also draws a guide in
+  cyan (grains and hairlines lifted 30% toward white, glow pure cyan), in
   precise 1 pt hairlines that carry the reading, with 420 motes of its own
   dust streaming along them for life. The chevron is the brightest point of
   the scene, with a soft glow. A turn is an arc orbiting the head under the
@@ -561,11 +567,21 @@ and grows to fit (surface height 440).
 - **Fluidity:** IR emitters often light only every other frame, so unlit
   frames are skipped and each lit frame cross-fades into the next over 70 ms
   on the frame clock.
-- **Progress:** a trace on the preview's rim, clockwise from top center. A
-  short comet circles until the first sample. Each of the five samples springs
-  the 1.25 pt trace forward with a soft blurred glow. Capture pulses affect
-  only the rim, preserving steady face exposure. Success closes it green and tints the
-  image green. Failure turns it red with the mark's decaying shake.
+- **Progress:** the preview's rim is cut into five segments, one per Gaze
+  pose, clockwise from top center with 8 pt gaps, so what is done and what
+  is left can be counted at a glance. A pose not yet reached is a faint white
+  track (16%). The pose being asked for is a dim cyan track (26%) with a
+  shimmer running along it every 1.6 s, the guide's cycle. A finished pose
+  is solid cyan light (1.75 pt, blurred glow).
+- **Step complete:** the segment ignites. Its fill sweeps clockwise in
+  360 ms behind a bright bead, white-hot, flaring wider and brighter, then
+  cools to cyan over about half a second; 22 sparks shed inward as the sweep
+  passes and fade over 0.9 s. Poses landing together ignite one after the
+  other. All of it stays on the rim, preserving steady face exposure; the
+  hint says "Got it.". Reduced motion keeps the flare but drops the sweep,
+  shimmer and sparks. Success ignites what is left and closes the gaps into
+  one green ring, tinting the image green. Failure turns it red with the
+  mark's decaying shake.
 - **Copy:** "Adding your face", with the detail line as the scan's live hint.
   The hint cross-fades (100 ms out, 240 ms in) while the island eases to the
   new height. A single full-width **Cancel** replaces the Deny/Approve pair.

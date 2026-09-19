@@ -19,6 +19,64 @@ class HudRequestTests(unittest.TestCase):
                 model.pulse = pulse
                 self.assertEqual(preview_look(model), steady)
 
+    @staticmethod
+    def preview():
+        """PreviewArea's step bookkeeping, without a widget."""
+        import types
+
+        import numpy
+
+        from facegate import edge_hud
+
+        preview = types.SimpleNamespace(
+            model=edge_hud.PreviewModel(), sparks=numpy.zeros((0, 6), numpy.float32),
+            random=numpy.random.default_rng(1), rim_length=900.0,
+        )
+        for name in ("set_progress", "set_state", "_complete", "_segment", "_shed"):
+            setattr(preview, name, types.MethodType(getattr(edge_hud.PreviewArea, name), preview))
+        return preview
+
+    def test_each_captured_pose_ignites_its_own_segment(self):
+        from facegate.edge_hud import ENROLL_STEPS, IGNITE_SECONDS, SPARKS_PER_STEP
+
+        preview = self.preview()
+        preview.set_progress(1 / ENROLL_STEPS)
+        self.assertEqual(preview.model.steps, 1)
+        self.assertEqual(len(preview.model.ignited), 1)
+        self.assertEqual(len(preview.sparks), SPARKS_PER_STEP)
+        # Repeats and regressions change nothing.
+        preview.set_progress(1 / ENROLL_STEPS)
+        preview.set_progress(0.0)
+        self.assertEqual(preview.model.steps, 1)
+        # Two poses landing together ignite one after the other.
+        preview.set_progress(3 / ENROLL_STEPS)
+        first, second, third = preview.model.ignited
+        self.assertAlmostEqual(third - second, IGNITE_SECONDS * 0.6)
+        preview.set_state("success")
+        self.assertEqual(preview.model.steps, ENROLL_STEPS)
+        self.assertEqual(len(preview.model.ignited), ENROLL_STEPS)
+
+    def test_segments_split_the_rim_with_gaps(self):
+        from facegate.edge_hud import ENROLL_STEPS, SEGMENT_GAP
+
+        preview = self.preview()
+        starts = [preview._segment(index) for index in range(ENROLL_STEPS)]
+        self.assertAlmostEqual(starts[0][0], SEGMENT_GAP / 2)
+        self.assertAlmostEqual(starts[-1][0] + starts[-1][1], 900.0 - SEGMENT_GAP / 2)
+        self.assertAlmostEqual(starts[1][0] - (starts[0][0] + starts[0][1]), SEGMENT_GAP)
+
+    def test_rim_points_run_clockwise_from_top_centre_with_inward_normals(self):
+        import math
+
+        from facegate.edge_hud import rim_point
+
+        width, height, radius = 300.0, 200.0, 20.0
+        length = 2 * (width - 2 * radius) + 2 * (height - 2 * radius) + math.tau * radius
+        expected = {0.0: (150, 0, 0, 1), length / 4: (300, 100, -1, 0), length / 2: (150, 200, 0, -1), 3 * length / 4: (0, 100, 1, 0)}
+        for distance, point in expected.items():
+            for got, want in zip(rim_point(0, 0, width, height, radius, distance), point):
+                self.assertAlmostEqual(got, want, places=4)
+
     def test_no_gaze_enrollment_skips_straight_to_password(self):
         import os
         import pwd
