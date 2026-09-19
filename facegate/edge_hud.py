@@ -513,7 +513,8 @@ FLARE_SECONDS = 0.5
 SPARKS_PER_STEP = 22
 SPARK_SECONDS = 0.9
 SPARK_TRAVEL = (14.0, 36.0)
-SPARK_SIZE = (2.4, 4.2)
+SPARK_SIZE = (1.6, 2.8)
+SPARK_STEPS = 8
 
 
 def rounded_rect_path(context: Any, x: float, y: float, width: float, height: float, radius: float) -> float:
@@ -760,6 +761,16 @@ class PreviewArea(Gtk.Widget):
         period = on + 2 * self.rim_length
         self._stroke(snapshot, width, color, alpha, [on, 2 * self.rim_length], period - start - length * begin)
 
+    def _segments_stroke(self, snapshot: Gtk.Snapshot, indices: list[int], width: float, color: tuple[float, float, float], alpha: float, gap: float) -> None:
+        """Whole segments as one dashed stroke, so they share one draw and one blur."""
+        if not indices or alpha <= 0.002:
+            return
+        spans = [self._segment(index, gap) for index in sorted(indices)]
+        dash: list[float] = []
+        for (start, length), following in zip(spans, spans[1:] + [None]):
+            dash += [length, following[0] - start - length if following else 2 * self.rim_length]
+        self._stroke(snapshot, width, color, alpha, dash, sum(dash) - spans[0][0])
+
     def _stroke(self, snapshot: Gtk.Snapshot, width: float, color: tuple[float, float, float], alpha: float, dash: list[float] | None = None, offset: float = 0.0) -> None:
         stroke = Gsk.Stroke.new(width)
         stroke.set_line_cap(Gsk.LineCap.ROUND)
@@ -780,28 +791,40 @@ class PreviewArea(Gtk.Widget):
         # A result fuses the segments into one closed ring.
         gap = SEGMENT_GAP * (1 - model.result) if model.state == "success" else SEGMENT_GAP
         instant = reduced_motion()
+        # Tracks and settled segments are each one stroke; only a segment
+        # still igniting gets strokes (and a blur) of its own.
+        tracks, settled, igniting = [], [], []
         for index in range(ENROLL_STEPS):
-            done = index < len(model.ignited) and model.elapsed >= model.ignited[index]
-            if not done:
-                current = index == model.steps and model.state == "scanning"
-                self._segment_stroke(snapshot, index, 1.0, 1.25, WHITE, TRACK_ALPHA * (1 - model.result), gap)
-                if current:
-                    self._segment_stroke(snapshot, index, 1.0, 1.25, GUIDE_COLOR, CURRENT_ALPHA, gap)
-                    if not instant:
-                        head = (model.elapsed / CURRENT_SECONDS) % 1.0 * (1 + SHIMMER[0])
-                        fade = math.sin(math.pi * clamp(head / (1 + SHIMMER[0])))
-                        self._segment_stroke(snapshot, index, min(1.0, head), 1.25, GUIDE_COLOR, SHIMMER[1] * fade, gap, max(0.0, head - SHIMMER[0]))
-                continue
-            age = model.elapsed - model.ignited[index]
-            fill = 1.0 if instant else EASE_OUT(clamp(age / IGNITE_SECONDS))
-            flare = clamp(age / 0.08) * math.exp(-max(0.0, age - IGNITE_SECONDS * 0.5) / FLARE_SECONDS * 2.5)
-            # White-hot as it ignites, cooling to the state's colour.
-            hot = tuple(mix(color[channel], 1.0, 0.7 * flare) for channel in range(3))
-            if fill < 1.0:
-                # The unlit rest of the segment is still a track under the sweep.
-                self._segment_stroke(snapshot, index, 1.0, 1.25, WHITE, TRACK_ALPHA, gap)
+            if index < len(model.ignited) and model.elapsed >= model.ignited[index]:
+                age = model.elapsed - model.ignited[index]
+                fill = 1.0 if instant else EASE_OUT(clamp(age / IGNITE_SECONDS))
+                flare = clamp(age / 0.08) * math.exp(-max(0.0, age - IGNITE_SECONDS * 0.5) / FLARE_SECONDS * 2.5)
+                if fill >= 1.0 and flare < 0.01:
+                    settled.append(index)
+                    continue
+                igniting.append((index, fill, flare))
+                if fill >= 1.0:
+                    continue
+            # Not done, or the unlit rest of a segment under its sweep.
+            tracks.append(index)
+        self._segments_stroke(snapshot, tracks, 1.25, WHITE, TRACK_ALPHA * (1 - model.result), gap)
+        if model.state == "scanning" and model.steps < ENROLL_STEPS and model.steps not in {index for index, _, _ in igniting}:
+            current = model.steps
+            self._segment_stroke(snapshot, current, 1.0, 1.25, GUIDE_COLOR, CURRENT_ALPHA, gap)
+            if not instant:
+                head = (model.elapsed / CURRENT_SECONDS) % 1.0 * (1 + SHIMMER[0])
+                fade = math.sin(math.pi * clamp(head / (1 + SHIMMER[0])))
+                self._segment_stroke(snapshot, current, min(1.0, head), 1.25, GUIDE_COLOR, SHIMMER[1] * fade, gap, max(0.0, head - SHIMMER[0]))
+        if settled:
             # A thin luminous trace, not a second solid border. Blur the halo
             # itself so progress reads as light rather than a thick neon tube.
+            snapshot.push_blur(2.0)
+            self._segments_stroke(snapshot, settled, 2.5, color, 0.2, gap)
+            snapshot.pop()
+            self._segments_stroke(snapshot, settled, DONE_WIDTH, color, 0.9, gap)
+        for index, fill, flare in igniting:
+            # White-hot as it ignites, cooling to the state's colour.
+            hot = tuple(mix(color[channel], 1.0, 0.7 * flare) for channel in range(3))
             snapshot.push_blur(2.0 + 2.0 * flare)
             self._segment_stroke(snapshot, index, fill, 2.5 + 2.5 * flare, hot, 0.2 + 0.55 * flare, gap)
             snapshot.pop()
@@ -812,15 +835,30 @@ class PreviewArea(Gtk.Widget):
                 x, y, _, _ = rim_point(TRACE_INSET, TRACE_INSET, PREVIEW_WIDTH - 2 * TRACE_INSET, PREVIEW_HEIGHT - 2 * TRACE_INSET, PREVIEW_RADIUS - TRACE_INSET, start + span * fill)
                 self.stars._disc(snapshot, x, y, 9.0, 9.0, 0.55 * (1 - fill), GUIDE_COLOR)
                 self.stars._disc(snapshot, x, y, 3.2, 3.2, 0.95, WHITE)
-        for born, x, y, dx, dy, size in self.sparks:
-            age = (model.elapsed - born) / SPARK_SECONDS
-            if age < 0:
-                continue
-            travel = EASE_OUT(clamp(age))
-            fade = (1 - age) ** 2
-            tint = tuple(mix(1.0, GUIDE_COLOR[channel], age) for channel in range(3))
-            self.stars._disc(snapshot, x + dx * travel, y + dy * travel, size, size, 0.9 * fade, tint)
+        self._sparks(snapshot)
         snapshot.restore()
+
+    def _sparks(self, snapshot: Gtk.Snapshot) -> None:
+        """Every live spark as a dot, one filled path per step of age, not a node each."""
+        if not len(self.sparks):
+            return
+        age = (self.model.elapsed - self.sparks[:, 0]) / SPARK_SECONDS
+        live = (age >= 0) & (age < 1)
+        if not live.any():
+            return
+        sparks, age = self.sparks[live], age[live]
+        travel = numpy.array([EASE_OUT(float(value)) for value in age], numpy.float32)
+        x = sparks[:, 1] + sparks[:, 3] * travel
+        y = sparks[:, 2] + sparks[:, 4] * travel
+        # A spark cools from white to cyan as it fades; eight steps read as smooth.
+        steps = numpy.minimum((age * SPARK_STEPS).astype(int), SPARK_STEPS - 1)
+        for step in numpy.unique(steps):
+            builder = Gsk.PathBuilder.new()
+            for index in numpy.flatnonzero(steps == step):
+                builder.add_circle(Graphene.Point().init(float(x[index]), float(y[index])), float(sparks[index, 5]) / 2)
+            middle = (step + 0.5) / SPARK_STEPS
+            tint = tuple(mix(1.0, GUIDE_COLOR[channel], middle) for channel in range(3))
+            snapshot.append_fill(builder.to_path(), Gsk.FillRule.WINDING, Gdk.RGBA(red=tint[0], green=tint[1], blue=tint[2], alpha=0.9 * (1 - middle) ** 2))
 
 
 @dataclass(frozen=True)

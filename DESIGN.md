@@ -525,12 +525,17 @@ and grows to fit (surface height 440).
     adaptive smoothing is 140 ms for noise and 50 ms for deliberate turns.
   - *Alive:* resting face motes drift only 0.08 pt with steady radiance; 240
     ambient motes stay drifting faintly around the face.
-  - *Framing:* the view follows the face's centre, eased. Its zoom is set
-    when a face appears (the mesh filling 1 / 1.35 of the height) and then
-    held in camera pixels, so moving closer or back grows or shrinks the face
-    as in a mirror; past 30–95% of the height the zoom gives way. Gaze
-    switches between its colour and IR cameras at every pose; the view is
-    carried across the switch in face heights, so the preview never jumps.
+  - *Framing:* the view follows the face's centre, eased. Its zoom is fixed
+    per camera so the face's size in the preview is its size as Gaze measures
+    it (box share of the frame's short side): at Gaze's ideal distance (the
+    middle of the coached band, a 45% share) the mesh fills 1 / 1.35 of the
+    height; where "closer" begins it fills under half; where "back" begins
+    it spills over. Moving closer or back grows or shrinks the face as in a
+    mirror, and the preview never shows a small-looking face as too close or
+    a large one as too far. Past 25–115% of the height the zoom gives way.
+    Gaze switches between its colour and IR cameras at every pose; the view
+    is carried across the switch in face heights, so it never jumps, then
+    eases to the new camera's zoom.
   - *Fallback:* where the mesh can't run, motes take a field over the frame
     and its brightness (colour frames inverted under a head-and-shoulders
     spotlight).
@@ -553,10 +558,11 @@ and grows to fit (surface height 440).
   chin, from behind the head to just past its front, where the arc moves
   across the view; a tilt is that arc up beside the cheek; a move is a
   straight arrow beside the face. Arrowheads are slim 8 × 10 pt chevrons laid out flat on the screen,
-  so they read at any angle. "Move a little closer" uses a head-shaped contour expanding toward the
-  viewer with outward-pointing chevrons, while "farther away" contracts with
-  inward-pointing chevrons. A faint destination outline makes the change in
-  scale legible. Each 1.8 s cycle fades before resetting. The guide nudges its way every 1.6 s and fades over 300 ms; while it
+  so they read at any angle. "Move a little closer" uses a head-shaped contour that starts on the face's own
+  outline and expands with outward-pointing chevrons, while "farther away"
+  contracts with inward-pointing chevrons. A faint destination outline shows
+  the size the face has at Gaze's ideal distance (at least 15% from the face),
+  so the guide never contradicts the face's own size. Each 1.8 s cycle fades before resetting. The guide nudges its way every 1.6 s and fades over 300 ms; while it
   shows, the face keeps its light so the guide cannot cast an apparent shadow.
 - **Distance coaching:** Gaze needs the face box to span 25–78% of the
   frame's short side. FaceGate measures it on whichever camera is sending
@@ -705,6 +711,10 @@ remove the forehead crown, and wrong edges bridge anatomical openings.
   monitor scales. Accumulate light before a soft exponential highlight
   shoulder. Bloom remains selective, and atmosphere uses a cheaper half-size
   texture because it is intentionally out of focus.
+- Budget: an effect costs what it draws, not the canvas. The guide's few
+  hundred motes splat into a texture cropped to their box; settled progress
+  segments share one stroke and one blur (only an igniting segment gets its
+  own); sparks are a few filled paths, one per step of age, never a node each.
 - These are monocular inferred landmarks, not measured depth or a full head
   scan. Hair, pores, ears, and hidden surfaces are not supplied by the model.
   Higher particle counts cannot recover details absent from that source.

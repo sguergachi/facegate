@@ -59,10 +59,13 @@ class StarlightMotionTests(unittest.TestCase):
         for _ in range(60):
             stars.advance(1 / 60)
         calls = []
-        splat = stars.splat
-        stars.splat = lambda scale, *lights, **kw: calls.append(lights) or splat(scale, *lights, **kw)
+        splat = stars._splat
+        stars._splat = lambda scale, lights, *rest, **kw: calls.append(lights) or splat(scale, lights, *rest, **kw)
         stars.stars(1.0, Look(guide=(0.39, 0.82, 1.0)))
         (face, _), (guide, _) = calls[-2:]
+        # The guide's few hundred motes are splatted into their own box only.
+        (texture,), box = stars.splat_cropped(1.0, guide)
+        self.assertLess(box.get_width() * box.get_height(), 0.5 * 312 * 208)
         self.assertEqual(float(face[stars.arrow_stars].max()), 0.0)
         self.assertEqual(float(guide[stars.face_stars].max()), 0.0)
         self.assertGreater(float(guide[stars.arrow_stars].max()), 0.0)
