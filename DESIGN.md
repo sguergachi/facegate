@@ -60,7 +60,7 @@ Rules:
   done, red means failed or destructive. Nothing else is coloured.
 - Primary buttons are white with black text. Secondary buttons are `#1c1c1e`
   with white text. There is no blue accent button.
-- The IR preview is the only imagery. It is shown as luminance, tinted cool
+- The enrollment starlight is the only imagery. It is tinted cool
   (`#d6f0ff`), and takes on the result colour only at a result.
 
 ### Typography
@@ -405,7 +405,7 @@ its height follows the state rather than leaving dead space.
 Text blocks are 280 wide (32 from each edge) so copy never runs to the rim.
 Only two button levels exist: a white primary (**Approve**, right) and a dark
 secondary (**Deny**, left; declining the scan leaves sudo at its password
-prompt). Scanning and result states show no button, because Howdy cannot be
+prompt). Scanning and result states show no button, because Gaze cannot be
 interrupted once it is running.
 
 #### Motion
@@ -465,6 +465,37 @@ password, the field locks and the ring spins. A wrong password shakes the mark
 and reads "Incorrect password. Try again." After a failed face match, "Not
 recognized" holds for 0.9 s before the field appears.
 
+#### Enrollment art direction
+
+The preview is a small cinematic scene, not a camera feed. References:
+Face ID enrollment (one subject, radial progress, near-monochrome restraint);
+Roger Deakins' *Blade Runner 2049* (atmosphere as volume, one motivated light,
+negative space, back light separating the subject); Bradford Young's
+*Arrival* (forms emerging from haze, calm); GMUNK's interfaces for *Oblivion*
+and *Tron: Legacy* (hairline precision, glow used sparingly); Refik Anadol's
+data sculptures (particles as organic matter); Ryoji Ikeda (machine-precise
+detail, monochrome discipline); JWST deep fields (layered depth and scale);
+and cinematic depth of field (soft foreground framing a sharp subject).
+
+Principles, in order:
+
+1. **Hierarchy.** Subject (the face), then call to action (the guide), then
+   atmosphere. When the guide speaks, the face steps back and ambient
+   effects pause. The chevron is the single brightest point.
+2. **Depth in layers.** Deep field (240 faint stars) → back light (a soft
+   220 × 260 glow at 10%, breathing over 7 s) → haze (90 motes orbiting the
+   head, blurred) → the dust face → guide hairlines → bokeh (five discs
+   under 7% opacity). Parallax ties them to the head's turn: the deep field
+   shifts 7 pt against it, the bokeh with it.
+3. **One motivated light.** The key light that models the face also back-lights
+   the haze; nothing is lit from nowhere.
+4. **Futurism is precision meeting the organic.** Hairline geometry carries
+   meaning; free dust carries life. The formed face keeps steady illumination;
+   no periodic scan band or independent spark pulses cross its features.
+5. **Restraint.** Cool monochrome only; ambient motion slow (7 s breaths,
+   orbits under 0.05 rad/s); purposeful motion only in the guide
+   (1.5–1.6 s cycles); no more than one thing moving with intent at a time.
+
 #### Add Face (enrollment)
 
 FaceGate Settings streams the scan to the island over the HUD socket, one
@@ -472,16 +503,68 @@ connection for the whole scan. The mark gives way to a 312 × 208 live IR
 preview at the top inset, 16 pt above the title. The island keeps its width
 and grows to fit (surface height 440).
 
-- **Preview:** the camera crop follows the face (eased; the face is about half
-  the height, eyes a little above center). It's shown as luminance tinted a
-  cool `#d6f0ff`, and masked by a rounded rectangle (radius 30) whose last
-  36 pt feather to nothing, so the image dissolves into the black island.
+- **Preview:** the camera is never shown as a picture, only as star dust.
+  About 8,200 motes, like real dust: most faint grains, some stars, a few
+  sparks that glint and bloom (only bright motes glow, so faint dust stays
+  crisp). Before a face they drift as a faint nebula. When the face mesh
+  (MediaPipe Face Mesh, run on the preview in the unprivileged helper) finds a
+  face, the dust condenses onto it from the nose outward over about a
+  second, each mote swirling in on its own curved path and flaring as it
+  settles; a lost face spreads back out faster than it came.
+  - *Never the mesh's grid:* each mote has its own place on the face's
+    surface, stratified by its canonical 3D triangle areas. About 4.5% trace
+    soft strokes along the upper lids, brows and mouth, including a five-mote
+    glint in each iris. No scanline bands or first-camera-pose density bias.
+  - *Lit like a sculpture:* a broad key from above-left, a quiet opposing fill,
+    and a restrained rim. A broad, low-intensity highlight models the nose and
+    cheek planes. Signed normals suppress back faces; every visible surface
+    grain remains present in the shadows. A single display-rate XYZ pose drives both shading and attached particles;
+    adaptive smoothing is 140 ms for noise and 50 ms for deliberate turns.
+  - *Alive:* resting face motes drift only 0.08 pt with steady radiance; 240
+    ambient motes stay drifting faintly around the face.
+  - *Framing:* the view follows the face, eased, with the mesh filling
+    1 / 1.35 of the height. Gaze switches between its colour and IR cameras
+    at every pose; the view is kept in face heights relative to the face and
+    carried across the switch, so the preview never jumps.
+  - *Fallback:* where the mesh can't run, motes take a field over the frame
+    and its brightness (colour frames inverted under a head-and-shoulders
+    spotlight).
+  All of it is tinted a cool `#d6f0ff` and masked by a rounded rectangle
+  (radius 30) whose last 36 pt feather to nothing.
+- **Hints:** live coaching. Gaze names each pose once and never says how
+  close you are, so FaceGate measures the same head yaw and pitch Gaze does
+  (nose against the eye line, from the face mesh) and says what to change:
+  which way to turn to face the camera, "Slowly turn your head to the left.",
+  then "A little more to the left…" past 40% of the way, then "Hold it
+  there…" once Gaze's threshold is met, and "Got it." as each pose lands.
+  Camera problems (too dark, clipped, off-centre, distance) outrank pose
+  advice. A new instruction must hold 0.4 s before it replaces the one
+  showing, so a wavering head doesn't make the words flicker.
+- **Coaching guide:** each directional instruction also draws a guide, in
+  precise 1 pt hairlines that carry the reading, with 420 motes of its own
+  dust streaming along them for life. The chevron is the brightest point of
+  the scene, with a soft glow. A turn is an arc orbiting the head under the
+  chin, from behind the head to just past its front, where the arc moves
+  across the view; a tilt is that arc up beside the cheek; a move is a
+  straight arrow beside the face. Arrowheads are slim 8 × 10 pt chevrons laid out flat on the screen,
+  so they read at any angle. "Move a little closer" uses a head-shaped contour expanding toward the
+  viewer with outward-pointing chevrons, while "farther away" contracts with
+  inward-pointing chevrons. A faint destination outline makes the change in
+  scale legible. Each 1.8 s cycle fades before resetting. The guide nudges its way every 1.6 s and fades over 300 ms; while it
+  shows, the face keeps its light so the guide cannot cast an apparent shadow.
+- **Distance coaching:** Gaze needs the face box to span 25–78% of the
+  frame's short side. FaceGate measures it on whichever camera is sending
+  previews and coaches closer or back from 15% and 8% inside those limits.
+  Holding a reached pose for 3 s without a capture usually means the face is
+  too small for the IR camera, so it asks to come closer (while the face
+  spans under half the frame).
 - **Fluidity:** IR emitters often light only every other frame, so unlit
   frames are skipped and each lit frame cross-fades into the next over 70 ms
   on the frame clock.
 - **Progress:** a trace on the preview's rim, clockwise from top center. A
   short comet circles until the first sample. Each of the five samples springs
-  the trace forward with a brief glow. Success closes it green and tints the
+  the 1.25 pt trace forward with a soft blurred glow. Capture pulses affect
+  only the rim, preserving steady face exposure. Success closes it green and tints the
   image green. Failure turns it red with the mark's decaying shake.
 - **Copy:** "Adding your face", with the detail line as the scan's live hint.
   The hint cross-fades (100 ms out, 240 ms in) while the island eases to the
@@ -536,6 +619,10 @@ without the mark or title changing proportion.
 
 Shown on first launch (until finished or skipped, stored in
 `~/.config/facegate/settings.json`), or with `facegate-settings --welcome`.
+The same 424 × 680 content is presented as a layer-shell island attached to
+the physical top edge, with square top corners and rounded lower corners. It
+hides while the compact approval/enrollment island is active, then returns;
+finishing hands over to the normal standalone face manager.
 Onboarding is one frame, not a stack of pages (see Fluidity):
 
 | Element | Value |
@@ -568,3 +655,50 @@ widens back when it doesn't. Only the step's title, body and content travel.
    (Not Now | Try Again).
 5. **Face added:** a green mark. → Add Another Look (for example with
    glasses) | Done.
+
+### Enrollment polish: volume and dissolution
+
+Keep the sockets dark and the cheek planes distinct: sparse shadows, a directional
+key, restrained rim, and crisp subpixel grains. Glints inherit surface light so
+they cannot fill dark sockets with unrelated sparks. Glow is 0.7 pt at 65%;
+bloom is 4 pt at 32%; the background halo is only 3.5%. The face stays readable
+while coaching. A changed direction dissolves its old guide before forming the
+next; losing tracking starts dispersal immediately, even after a long hold.
+Results also release the dust spatially as it fades.
+
+The optical atmosphere of [GMUNK's work](https://gmunk.com/GMUNK) complements
+the Apple Watch pairing reference: individual light, depth, and coherent motion.
+Use that as art direction, with the user's own face as the recognizable subject.
+
+The particle surface uses MediaPipe's canonical triangle connectivity, covering
+all 468 landmarks. Do not triangulate a captured frame: pose-dependent gaps can
+remove the forehead crown, and wrong edges bridge anatomical openings.
+
+### Preview quality pipeline
+
+- Preserve Gaze's preview detail up to a 1280 px decode budget; the inspected
+  Gaze encoder supplies at most 854 px at JPEG quality 88. Landmark inference
+  uses the native 256 px face crop, not the 312 × 208 display image.
+- Fuse overlapping detector boxes by score. Keep model-relative XYZ in one
+  coordinate scale through cropping, framing, transport (`space: xyz`), and
+  shading. Never min/max-normalize depth separately for each frame.
+- Canonical surface coordinates control sampling area only; live landmarks
+  still determine the user's shape. All 468 vertices and anatomical openings
+  are retained. New enrollments release old sampling/lighting state.
+- Render stable 0.27–0.34 pt Gaussian grains at at least 2× resolution; preserve fractional
+  monitor scales. Accumulate light before a soft exponential highlight
+  shoulder. Bloom remains selective, and atmosphere uses a cheaper half-size
+  texture because it is intentionally out of focus.
+- These are monocular inferred landmarks, not measured depth or a full head
+  scan. Hair, pores, ears, and hidden surfaces are not supplied by the model.
+  Higher particle counts cannot recover details absent from that source.
+
+See [the pipeline audit](docs/preview-quality.md) for evidence and limits.
+
+#### Stable facial illumination
+
+A recognizable face takes precedence over dramatic side lighting. Use a broad
+frontal key and fill, keep shadow density constant, and confine scintillation to
+free dust. No automatic scan band, face glint pulses, or coaching-triggered face
+dimming. Use one smoothed 3D pose for normals and particle positions so shadows cannot
+lead or trail a head turn.

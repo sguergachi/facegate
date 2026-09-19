@@ -1,7 +1,9 @@
 [Unit]
-Description=FaceGate approval HUD for Howdy authentication
+Description=FaceGate approval HUD for Gaze authentication
 After=graphical-session.target
 PartOf=graphical-session.target
+Wants=facegate-tray.service
+Before=facegate-tray.service
 
 [Service]
 Type=simple
@@ -9,6 +11,8 @@ Environment=GDK_BACKEND=wayland
 # gtk4-layer-shell must be present before GTK opens its Wayland connection or
 # it cannot install the layer-shell surface role from Python introspection.
 Environment=LD_PRELOAD=/usr/lib/libgtk4-layer-shell.so.0
+# The starlight enrollment preview is built from GTK render nodes.
+Environment=GSK_RENDERER=vulkan
 ExecStart=/usr/local/bin/facegate-hud
 Restart=on-failure
 RestartSec=2

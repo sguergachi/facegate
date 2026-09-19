@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Installs FaceGate without modifying Howdy itself.
+# Install FaceGate as an unprivileged consent UI in front of Gaze.
 set -euo pipefail
 
 if [[ ${EUID} -ne 0 ]]; then
@@ -14,94 +14,121 @@ if [[ -z ${target_user} || ${target_user} == root ]]; then
   exit 1
 fi
 
-install -d -m 0755 /usr/local/lib/facegate /usr/local/lib/security/facegate /usr/local/lib/systemd/user \
-  /usr/local/share/applications /usr/share/polkit-1/actions
+for command in cc awk install; do
+  command -v "${command}" >/dev/null || {
+    echo "Missing required command: ${command}" >&2
+    exit 1
+  }
+done
+
+gaze_pam=
+gaze_pam_real=
+for candidate in \
+  /usr/lib/security/pam_gaze.so \
+  /usr/lib64/security/pam_gaze.so \
+  /lib/security/pam_gaze.so \
+  /lib/*/security/pam_gaze.so; do
+  if [[ -f ${candidate} ]]; then
+    gaze_pam=${candidate}
+    gaze_pam_real=$(readlink -f "${candidate}")
+    break
+  fi
+done
+if [[ -z ${gaze_pam} ]]; then
+  echo "Gaze's official pam_gaze.so was not found. Run ./setup.sh first." >&2
+  exit 1
+fi
+if ! command -v gazed >/dev/null || ! command -v gaze >/dev/null; then
+  echo "Gaze's daemon or CLI was not found. Run ./setup.sh first." >&2
+  exit 1
+fi
+minimum_gaze=0.2.7
+gaze_version=$(gaze --version 2>/dev/null | grep -Eo '[0-9]+[.][0-9]+[.][0-9]+' | head -n 1 || true)
+if [[ -z ${gaze_version} ]] ||
+  [[ $(printf '%s\n%s\n' "${minimum_gaze}" "${gaze_version}" | sort -V | head -n 1) != "${minimum_gaze}" ]]; then
+  echo "FaceGate requires Gaze ${minimum_gaze} or newer (found: ${gaze_version:-unknown})." >&2
+  exit 1
+fi
+if [[ $(stat -c '%u' "${gaze_pam_real}") != 0 ]] ||
+  find "${gaze_pam_real}" -maxdepth 0 -perm /022 -print -quit | grep -q .; then
+  echo "Refusing to use ${gaze_pam}: the Gaze PAM module is not securely root-owned." >&2
+  exit 1
+fi
+[[ -f /usr/include/security/pam_modules.h ]] || {
+  echo "PAM development headers are missing (on Arch they are provided by pam)." >&2
+  exit 1
+}
+
+build_dir=$(mktemp -d)
+cleanup() { rm -rf -- "${build_dir}"; }
+trap cleanup EXIT
+cc -std=c11 -fPIC -shared -O2 -Wall -Wextra -Werror \
+  -Wl,-z,relro,-z,now -o "${build_dir}/consent.so" \
+  "${project_dir}/pam/facegate-consent.c" -lpam
+
+install -d -m 0755 \
+  /usr/local/bin \
+  /usr/local/lib/facegate \
+  /usr/local/lib/security/facegate \
+  /usr/local/lib/systemd/user \
+  /usr/local/share/applications \
+  /usr/local/share/icons/hicolor/scalable/apps \
+  /etc/pacman.d/hooks
 install -d -m 0700 /etc/facegate
-# The faces helper runs this package as root, so it must be root's alone:
-# a copy owned by the user would let any of their processes edit root's code.
+
+# Every executable in the authentication-facing path is root-owned. The user UI
+# can request a scan, but cannot replace the consent module or Gaze PAM module.
 rm -rf /usr/local/lib/facegate/facegate
 cp -r --no-preserve=mode,ownership "${project_dir}/facegate" /usr/local/lib/facegate/
 find /usr/local/lib/facegate/facegate -name __pycache__ -prune -exec rm -rf {} +
 chown -R root:root /usr/local/lib/facegate
 chmod -R u=rwX,go=rX /usr/local/lib/facegate
-install -m 0755 "${project_dir}/bin/facegate-hud" /usr/local/bin/facegate-hud
-install -m 0755 "${project_dir}/bin/facegate-settings" /usr/local/bin/facegate-settings
-install -m 0755 "${project_dir}/bin/facegate-faces" /usr/local/lib/facegate/facegate-faces
-install -m 0755 "${project_dir}/bin/facegate-faces-list" /usr/local/lib/facegate/facegate-faces-list
-install -m 0700 "${project_dir}/pam/facegate-pam.py" /usr/local/lib/security/facegate/pam.py
-install -m 0644 "${project_dir}/packaging/facegate.service" /usr/local/lib/systemd/user/facegate.service
-install -m 0644 "${project_dir}/packaging/org.facegate.faces.policy" /usr/share/polkit-1/actions/org.facegate.faces.policy
-install -m 0644 "${project_dir}/packaging/org.facegate.Settings.desktop" /usr/local/share/applications/org.facegate.Settings.desktop
+install -o root -g root -m 0755 "${project_dir}/bin/facegate-hud" /usr/local/bin/facegate-hud
+install -o root -g root -m 0755 "${project_dir}/bin/facegate-settings" /usr/local/bin/facegate-settings
+install -o root -g root -m 0755 "${project_dir}/bin/facegate-tray" /usr/local/bin/facegate-tray
+install -o root -g root -m 0755 "${project_dir}/bin/facegate-faces" /usr/local/lib/facegate/facegate-faces
+install -o root -g root -m 0755 "${project_dir}/scripts/refresh-pam" /usr/local/lib/facegate/refresh-pam
+install -o root -g root -m 0755 "${build_dir}/consent.so" /usr/local/lib/security/facegate/consent.so
+install -o root -g root -m 0644 "${project_dir}/packaging/facegate.service" /usr/local/lib/systemd/user/facegate.service
+install -o root -g root -m 0644 "${project_dir}/packaging/facegate-tray.service" /usr/local/lib/systemd/user/facegate-tray.service
+install -o root -g root -m 0644 "${project_dir}/packaging/org.facegate.Settings.desktop" /usr/local/share/applications/org.facegate.Settings.desktop
+install -o root -g root -m 0644 "${project_dir}/packaging/facegate-symbolic.svg" /usr/local/share/icons/hicolor/scalable/apps/facegate-symbolic.svg
+install -o root -g root -m 0644 "${project_dir}/packaging/facegate-gaze.hook" /etc/pacman.d/hooks/facegate-gaze.hook
 
-sudo_pam=/etc/pam.d/sudo
-howdy_line='pam_python.so /lib/security/howdy/pam.py'
-facegate_line='pam_python.so /usr/local/lib/security/facegate/pam.py'
-facegate_rule="auth       sufficient  ${facegate_line}"
-# Prints a PAM file with FaceGate's rule ahead of its first auth rule, so a
-# face match is enough and every other rule (the password) still follows.
-with_facegate_first() {
-  awk -v rule="${facegate_rule}" '!added && $1 == "auth" { print rule; added = 1 } { print } END { if (!added) exit 1 }' "$1"
-}
-if grep -Fq "${facegate_line}" "${sudo_pam}"; then
-  echo "FaceGate is already active in ${sudo_pam}."
-else
-  backup="/etc/facegate/sudo.pam.$(date +%Y%m%d-%H%M%S).bak"
-  cp -a "${sudo_pam}" "${backup}"
-  if grep -Fq "${howdy_line}" "${sudo_pam}"; then
-    sed -i "s#${howdy_line}#${facegate_line}#" "${sudo_pam}"
-  elif updated=$(with_facegate_first "${sudo_pam}"); then
-    printf '%s\n' "${updated}" > "${sudo_pam}"
-  else
-    echo "Refusing to change ${sudo_pam}: it has no auth rules." >&2
-    exit 1
-  fi
-  echo "Updated ${sudo_pam}; backup: ${backup}"
-fi
+# Remove obsolete Howdy-era FaceGate components. Gaze itself owns enrollment,
+# policy checks, the camera, templates, recognition, and the biometric verdict.
+rm -f \
+  /usr/local/lib/facegate/facegate-faces-list \
+  /usr/local/lib/security/facegate/pam.py \
+  /usr/local/lib/security/facegate/gaze-auth.so \
+  /usr/share/polkit-1/actions/org.facegate.faces.policy
 
-# Graphical admin prompts (pkexec, KDE "Authentication Required") use polkit's
-# PAM service. Its rule ships in /usr/lib/pam.d; an /etc/pam.d copy overrides
-# it and survives package updates.
-polkit_vendor=/usr/lib/pam.d/polkit-1
-polkit_pam=/etc/pam.d/polkit-1
-polkit_marker='# Managed by FaceGate: copy of /usr/lib/pam.d/polkit-1 with Howdy gated.'
-if [[ -f ${polkit_pam} ]] && grep -Fq "${facegate_line}" "${polkit_pam}"; then
-  echo "FaceGate is already active in ${polkit_pam}."
-elif [[ -f ${polkit_pam} ]] && grep -Fq "${howdy_line}" "${polkit_pam}"; then
-  backup="/etc/facegate/polkit-1.pam.$(date +%Y%m%d-%H%M%S).bak"
-  cp -a "${polkit_pam}" "${backup}"
-  sed -i "s#${howdy_line}#${facegate_line}#" "${polkit_pam}"
-  echo "Updated ${polkit_pam}; backup: ${backup}"
-elif [[ ! -e ${polkit_pam} ]] && [[ -f ${polkit_vendor} ]] && grep -Fq "${howdy_line}" "${polkit_vendor}"; then
-  { echo "${polkit_marker}"; sed "s#${howdy_line}#${facegate_line}#" "${polkit_vendor}"; } > "${polkit_pam}"
-  chmod 0644 "${polkit_pam}"
-  echo "Created ${polkit_pam} to gate Howdy for polkit prompts."
-elif [[ ! -e ${polkit_pam} ]] && [[ -f ${polkit_vendor} ]] && updated=$(with_facegate_first "${polkit_vendor}"); then
-  { echo "${polkit_marker}"; printf '%s\n' "${updated}"; } > "${polkit_pam}"
-  chmod 0644 "${polkit_pam}"
-  echo "Created ${polkit_pam} so polkit prompts use FaceGate."
-else
-  echo "Leaving polkit unchanged: ${polkit_pam} is customised without a Howdy rule."
-fi
+# This also removes standalone Howdy/Gaze rules. The pacman hook repeats it
+# after Gaze upgrades, whose package scripts may regenerate those rules.
+/usr/local/lib/facegate/refresh-pam
+
+systemctl daemon-reload
+systemctl enable --now gazed.service
+systemctl try-restart polkit.service >/dev/null 2>&1 || true
+
+# Gaze ships colour-only. Hand it the infrared camera, if there is one, through
+# its own validated Config API; a camera already chosen for IR is kept.
+python3 -I -c 'import sys; sys.path.insert(0, "/usr/local/lib/facegate"); from facegate.cameras import main; raise SystemExit(main())' ||
+  echo "Continuing without infrared; run the installer again once gazed is running." >&2
 
 target_uid=$(id -u "${target_user}")
-runuser -u "${target_user}" -- env \
-  XDG_RUNTIME_DIR="/run/user/${target_uid}" \
-  DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${target_uid}/bus" \
-  systemctl --user daemon-reload
-# FaceGate is the session's polkit agent, so the island replaces KDE's password
-# dialog. Only one agent can hold a session: retire KDE's (uninstall restores it).
-runuser -u "${target_user}" -- env \
-  XDG_RUNTIME_DIR="/run/user/${target_uid}" \
-  DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${target_uid}/bus" \
-  sh -c 'systemctl --user stop plasma-polkit-agent.service 2>/dev/null; systemctl --user mask plasma-polkit-agent.service >/dev/null 2>&1 || true'
-runuser -u "${target_user}" -- env \
-  XDG_RUNTIME_DIR="/run/user/${target_uid}" \
-  DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${target_uid}/bus" \
-  systemctl --user enable --now facegate.service
-runuser -u "${target_user}" -- env \
-  XDG_RUNTIME_DIR="/run/user/${target_uid}" \
-  DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${target_uid}/bus" \
-  systemctl --user restart facegate.service
+user_systemctl=(runuser -u "${target_user}" -- env
+  "XDG_RUNTIME_DIR=/run/user/${target_uid}"
+  "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${target_uid}/bus"
+  systemctl --user)
+"${user_systemctl[@]}" daemon-reload
+# Preserve the current FaceGate password-in-island experience by keeping its
+# polkit agent as the only session agent. polkitd/PAM still validate passwords.
+"${user_systemctl[@]}" stop plasma-polkit-agent.service 2>/dev/null || true
+"${user_systemctl[@]}" mask plasma-polkit-agent.service >/dev/null 2>&1 || true
+"${user_systemctl[@]}" enable --now facegate.service
+"${user_systemctl[@]}" restart facegate.service
 
-echo "FaceGate installed. Test with: sudo -k; sudo -v"
-echo "Manage faces with FaceGate in your app menu, or: facegate-settings"
+echo "FaceGate installed with Gaze as its biometric backend."
+echo "Test with: sudo -k; sudo -v"
+echo "Manage faces from the FaceGate app, or run: facegate-settings"

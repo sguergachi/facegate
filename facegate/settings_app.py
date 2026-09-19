@@ -1,25 +1,23 @@
-"""FaceGate Settings: onboarding, and the faces that can approve for you.
+"""FaceGate's in-island configuration panel.
 
-A small window in the island's design language (see DESIGN.md). The first time
-it opens it explains FaceGate over three pages, then walks you through adding
-a face. Afterwards it lists your faces under a large header that collapses
-into a compact bar as the list scrolls.
+The first time the island opens it explains FaceGate over three pages, then
+walks you through adding a face. Afterwards it opens a small main menu with a
+global switch and separate Face Approval and View Options destinations.
 
-Reading the list needs no prompt. Adding or removing a face runs the root
-facegate-faces helper through pkexec, so every change asks for admin approval
-(in the island). Adding one hands the camera preview to the island, which
-shows the scan at the top of the screen.
+Reading the list needs no prompt. Adding, renaming, or removing a face asks
+Gaze's daemon to make the change over its system D-Bus API. Gaze's own polkit
+policy asks for admin approval in the same island, and Gaze remains the only
+process that owns the camera and biometric templates.
 """
 
 from __future__ import annotations
 
 import json
+import math
 import os
 import shlex
-import socket
 import sys
 import time
-from pathlib import Path
 from typing import Any, Callable
 
 import difflib
@@ -36,6 +34,8 @@ gi.require_version("Pango", "1.0")
 gi.require_version("PangoCairo", "1.0")
 from gi.repository import Gdk, Gio, GLib, Graphene, Gsk, Gtk, Pango, PangoCairo  # noqa: E402
 
+from . import __version__, preferences  # noqa: E402
+from .faces import LABEL_CHARS as NAME_CHARS  # noqa: E402
 from .edge_hud import (  # noqa: E402
     ISLAND_WIDTH,
     MARK_PROFILES,
@@ -46,7 +46,6 @@ from .edge_hud import (  # noqa: E402
     Spring,
     Tween,
     clamp,
-    default_socket_path,
     island_path,
     mark_values,
     mix,
@@ -54,12 +53,8 @@ from .edge_hud import (  # noqa: E402
     reduced_motion,
     smoothstep,
 )
-from .protocol import encode  # noqa: E402
 
-APP_ID = "org.facegate.Settings"
-LIST_HELPER = "/usr/local/lib/facegate/facegate-faces-list"
-CHANGE_HELPER = "/usr/local/lib/facegate/facegate-faces"
-SETTINGS_FILE = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "facegate" / "settings.json"
+FACES_HELPER = "/usr/local/lib/facegate/facegate-faces"
 
 # Spacing system (see DESIGN.md): an 8-point rhythm with 4-point half steps.
 # Every length below is a multiple of 4; structure (margins, radii, rows,
@@ -72,17 +67,17 @@ SPACE_L = 16     # parts of one group
 SPACE_XL = 24    # groups: margins, art to title, copy to content
 SPACE_XXL = 32   # the top bar's inset
 
-WINDOW_WIDTH = 424
-WINDOW_HEIGHT = 680
-# Concentric corners: the window's radius is the primary button's radius plus
+PANEL_WIDTH = 424
+PANEL_HEIGHT = 680
+# Concentric corners: the expanded island's lower radius is the primary button's radius plus
 # the margin around it, and the close button sits on the same corner's centre.
 PAGE_MARGIN = SPACE_XL
 BUTTON_HEIGHT = 48
 BUTTON_GAP = SPACE_S
-WINDOW_RADIUS = BUTTON_HEIGHT // 2 + PAGE_MARGIN
+PANEL_RADIUS = BUTTON_HEIGHT // 2 + PAGE_MARGIN
 CLOSE_SIZE = 32
-CLOSE_INSET = WINDOW_RADIUS - CLOSE_SIZE // 2
-CONTENT_WIDTH = WINDOW_WIDTH - 2 * PAGE_MARGIN
+CLOSE_INSET = PANEL_RADIUS - CLOSE_SIZE // 2
+CONTENT_WIDTH = PANEL_WIDTH - 2 * PAGE_MARGIN
 
 # The list page's hero is composed exactly like an onboarding step (the same
 # 144 mark, 24 to a 28 title, 8 to a one-line body), so the hand-over from
@@ -94,13 +89,16 @@ TITLE_TO_DETAIL = SPACE_S
 # With the 16 below the header, the "Faces" heading sits a group gap (24)
 # under the detail.
 HERO_BOTTOM = SPACE_S
-# Collapsed, the bar's content is centred on the close button's line.
-BAR_HEIGHT = 2 * WINDOW_RADIUS
+# Collapsed, the header is a 96 bar: the mark shrinks to 32 at the top, the
+# page margin down, and the title sits snug beneath it, the pair centred as one.
+BAR_HEIGHT = 2 * PANEL_RADIUS
 BAR_MARK = 32
-BAR_GAP = SPACE_M
+BAR_MARK_TOP = SPACE_XL
 TITLE_PX = 28
 BAR_TITLE_PX = 17
 HEADER_FEATHER = SPACE_L
+# How far a scroll must travel one way before the header changes state.
+SCROLL_INTENT = SPACE_XL
 SECTION_TO_ROWS = SPACE_S
 # Content fades out over the feather, then clears the button by the gap.
 BOTTOM_FEATHER = SPACE_XXL
@@ -114,9 +112,98 @@ AVATAR_SIZE = 40
 ROW_HEIGHT = AVATAR_SIZE + 2 * ROW_PADDING
 ROW_RADIUS = AVATAR_SIZE // 2 + ROW_PADDING
 ROW_GAP = SPACE_S
+# Text that leads a row, with no icon before it, starts clear of the rounded
+# end: at the title's height the curve reaches ~6 pt in, so 24 leaves the same
+# visible breathing room a 40 icon gets from 12 padding. Section headings share it.
+ROW_TEXT_INSET = SPACE_XL
 ROW_REVEAL_MS = 260
 CONFIRM_SECONDS = 4
+# A name being edited grows from the row title's size and fills the row.
+ROW_TITLE_PX = 15
+EDIT_NAME_PX = 20
 RESULT_SECONDS = 1.6
+BACK_TARGETS = {"how": "welcome", "privacy": "how", "added": "privacy"}
+
+# Home and preference pages deliberately reuse the face-row proportions: a
+# 40-point control inside 12-point padding makes one calm, concentric 64-point
+# row. Separate groups remain 24 points apart.
+PREFERENCE_GROUP_GAP = SPACE_XL
+PREFERENCE_ICON_SIZE = AVATAR_SIZE
+# Trailing controls sit on the centre of the row's rounded end.
+CHEVRON_SIZE = 24
+RADIO_SIZE = 16
+SWITCH_WIDTH = 52
+SWITCH_HEIGHT = 32
+SWITCH_THUMB = 28
+
+
+@dataclass(frozen=True)
+class MonitorInfo:
+    """The stable identity and human-readable copy for one connected output."""
+
+    connector: str
+    title: str
+    detail: str
+
+
+def _monitor_value(monitor: Any, getter: str) -> str:
+    try:
+        value = getattr(monitor, getter)()
+    except (AttributeError, TypeError):
+        return ""
+    return value.strip() if isinstance(value, str) else ""
+
+
+def monitor_info(monitor: Any) -> MonitorInfo | None:
+    """Turn a GDK monitor into copy without depending on a particular vendor."""
+    connector = _monitor_value(monitor, "get_connector")
+    if not connector:
+        # KWin placement is connector-based. An output without that stable key
+        # cannot honestly be offered as a lock target.
+        return None
+    title = _monitor_value(monitor, "get_description") or _monitor_value(monitor, "get_model") or connector
+    try:
+        geometry = monitor.get_geometry()
+        resolution = "%d × %d" % (geometry.width, geometry.height)
+    except (AttributeError, TypeError):
+        resolution = "Display"
+    return MonitorInfo(connector, title, "%s · %s" % (resolution, connector))
+
+
+def available_monitors(display: Gdk.Display | None = None) -> list[MonitorInfo]:
+    display = display or Gdk.Display.get_default()
+    model = display.get_monitors() if display else None
+    choices: list[MonitorInfo] = []
+    for index in range(model.get_n_items() if model else 0):
+        info = monitor_info(model.get_item(index))
+        if info:
+            choices.append(info)
+    return choices
+
+
+def placement_summary(settings: dict[str, Any], monitors: list[MonitorInfo]) -> str:
+    mode, connector = preferences.placement(settings)
+    if mode == preferences.FOLLOW_POINTER:
+        return "Follows the pointer"
+    for monitor in monitors:
+        if monitor.connector == connector:
+            return "Locked to %s" % monitor.title
+    return "Locked to %s · not connected" % connector
+
+
+def setup_auth_copy(faces_loaded: bool, has_faces: bool) -> tuple[str, str, str]:
+    """Title, body, and compact status while admin authentication is pending."""
+    if faces_loaded and not has_faces:
+        return (
+            "Enter your sudo password",
+            "Your first face can’t approve itself, so FaceGate asks for your password first.",
+            "Enter your sudo password to add your first face.",
+        )
+    return (
+        "Authenticate to add a face",
+        "Adding a face needs admin approval first.",
+        "Approve to add a face.",
+    )
 
 
 def helper_command(args: list[str]) -> list[str]:
@@ -124,25 +211,7 @@ def helper_command(args: list[str]) -> list[str]:
     override = os.environ.get("FACEGATE_FACES_HELPER")
     if override:
         return shlex.split(override) + args
-    if args == ["list"]:
-        return ["pkexec", LIST_HELPER]
-    return ["pkexec", CHANGE_HELPER] + args
-
-
-def load_settings() -> dict[str, Any]:
-    try:
-        value = json.loads(SETTINGS_FILE.read_text())
-    except (OSError, ValueError):
-        return {}
-    return value if isinstance(value, dict) else {}
-
-
-def save_settings(settings: dict[str, Any]) -> None:
-    try:
-        SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        SETTINGS_FILE.write_text(json.dumps(settings))
-    except OSError:
-        pass
+    return [FACES_HELPER] + args
 
 
 def rounded_rect(context: Any, x: float, y: float, width: float, height: float, radius: float) -> None:
@@ -302,70 +371,57 @@ class HelperRun:
             pass
 
     def stop(self) -> None:
+        process = self.process
         if self.stdin:
-            # The helper runs as root; closing its input is how it is told to go.
+            # Ask Gaze to stop, then close the command channel so EOF is also a
+            # cancellation signal. A short fallback kills a wedged D-Bus
+            # client; gazed observes its sender vanish and releases the camera.
             self.send({"cmd": "cancel"})
             self.stdin.close(None)
+            self.stdin = None
+        if process:
+            GLib.timeout_add(1_500, self._force_exit_if_current, process)
+
+    def _force_exit_if_current(self, process: Gio.Subprocess) -> bool:
+        if self.process is process:
+            process.force_exit()
+        return False
+
+    def abort(self) -> None:
+        """Stop the helper while Gaze's polkit request is still pending."""
+        if self.process:
+            self.process.force_exit()
 
 
-class IslandLink:
-    """The stream that shows an enrollment in the island, if the HUD is running."""
+class IslandBridge:
+    """Hands the panel's scan to the island it lives in.
 
-    def __init__(self, on_cancel: Callable[[], None]) -> None:
+    Panel and island share one GTK main loop, so this is a direct call, never
+    a socket round-trip: a blocking handshake would wait for a reply that
+    this same loop has to dispatch. The scan is announced before admin
+    approval, so the approval itself turns into the preview.
+    """
+
+    def __init__(self, hud: Any, on_cancel: Callable[[], None]) -> None:
+        self.hud = hud
         self.on_cancel = on_cancel
-        self.connection: socket.socket | None = None
-        self.watch: int | None = None
+        self.token: object | None = None
+
+    def expect(self) -> None:
+        self.close()
+        self.token = self.hud.expect_enrollment(self.on_cancel)
 
     def open(self) -> bool:
-        connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        try:
-            connection.settimeout(2)
-            connection.connect(str(default_socket_path()))
-            connection.sendall(encode({"phase": "enroll"}))
-            reply = json.loads(connection.recv(4_096).split(b"\n", 1)[0] or b"{}")
-        except (OSError, ValueError):
-            connection.close()
-            return False
-        if not isinstance(reply, dict) or not reply.get("ok"):
-            connection.close()
-            return False
-        connection.settimeout(1)
-        self.connection = connection
-        self.watch = GLib.io_add_watch(connection.fileno(), GLib.PRIORITY_DEFAULT, GLib.IO_IN | GLib.IO_HUP | GLib.IO_ERR, self._readable)
-        return True
-
-    def _readable(self, *_args: Any) -> bool:
-        try:
-            data = self.connection.recv(4_096) if self.connection else b""
-        except OSError:
-            data = b""
-        if not data:
-            self.watch = None
-            self.close()
-            return False
-        if b'"cancel"' in data:
-            self.on_cancel()
-        return True
+        return self.token is not None and self.hud.begin_embedded_enrollment(self.token)
 
     def send(self, message: dict[str, Any]) -> None:
-        if not self.connection:
-            return
-        try:
-            self.connection.sendall(encode(message))
-        except OSError:
-            self.close()
+        if self.token is not None:
+            self.hud.enrollment_message(self.token, message)
 
     def close(self) -> None:
-        if self.watch:
-            GLib.source_remove(self.watch)
-            self.watch = None
-        if self.connection:
-            self.connection.close()
-            self.connection = None
-
-    @property
-    def is_open(self) -> bool:
-        return self.connection is not None
+        token, self.token = self.token, None
+        if token is not None:
+            self.hud.end_enrollment(token)
 
 
 def draw_close_glyph(area: Gtk.DrawingArea, context: Any, width: int, height: int) -> None:
@@ -381,6 +437,19 @@ def draw_close_glyph(area: Gtk.DrawingArea, context: Any, width: int, height: in
     context.stroke()
 
 
+def draw_back_glyph(area: Gtk.DrawingArea, context: Any, width: int, height: int) -> None:
+    """A restrained chevron with the close glyph's exact visual weight."""
+    color = area.get_color()
+    context.set_source_rgba(color.red, color.green, color.blue, color.alpha)
+    context.set_line_width(1.75)
+    context.set_line_cap(cairo.LINE_CAP_ROUND)
+    context.set_line_join(cairo.LINE_JOIN_ROUND)
+    context.move_to(width / 2 + 2.5, height / 2 - 5)
+    context.line_to(width / 2 - 2.5, height / 2)
+    context.line_to(width / 2 + 2.5, height / 2 + 5)
+    context.stroke()
+
+
 def label(text: str, css_class: str, wrap: bool = False, xalign: float = 0.5) -> Gtk.Label:
     widget = Gtk.Label(label=text, xalign=xalign)
     widget.add_css_class(css_class)
@@ -392,53 +461,535 @@ def label(text: str, css_class: str, wrap: bool = False, xalign: float = 0.5) ->
     return widget
 
 
+# Settings controls -----------------------------------------------------------
+
+
+def draw_chevron_glyph(area: Gtk.DrawingArea, context: Any, width: int, height: int) -> None:
+    color = area.get_color()
+    context.set_source_rgba(color.red, color.green, color.blue, color.alpha)
+    context.set_line_width(1.75)
+    context.set_line_cap(cairo.LINE_CAP_ROUND)
+    context.set_line_join(cairo.LINE_JOIN_ROUND)
+    context.move_to(width / 2 - 2.5, height / 2 - 5)
+    context.line_to(width / 2 + 2.5, height / 2)
+    context.line_to(width / 2 - 2.5, height / 2 + 5)
+    context.stroke()
+
+
+def row_copy(title: str, detail: str) -> tuple[Gtk.Box, Gtk.Label]:
+    copy = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+    copy.set_valign(Gtk.Align.CENTER)
+    copy.set_hexpand(True)
+    title_label = label(title, "row-title", xalign=0)
+    title_label.set_ellipsize(Pango.EllipsizeMode.END)
+    title_label.set_single_line_mode(True)
+    detail_label = label(detail, "row-detail", xalign=0)
+    detail_label.set_ellipsize(Pango.EllipsizeMode.END)
+    detail_label.set_single_line_mode(True)
+    copy.append(title_label)
+    copy.append(detail_label)
+    return copy, detail_label
+
+
+def pill_layout(title: str, detail: str, leading: Gtk.Widget | None = None, trailing: Gtk.Widget | None = None, trailing_radius: float = 0.0, copy: Gtk.Widget | None = None) -> tuple[Gtk.Box, Gtk.Label | None]:
+    """The one layout every 64-point settings row uses (inside 12 padding).
+
+    A leading 40 icon sits in the padding, concentric with the rounded end;
+    text with nothing before it starts 24 in. A trailing control is centred on
+    the other end's centre, 32 from the edge, whatever its size. A row with
+    its own `copy` widget uses it in place of the title and detail.
+    """
+    content = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=SPACE_M)
+    if leading:
+        leading.set_valign(Gtk.Align.CENTER)
+        content.append(leading)
+    detail_label = None
+    if copy is None:
+        copy, detail_label = row_copy(title, detail)
+    if not leading:
+        copy.set_margin_start(ROW_TEXT_INSET - ROW_PADDING)
+    content.append(copy)
+    if trailing:
+        trailing.set_valign(Gtk.Align.CENTER)
+        trailing.set_margin_end(round(ROW_RADIUS - ROW_PADDING - trailing_radius))
+        content.append(trailing)
+    return content, detail_label
+
+
+class NavigationRow(Gtk.Button):
+    """A full-row settings destination: icon, title and detail, chevron."""
+
+    def __init__(self, title: str, icon: Gtk.Widget, on_click: Callable[[], None]) -> None:
+        super().__init__()
+        self.add_css_class("preference-row")
+        self.set_hexpand(True)
+        self.set_focus_on_click(False)
+        self.update_property([Gtk.AccessibleProperty.LABEL], [title])
+        self.connect("clicked", lambda *_: on_click())
+
+        chevron = Gtk.DrawingArea()
+        chevron.add_css_class("chevron")
+        chevron.set_content_width(CHEVRON_SIZE)
+        chevron.set_content_height(CHEVRON_SIZE)
+        chevron.set_draw_func(draw_chevron_glyph)
+        content, self.detail = pill_layout(title, "", icon, chevron, CHEVRON_SIZE / 2)
+        self.set_child(content)
+
+
+class GlobalSwitch(Gtk.Button):
+    """A 52 × 32 switch whose thumb travels on a spring, drawn rather than laid out."""
+
+    def __init__(self, on_change: Callable[[bool], None]) -> None:
+        super().__init__(accessible_role=Gtk.AccessibleRole.SWITCH)
+        self.add_css_class("global-switch")
+        self.set_focus_on_click(False)
+        self.on_change = on_change
+        self.active = False
+        self.position = Spring(0.0)
+        self.position.configure(0.35, 1.0)
+        self.last: int | None = None
+        area = Gtk.DrawingArea()
+        area.set_content_width(SWITCH_WIDTH)
+        area.set_content_height(SWITCH_HEIGHT)
+        area.set_draw_func(self._draw)
+        self.area = area
+        self.set_child(area)
+        self.connect("clicked", lambda *_: self._flip())
+        self.add_tick_callback(self._tick)
+
+    def set_active(self, active: bool, animate: bool = False) -> None:
+        self.active = active
+        self.position.target = 1.0 if active else 0.0
+        if not animate or reduced_motion():
+            self.position.value, self.position.velocity = self.position.target, 0.0
+        self.update_state([Gtk.AccessibleState.CHECKED], [int(Gtk.AccessibleTristate.TRUE if active else Gtk.AccessibleTristate.FALSE)])
+        self.area.queue_draw()
+
+    def _flip(self) -> None:
+        self.set_active(not self.active, animate=True)
+        self.on_change(self.active)
+
+    def _tick(self, _widget: Gtk.Widget, clock: Gdk.FrameClock) -> bool:
+        frame = clock.get_frame_time()
+        elapsed = 0.0 if self.last is None else min((frame - self.last) / 1_000_000, 1 / 30)
+        self.last = frame
+        if abs(self.position.value - self.position.target) > 0.001 or abs(self.position.velocity) > 0.001:
+            self.position.step(elapsed)
+            self.area.queue_draw()
+        return GLib.SOURCE_CONTINUE
+
+    def _draw(self, _area: Gtk.DrawingArea, context: Any, width: int, height: int) -> None:
+        amount = clamp(self.position.value)
+        # Off is a pressed fill; on is success green, because FaceGate is working.
+        off, on = (0.23, 0.23, 0.24), (0.19, 0.82, 0.35)
+        rounded_rect(context, 0, 0, width, height, height / 2)
+        context.set_source_rgb(*(mix(off[index], on[index], amount) for index in range(3)))
+        context.fill()
+        inset = (height - SWITCH_THUMB) / 2
+        x = mix(inset + SWITCH_THUMB / 2, width - inset - SWITCH_THUMB / 2, amount)
+        context.arc(x, height / 2, SWITCH_THUMB / 2, 0, math.tau)
+        context.set_source_rgb(0.96, 0.96, 0.97)
+        context.fill()
+
+
+class ToggleRow(Gtk.Box):
+    """The global FaceGate switch."""
+
+    def __init__(self, on_change: Callable[[bool], None]) -> None:
+        super().__init__()
+        self.add_css_class("preference-row")
+        self.set_hexpand(True)
+        self.switch = GlobalSwitch(on_change)
+        self.switch.update_property([Gtk.AccessibleProperty.LABEL], ["Use FaceGate"])
+        # The thumb, not the track, is what sits on the end cap's centre.
+        content, self.detail = pill_layout("Use FaceGate", "", trailing=self.switch, trailing_radius=SWITCH_HEIGHT / 2)
+        content.set_hexpand(True)
+        self.append(content)
+
+
+class ChoiceIndicator(Gtk.DrawingArea):
+    """A paint-only radio mark, so choosing never changes layout."""
+
+    def __init__(self, selected: bool) -> None:
+        super().__init__()
+        self.set_content_width(CHEVRON_SIZE)
+        self.set_content_height(CHEVRON_SIZE)
+        self.selected = selected
+        self.set_draw_func(self._draw)
+
+    def set_selected(self, selected: bool) -> None:
+        if selected != self.selected:
+            self.selected = selected
+            self.queue_draw()
+
+    def _draw(self, _area: Gtk.DrawingArea, context: Any, width: int, height: int) -> None:
+        context.arc(width / 2, height / 2, RADIO_SIZE / 2 - 0.75, 0, math.tau)
+        context.set_line_width(1.5)
+        context.set_source_rgba(0.96, 0.96, 0.97, 1.0 if self.selected else 0.24)
+        context.stroke()
+        if self.selected:
+            context.arc(width / 2, height / 2, RADIO_SIZE / 4, 0, math.tau)
+            context.fill()
+
+
+class ChoiceRow(Gtk.Button):
+    """One immediate, mutually exclusive placement choice."""
+
+    def __init__(self, title: str, detail: str, selected: bool, on_click: Callable[[], None]) -> None:
+        super().__init__()
+        self.add_css_class("preference-row")
+        self.set_hexpand(True)
+        self.set_focus_on_click(False)
+        self.update_property([Gtk.AccessibleProperty.LABEL], [title])
+        self.connect("clicked", lambda *_: on_click())
+
+        self.indicator = ChoiceIndicator(selected)
+        content, _detail = pill_layout(title, detail, trailing=self.indicator, trailing_radius=CHEVRON_SIZE / 2)
+        self.set_child(content)
+
+
+class DisplayGlyph(Gtk.DrawingArea):
+    """A display with the island at its top edge, drawn in the mark's language.
+
+    It shares the mark's 72-unit square, faint outline and white features, so
+    it can stand in for the mark as hero art, in the collapsed bar and as a
+    row icon.
+    """
+
+    def __init__(self, size: int) -> None:
+        super().__init__()
+        self.set_content_width(size)
+        self.set_content_height(size)
+        self.set_draw_func(self._draw)
+
+    @staticmethod
+    def _draw(_area: Gtk.DrawingArea, context: Any, width: int, _height: int) -> None:
+        context.scale(width / 72, width / 72)
+        context.set_line_width(1.5)
+        context.set_line_cap(cairo.LINE_CAP_ROUND)
+        # The screen's bottom lands where the mark's ring does, so the art
+        # sits the same distance above its title.
+        rounded_rect(context, 10, 18, 52, 34, 6)
+        context.move_to(36, 52)
+        context.line_to(36, 60)
+        context.move_to(27, 60)
+        context.line_to(45, 60)
+        context.set_source_rgba(0.96, 0.96, 0.97, 0.4)
+        context.stroke()
+        # The island, hanging from the screen's top edge.
+        rounded_rect(context, 28, 18, 16, 6, 3)
+        context.rectangle(28, 18, 16, 3)
+        context.set_source_rgb(0.96, 0.96, 0.97)
+        context.fill()
+
+
 # Face rows -----------------------------------------------------------------
 
 
-class FaceRow(Gtk.Revealer):
-    def __init__(self, face: dict[str, Any], on_remove: Callable[["FaceRow"], None]) -> None:
+class FaceActions(Gtk.Widget):
+    """A face row's Edit and Remove, as one control that grows instead of swapping.
+
+    At rest it is two 40 circles, 8 apart: a pencil, and the trash on the
+    row's end cap. Trash widens leftward into the red Remove pill over both
+    (its right end never moves) and narrows back when the choice lapses, or
+    into a spinner while admin approval is asked. While a name is edited the
+    pencil becomes Save. The layout width is always the pill's, so nothing
+    else in the row moves.
+    """
+
+    def __init__(self, on_edit: Callable[[], None], on_ask: Callable[[], None], on_confirm: Callable[[], None]) -> None:
+        super().__init__(accessible_role=Gtk.AccessibleRole.GROUP)
+        self.on_edit, self.on_ask, self.on_confirm = on_edit, on_ask, on_confirm
+        # "idle", "confirm" (Remove shown), "busy" (approval pending) or "editing".
+        self.mode = "idle"
+        self.pencil = Gtk.Image.new_from_icon_name("document-edit-symbolic")
+        self.check = Gtk.Image.new_from_icon_name("object-select-symbolic")
+        self.trash = Gtk.Image.new_from_icon_name("user-trash-symbolic")
+        self.text = label("Remove", "remove-label")
+        self.spinner = Gtk.Spinner()
+        for child in (self.pencil, self.check, self.trash, self.text, self.spinner):
+            child.set_parent(self)
+        for icon in (self.pencil, self.check, self.trash):
+            icon.add_css_class("row-action")
+        self.trash.add_css_class("destructive")
+        text_width = self.text.measure(Gtk.Orientation.HORIZONTAL, -1)[1]
+        # The pill covers both circles, and fits its word with 16 either side.
+        self.pill_width = max(2 * AVATAR_SIZE + SPACE_S, SPACE_S * math.ceil((text_width + 2 * SPACE_L) / SPACE_S))
+        self.open = Spring(0.0)
+        self.busy = Spring(0.0)
+        self.editing = Spring(0.0)
+        self.hover_edit = Spring(0.0)
+        self.hover_trash = Spring(0.0)
+        self.press = Spring(1.0)
+        for spring in (self.busy, self.editing):
+            spring.configure(0.3, 1.0)
+        for spring in (self.hover_edit, self.hover_trash):
+            spring.configure(0.2, 1.0)
+        self.press.configure(0.16, 1.0)
+        self.springs = (self.open, self.busy, self.editing, self.hover_edit, self.hover_trash, self.press)
+        self.pressed: str | None = None
+        self.last: int | None = None
+        self.ticking = False
+
+        click = Gtk.GestureClick()
+        click.connect("pressed", lambda _gesture, _n, x, y: self._press(self._target(x, y)))
+        click.connect("released", lambda _gesture, _n, x, y: self._release(self._target(x, y)))
+        click.connect("stopped", lambda *_: self._press(None))
+        self.add_controller(click)
+        motion = Gtk.EventControllerMotion()
+        motion.connect("motion", lambda _motion, x, y: self._set_hover(self._target(x, y)))
+        motion.connect("leave", lambda *_: self._set_hover(None))
+        self.add_controller(motion)
+        self.update_property([Gtk.AccessibleProperty.LABEL], ["Edit or remove this face"])
+
+    # State -------------------------------------------------------------------
+
+    def set_mode(self, mode: str) -> None:
+        self.mode = mode
+        # Opening settles with a trace of life; closing is quicker, without bounce.
+        self.open.configure(*((0.4, 0.9) if mode == "confirm" else (0.3, 1.0)))
+        self.open.target = 1.0 if mode == "confirm" else 0.0
+        self.busy.target = 1.0 if mode == "busy" else 0.0
+        self.editing.target = 1.0 if mode == "editing" else 0.0
+        self.spinner.set_spinning(mode == "busy")
+        if reduced_motion():
+            for spring in (self.open, self.busy, self.editing):
+                spring.value, spring.velocity = spring.target, 0.0
+        self._animate()
+
+    def _circle(self, index: int) -> float:
+        """The centre x of the trash (0) or pencil (1) circle."""
+        return self.get_width() - AVATAR_SIZE / 2 - index * (AVATAR_SIZE + SPACE_S)
+
+    def _target(self, x: float, y: float) -> str | None:
+        if not 0 <= y <= self.get_height() or self.mode == "busy":
+            return None
+        if self.mode == "confirm":
+            return "confirm" if x >= self.get_width() - self._pill() else None
+        if abs(x - self._circle(1)) <= AVATAR_SIZE / 2:
+            return "save" if self.mode == "editing" else "edit"
+        if abs(x - self._circle(0)) <= AVATAR_SIZE / 2 and self.mode == "idle":
+            return "trash"
+        return None
+
+    def do_contains(self, x: float, y: float) -> bool:
+        return self._target(x, y) is not None
+
+    def _press(self, target: str | None) -> None:
+        self.pressed = target
+        self.press.target = 0.97 if target and not reduced_motion() else 1.0
+        self._animate()
+
+    def _release(self, target: str | None) -> None:
+        pressed = self.pressed
+        self._press(None)
+        if target and target == pressed:
+            {"edit": self.on_edit, "save": self.on_edit, "trash": self.on_ask, "confirm": self.on_confirm}[target]()
+
+    def _set_hover(self, target: str | None) -> None:
+        self.hover_edit.target = 1.0 if target in ("edit", "save") else 0.0
+        self.hover_trash.target = 1.0 if target == "trash" else 0.0
+        for icon, hovered in ((self.pencil, target == "edit"), (self.check, target == "save"), (self.trash, target == "trash")):
+            (icon.add_css_class if hovered else icon.remove_css_class)("hover")
+        self._animate()
+
+    # Motion ------------------------------------------------------------------
+
+    def _animate(self) -> None:
+        if not self.ticking:
+            self.ticking = True
+            self.last = None
+            self.add_tick_callback(self._tick)
+
+    def _tick(self, _widget: Gtk.Widget, clock: Gdk.FrameClock) -> bool:
+        frame = clock.get_frame_time()
+        elapsed = min((frame - self.last) / 1_000_000, 1 / 30) if self.last else 0.0
+        self.last = frame
+        for spring in self.springs:
+            spring.step(elapsed)
+        self.queue_allocate()
+        self.queue_draw()
+        if all(abs(spring.value - spring.target) < 0.001 and abs(spring.velocity) < 0.01 for spring in self.springs):
+            for spring in self.springs:
+                spring.value, spring.velocity = spring.target, 0.0
+            self.ticking = False
+            return GLib.SOURCE_REMOVE
+        return GLib.SOURCE_CONTINUE
+
+    # Layout and paint ----------------------------------------------------------
+
+    def _pill(self) -> float:
+        return mix(AVATAR_SIZE, self.pill_width, clamp(self.open.value))
+
+    def do_measure(self, orientation: Gtk.Orientation, _for_size: int) -> tuple[int, int, int, int]:
+        size = self.pill_width if orientation == Gtk.Orientation.HORIZONTAL else AVATAR_SIZE
+        return size, size, -1, -1
+
+    @staticmethod
+    def _centre(child: Gtk.Widget, x: float, y: float) -> None:
+        width = child.measure(Gtk.Orientation.HORIZONTAL, -1)[1]
+        height = child.measure(Gtk.Orientation.VERTICAL, width)[1]
+        child.allocate(width, height, -1, Gsk.Transform().translate(Graphene.Point().init(x - width / 2, y - height / 2)))
+
+    def do_size_allocate(self, width: int, height: int, _baseline: int) -> None:
+        middle = height / 2
+        for child, index in ((self.trash, 0), (self.spinner, 0), (self.pencil, 1), (self.check, 1)):
+            self._centre(child, self._circle(index), middle)
+        # The word rides with the pill's centre as it opens.
+        self._centre(self.text, width - self._pill() / 2, middle)
+
+    def _child(self, snapshot: Gtk.Snapshot, child: Gtk.Widget, opacity: float) -> None:
+        if opacity <= 0.002:
+            return
+        blur = TRANSITION_BLUR * (1 - opacity)
+        snapshot.push_opacity(opacity)
+        if blur > 0.05:
+            snapshot.push_blur(blur)
+        self.snapshot_child(child, snapshot)
+        if blur > 0.05:
+            snapshot.pop()
+        snapshot.pop()
+
+    @staticmethod
+    def _fill(snapshot: Gtk.Snapshot, x: float, width: float, height: float, rgba: tuple[float, float, float, float]) -> None:
+        if rgba[3] <= 0.002:
+            return
+        bounds = Graphene.Rect().init(x, 0, width, height)
+        shape = Gsk.RoundedRect()
+        shape.init_from_rect(bounds, height / 2)
+        snapshot.push_rounded_clip(shape)
+        snapshot.append_color(Gdk.RGBA(red=rgba[0], green=rgba[1], blue=rgba[2], alpha=rgba[3]), bounds)
+        snapshot.pop()
+
+    def do_snapshot(self, snapshot: Gtk.Snapshot) -> None:
+        width, height = self.get_width(), self.get_height()
+        opened, busy, editing = clamp(self.open.value), clamp(self.busy.value), clamp(self.editing.value)
+        pill = self._pill()
+        pressed_x = {"edit": self._circle(1), "save": self._circle(1), "trash": self._circle(0)}.get(self.pressed or "", width - pill / 2)
+        snapshot.save()
+        snapshot.translate(Graphene.Point().init(pressed_x, height / 2))
+        snapshot.scale(self.press.value, self.press.value)
+        snapshot.translate(Graphene.Point().init(-pressed_x, -height / 2))
+        rest = (1 - opened) * (1 - busy)
+        # Hover fills while at rest; red as the trash becomes Remove.
+        self._fill(snapshot, self._circle(1) - AVATAR_SIZE / 2, AVATAR_SIZE, height, (0.17, 0.17, 0.18, clamp(self.hover_edit.value) * rest))
+        self._fill(snapshot, self._circle(0) - AVATAR_SIZE / 2, AVATAR_SIZE, height, (0.17, 0.17, 0.18, clamp(self.hover_trash.value) * rest * (1 - editing)))
+        self._fill(snapshot, width - pill, pill, height, (1.0, 0.27, 0.23, opened))
+        # Icons leave first; the word arrives once there is room for it.
+        leaving = clamp(1 - opened / 0.4) * (1 - busy)
+        self._child(snapshot, self.pencil, leaving * (1 - editing))
+        self._child(snapshot, self.check, leaving * editing)
+        self._child(snapshot, self.trash, leaving * (1 - editing))
+        self._child(snapshot, self.text, clamp((opened - 0.45) / 0.55))
+        self._child(snapshot, self.spinner, busy)
+        snapshot.restore()
+
+
+class NameBlock(Gtk.Widget):
+    """A face's name over its date; while the name is edited it fills the row.
+
+    The date fades as the name grows 15 → 20 and glides to the row's middle,
+    then both return when editing ends. Only transform and opacity change,
+    so the row never reflows.
+    """
+
+    def __init__(self, name: Gtk.Widget, detail: Gtk.Label) -> None:
         super().__init__()
-        self.face_id = int(face["id"])
+        self.name, self.detail = name, detail
+        name.set_parent(self)
+        detail.set_parent(self)
+        self.set_hexpand(True)
+        self.set_valign(Gtk.Align.CENTER)
+        self.focus = Spring(0.0)
+        self.focus.configure(0.4, 1.0)
+        self.last: int | None = None
+        self.ticking = False
+
+    def set_editing(self, editing: bool) -> None:
+        self.focus.target = 1.0 if editing else 0.0
+        if reduced_motion() or not self.get_mapped():
+            self.focus.value, self.focus.velocity = self.focus.target, 0.0
+            self.queue_allocate()
+        elif not self.ticking:
+            self.ticking = True
+            self.last = None
+            self.add_tick_callback(self._tick)
+
+    def _tick(self, _widget: Gtk.Widget, clock: Gdk.FrameClock) -> bool:
+        frame = clock.get_frame_time()
+        elapsed = min((frame - self.last) / 1_000_000, 1 / 30) if self.last else 0.0
+        self.last = frame
+        self.focus.step(elapsed)
+        if abs(self.focus.value - self.focus.target) < 0.001 and abs(self.focus.velocity) < 0.01:
+            self.focus.value, self.focus.velocity = self.focus.target, 0.0
+            self.ticking = False
+        self.queue_allocate()
+        return GLib.SOURCE_CONTINUE if self.ticking else GLib.SOURCE_REMOVE
+
+    def do_measure(self, orientation: Gtk.Orientation, for_size: int) -> tuple[int, int, int, int]:
+        if orientation == Gtk.Orientation.HORIZONTAL:
+            # Names ellipsize; the row decides the width.
+            return 0, max(self.name.measure(orientation, -1)[1], self.detail.measure(orientation, -1)[1]), -1, -1
+        height = self.name.measure(orientation, -1)[1] + self.detail.measure(orientation, -1)[1]
+        return height, height, -1, -1
+
+    def do_size_allocate(self, width: int, height: int, _baseline: int) -> None:
+        amount = clamp(self.focus.value)
+        scale = mix(1.0, EDIT_NAME_PX / ROW_TITLE_PX, amount)
+        name_height = self.name.measure(Gtk.Orientation.VERTICAL, -1)[1]
+        # Laid out narrower as it grows, so the scaled name still fits the row.
+        name_y = mix(0.0, (height - name_height * scale) / 2, amount)
+        self.name.allocate(max(1, round(width / scale)), name_height, -1, Gsk.Transform().translate(Graphene.Point().init(0, name_y)).scale(scale, scale))
+        detail_height = self.detail.measure(Gtk.Orientation.VERTICAL, -1)[1]
+        self.detail.set_opacity(clamp(1 - amount / 0.6))
+        self.detail.allocate(width, detail_height, -1, Gsk.Transform().translate(Graphene.Point().init(0, name_height + SPACE_XS * amount)))
+
+
+class FaceRow(Gtk.Revealer):
+    def __init__(self, face: dict[str, Any], on_remove: Callable[["FaceRow"], None], on_rename: Callable[["FaceRow", str, str], None]) -> None:
+        super().__init__()
+        self.face_id = str(face["id"])
         self.on_remove = on_remove
+        self.on_rename = on_rename
         self.revert: int | None = None
+        self.editing = False
         self.set_transition_type(Gtk.RevealerTransitionType.SLIDE_DOWN)
         self.set_transition_duration(ROW_REVEAL_MS)
 
-        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=ROW_PADDING)
+        # The name and its editor share one slot, same type and height, so
+        # editing changes nothing but the caret.
+        self.name = face.get("label") or "Face"
+        self.title = label(self.name, "row-title", xalign=0)
+        self.title.set_ellipsize(Pango.EllipsizeMode.END)
+        self.title.set_single_line_mode(True)
+        self.editor = Gtk.Text()
+        self.editor.add_css_class("row-title")
+        self.editor.add_css_class("name-editor")
+        self.editor.set_max_length(NAME_CHARS)
+        self.editor.update_property([Gtk.AccessibleProperty.LABEL], ["Face name"])
+        self.editor.connect("activate", lambda *_: self.end_edit(True))
+        keys = Gtk.EventControllerKey()
+        keys.connect("key-pressed", lambda _keys, keyval, *_: keyval == Gdk.KEY_Escape and (self.end_edit(False) or True))
+        self.editor.add_controller(keys)
+        focus = Gtk.EventControllerFocus()
+        focus.connect("leave", lambda *_: self.end_edit(True))
+        self.editor.add_controller(focus)
+        self.name_slot = Gtk.Stack()
+        self.name_slot.set_vhomogeneous(True)
+        self.name_slot.set_hhomogeneous(False)
+        self.name_slot.add_named(self.title, "name")
+        self.name_slot.add_named(self.editor, "editor")
+
+        self.actions = FaceActions(self._toggle_edit, self._ask, self._confirm)
+        added = face.get("time") or 0
+        self.added = time.strftime("Added %b %-d, %Y", time.localtime(added)) if added else "Added with Gaze"
+        self.detail = label(self.added, "row-detail", xalign=0)
+        self.detail.set_ellipsize(Pango.EllipsizeMode.END)
+        self.detail.set_single_line_mode(True)
+        self.name_block = NameBlock(self.name_slot, self.detail)
+        row, _detail = pill_layout("", "", Mark(AVATAR_SIZE, animated=False), self.actions, AVATAR_SIZE / 2, copy=self.name_block)
         row.add_css_class("face-row")
         self.row = row
-        avatar = Mark(AVATAR_SIZE, animated=False)
-        avatar.set_valign(Gtk.Align.CENTER)
-        row.append(avatar)
-
-        text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        text.set_valign(Gtk.Align.CENTER)
-        text.set_hexpand(True)
-        text.append(label(face.get("label") or "Face", "row-title", xalign=0))
-        added = face.get("time") or 0
-        text.append(label(time.strftime("Added %b %-d, %Y", time.localtime(added)) if added else "Added with Howdy", "row-detail", xalign=0))
-        row.append(text)
-
-        self.actions = Gtk.Stack()
-        self.actions.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
-        self.actions.set_transition_duration(180)
-        self.actions.set_hhomogeneous(False)
-        self.actions.set_interpolate_size(True)
-        self.actions.set_valign(Gtk.Align.CENTER)
-        trash = Gtk.Button.new_from_icon_name("user-trash-symbolic")
-        trash.add_css_class("icon")
-        trash.set_tooltip_text("Remove this face")
-        trash.connect("clicked", lambda *_: self._ask())
-        confirm = Gtk.Button(label="Remove")
-        confirm.add_css_class("destructive")
-        confirm.connect("clicked", lambda *_: self._confirm())
-        spinner = Gtk.Spinner()
-        spinner.set_size_request(AVATAR_SIZE, AVATAR_SIZE)
-        spinner.start()
-        self.actions.add_named(trash, "trash")
-        self.actions.add_named(confirm, "confirm")
-        self.actions.add_named(spinner, "busy")
-        row.append(self.actions)
         # Rows are spaced by their own bottom margin, so the gap collapses with them.
         holder = Gtk.Box()
         holder.set_margin_bottom(ROW_GAP)
@@ -446,13 +997,19 @@ class FaceRow(Gtk.Revealer):
         row.set_hexpand(True)
         self.set_child(holder)
 
-    def _ask(self) -> None:
-        self.actions.set_visible_child_name("confirm")
-        self.revert = GLib.timeout_add_seconds(CONFIRM_SECONDS, self._settle)
+    # Remove -----------------------------------------------------------------
 
-    def _settle(self) -> bool:
-        self.revert = None
-        self.actions.set_visible_child_name("trash")
+    def _ask(self) -> None:
+        self.actions.set_mode("confirm")
+        self.revert = GLib.timeout_add_seconds(CONFIRM_SECONDS, self.dismiss_remove)
+
+    def dismiss_remove(self) -> bool:
+        """Fold Remove back into the trash: it lapsed, or you clicked away."""
+        if self.revert:
+            GLib.source_remove(self.revert)
+            self.revert = None
+        if self.actions.mode == "confirm":
+            self.actions.set_mode("idle")
         return False
 
     def _confirm(self) -> None:
@@ -462,8 +1019,48 @@ class FaceRow(Gtk.Revealer):
         self.on_remove(self)
 
     def set_busy(self, busy: bool) -> None:
-        self.actions.set_visible_child_name("busy" if busy else "trash")
+        self.actions.set_mode("busy" if busy else "idle")
         self.row.set_sensitive(not busy)
+
+    # Rename -----------------------------------------------------------------
+
+    def _toggle_edit(self) -> None:
+        if self.editing:
+            self.end_edit(True)
+        else:
+            self.begin_edit()
+
+    def begin_edit(self) -> None:
+        if self.editing or self.actions.mode != "idle":
+            return
+        self.editing = True
+        self.editor.set_text(self.name)
+        self.name_slot.set_visible_child_name("editor")
+        self.name_block.set_editing(True)
+        self.row.add_css_class("editing")
+        self.actions.set_mode("editing")
+        self.editor.grab_focus()
+        self.editor.select_region(0, -1)
+
+    def end_edit(self, save: bool) -> None:
+        """Return (or Save, or clicking away) keeps the name; Escape doesn't."""
+        if not self.editing:
+            return
+        self.editing = False
+        name = " ".join(self.editor.get_text().split())
+        self.name_slot.set_visible_child_name("name")
+        self.name_block.set_editing(False)
+        self.row.remove_css_class("editing")
+        self.actions.set_mode("idle")
+        if save and name and name != self.name:
+            previous = self.name
+            # Shown at once; put back if approval is declined.
+            self.set_name(name)
+            self.on_rename(self, name, previous)
+
+    def set_name(self, name: str) -> None:
+        self.name = name
+        self.title.set_text(name)
 
     def celebrate(self) -> None:
         """A new face arrives lit, then settles to the resting row colour."""
@@ -473,19 +1070,126 @@ class FaceRow(Gtk.Revealer):
 
 # Onboarding illustration ------------------------------------------------------
 
-STORY_WIDTH = WINDOW_WIDTH - 2 * PAGE_MARGIN
+STORY_WIDTH = PANEL_WIDTH - 2 * PAGE_MARGIN
 STORY_HEIGHT = 176
 STORY_SCALE = 0.6
-# When each phase starts in the loop, the island height it springs to, and the
-# step it illustrates (1-based, 0 for none).
-STORY = (
-    (0.0, "hidden", 0, 0),
-    (0.4, "approval", 286, 1),
-    (2.8, "scanning", 168, 2),
-    (4.3, "success", 168, 3),
-    (5.8, "hidden", 0, 3),
+# The steps the story illustrates, in order.
+STORY_STEPS = (
+    "When something asks for admin access, the island drops down and says who's asking.",
+    "Approve, and your camera looks for you. It stays off until you do.",
+    "Recognized, it continues. If not, just use your password.",
 )
-STORY_SECONDS = 7.0
+# Each step is lit long enough to read while the island acts it out: a
+# relaxed reading pace, plus a moment to find the line and glance up.
+READING_WORDS_PER_SECOND = 3.0
+READING_SETTLE_SECONDS = 1.2
+
+
+def reading_seconds(text: str) -> float:
+    return round(len(text.split()) / READING_WORDS_PER_SECOND + READING_SETTLE_SECONDS, 1)
+
+
+def story_timeline(steps: tuple[str, ...] = STORY_STEPS) -> tuple[tuple[tuple[float, str, int, int], ...], float]:
+    """When each phase starts, its island state and height, and the step it lights.
+
+    Heights hug the miniature island's content with the real island's 16
+    inset: the Deny/Approve pair ends at 204, a title and detail at 136.
+    """
+    phases: list[tuple[float, str, int, int]] = [(0.0, "hidden", 0, 0)]
+    start = 0.4
+    for number, (state, height) in enumerate((("approval", 220), ("scanning", 152), ("success", 152)), start=1):
+        phases.append((start, state, height, number))
+        start = round(start + reading_seconds(steps[number - 1]), 1)
+    # The island leaves before the loop begins again; the last step stays lit.
+    phases.append((start, "hidden", 0, len(steps)))
+    return tuple(phases), round(start + 1.0, 1)
+
+
+STORY, STORY_SECONDS = story_timeline()
+
+
+class ShieldGlyph(Gtk.DrawingArea):
+    """A shield holding a padlock, in the mark's language (see DisplayGlyph)."""
+
+    def __init__(self, size: int) -> None:
+        super().__init__()
+        self.set_content_width(size)
+        self.set_content_height(size)
+        self.set_draw_func(self._draw)
+
+    @staticmethod
+    def _draw(_area: Gtk.DrawingArea, context: Any, width: int, _height: int) -> None:
+        context.scale(width / 72, width / 72)
+        context.set_line_width(1.5)
+        context.set_line_cap(cairo.LINE_CAP_ROUND)
+        context.set_line_join(cairo.LINE_JOIN_ROUND)
+        # Its point lands where the mark's ring does, 10 from the bottom.
+        context.move_to(36, 10)
+        context.curve_to(44, 15, 52, 17, 58, 17)
+        context.line_to(58, 36)
+        context.curve_to(58, 49, 49, 57, 36, 62)
+        context.curve_to(23, 57, 14, 49, 14, 36)
+        context.line_to(14, 17)
+        context.curve_to(20, 17, 28, 15, 36, 10)
+        context.close_path()
+        context.set_source_rgba(0.96, 0.96, 0.97, 0.4)
+        context.stroke()
+        # The padlock. Its ink (mostly the body) centres on the shield's area,
+        # which sits above the outline's middle because the shield narrows to
+        # a point: centre y 35.5 against the area's 35.0.
+        context.set_source_rgb(0.96, 0.96, 0.97)
+        context.arc(36, 27, 5, math.pi, 2 * math.pi)
+        context.line_to(41, 31)
+        context.move_to(31, 31)
+        context.line_to(31, 27)
+        context.stroke()
+        rounded_rect(context, 27, 30, 18, 14, 3)
+        context.fill()
+
+
+class PromiseGlyph(Gtk.DrawingArea):
+    """A 24 × 20 cyan line icon for an onboarding promise, drawn to one weight."""
+
+    def __init__(self, kind: str) -> None:
+        super().__init__()
+        self.kind = kind
+        self.set_content_width(ICON_SIZE)
+        self.set_content_height(20)
+        self.add_css_class("promise-icon")
+        self.set_draw_func(self._draw)
+
+    def _draw(self, area: Gtk.DrawingArea, context: Any, width: int, height: int) -> None:
+        color = area.get_color()
+        context.set_source_rgba(color.red, color.green, color.blue, color.alpha)
+        context.set_line_width(1.5)
+        context.set_line_cap(cairo.LINE_CAP_ROUND)
+        context.set_line_join(cairo.LINE_JOIN_ROUND)
+        middle = width / 2
+        if self.kind == "camera":
+            context.arc(middle, 8, 6.25, 0, math.tau)
+            context.new_sub_path()
+            context.arc(middle, 8, 2, 0, math.tau)
+            context.stroke()
+            context.move_to(middle - 5, 18.25)
+            context.line_to(middle + 5, 18.25)
+            context.move_to(middle, 14.25)
+            context.line_to(middle, 18.25)
+            context.stroke()
+        elif self.kind == "computer":
+            rounded_rect(context, middle - 9, 1.75, 18, 12.5, 2.5)
+            context.move_to(middle, 14.25)
+            context.line_to(middle, 18.25)
+            context.move_to(middle - 4.5, 18.25)
+            context.line_to(middle + 4.5, 18.25)
+            context.stroke()
+        else:
+            context.arc(middle, 7.5, 4, math.pi, 2 * math.pi)
+            context.line_to(middle + 4, 9.5)
+            context.move_to(middle - 4, 9.5)
+            context.line_to(middle - 4, 7.5)
+            context.stroke()
+            rounded_rect(context, middle - 6.5, 9.25, 13, 9.5, 2)
+            context.fill()
 
 
 class IslandStory(Gtk.DrawingArea):
@@ -601,25 +1305,33 @@ class IslandStory(Gtk.DrawingArea):
 
 
 class CollapsingHeader:
-    """A large mark and title that shrink into a compact bar as content scrolls.
+    """A large mark and title that become a compact bar once content scrolls.
 
-    The visual layer never takes input, so the list scrolls beneath it; a drag
-    handle the size of the header's current height sits above it.
+    The header is only ever full or a bar, never in between. Scrolling down
+    collapses it and scrolling back into the top of the list expands it; each
+    change runs on a spring while the list travels with it, so rows arrive
+    exactly below the header. A list too short to reach the bar keeps the
+    full header and scrolls beneath it.
+
+    The visual layer never takes input, so the list scrolls beneath it; a
+    transparent scroll target the size of the header sits above it.
     """
 
-    def __init__(self, scroller: Gtk.ScrolledWindow) -> None:
+    def __init__(self, scroller: Gtk.ScrolledWindow, title: str = "Face Approval", art: Gtk.Widget | None = None) -> None:
         self.scroller = scroller
         self.visual = Gtk.Fixed()
         self.visual.set_can_target(False)
         self.visual.set_valign(Gtk.Align.START)
         self.backdrop = Gtk.DrawingArea()
         self.backdrop.set_draw_func(self._draw_backdrop)
-        self.mark = Mark(HERO_SIZE)
-        self.title = label("Face Approval", "hero-title")
+        # The art (the mark, unless a page brings its own 144-point square)
+        # shrinks into the bar beside the title.
+        self.mark = art or Mark(HERO_SIZE)
+        self.title = label(title, "hero-title")
         # One line, always: the header's height never changes with its copy.
         self.detail = label("", "hero-detail")
         self.detail.set_ellipsize(Pango.EllipsizeMode.END)
-        self.detail.set_size_request(WINDOW_WIDTH - 2 * PAGE_MARGIN, -1)
+        self.detail.set_size_request(PANEL_WIDTH - 2 * PAGE_MARGIN, -1)
         self.detail_fade = Fade(self.detail)
         for widget in (self.backdrop, self.mark, self.title, self.detail):
             self.visual.put(widget, 0, 0)
@@ -631,18 +1343,47 @@ class CollapsingHeader:
         self.title_top = HERO_TOP + HERO_SIZE + MARK_TO_TITLE
         self.detail_top = self.title_top + self.title_height + TITLE_TO_DETAIL
         self.full = self.detail_top + detail_height + HERO_BOTTOM
-        self.backdrop.set_size_request(WINDOW_WIDTH, self.full + HEADER_FEATHER)
+        self.backdrop.set_size_request(PANEL_WIDTH, self.full + HEADER_FEATHER)
         self.progress = 0.0
         self.height = float(self.full)
+        self.collapsed = False
+        # While the spring runs it owns the scroll offset, travelling from one
+        # rest offset to the other in step with the header.
+        self.spring = Spring(0.0)
+        self.spring.configure(0.35, 1.0)
+        self.steering = False
+        self.writing = False
+        self.journey = (0.0, 0.0, 0.0)
+        self.last_offset = self.anchor = 0.0
+        self.direction = 0
+        self.last_frame: int | None = None
 
-        self.handle = Gtk.WindowHandle()
-        self.handle.set_valign(Gtk.Align.START)
+        # The visual layer ignores input; this forwards scrolling over it.
+        self.scroll_target = Gtk.Box()
+        self.scroll_target.set_valign(Gtk.Align.START)
         scroll = Gtk.EventControllerScroll.new(Gtk.EventControllerScrollFlags.VERTICAL)
         scroll.connect("scroll", self._forward_scroll)
-        self.handle.add_controller(scroll)
+        self.scroll_target.add_controller(scroll)
 
-        scroller.get_vadjustment().connect("value-changed", lambda adjustment: self.update(adjustment.get_value()))
+        # Goes at the end of the page's content. A list that overflows at all
+        # gets just enough room here to scroll to the bar, so even a short one
+        # collapses; a list that fits never scrolls.
+        self.slack = Gtk.Box()
+        self.slack_height = 0
+
+        adjustment = scroller.get_vadjustment()
+        adjustment.connect("value-changed", self._on_scroll)
+        adjustment.connect("changed", self._on_range)
         self.update(0.0)
+
+    def _on_range(self, adjustment: Gtk.Adjustment) -> None:
+        overflow = adjustment.get_upper() - self.slack_height - adjustment.get_page_size()
+        slack = max(0, round(self.full - BAR_HEIGHT - overflow)) if overflow > 0 else 0
+        if slack != self.slack_height:
+            self.slack_height = slack
+            self.slack.set_size_request(-1, slack)
+        # A list that shrinks (a face removed) may no longer be able to hold the bar.
+        self._on_scroll(adjustment)
 
     def _forward_scroll(self, controller: Gtk.EventControllerScroll, _dx: float, dy: float) -> bool:
         adjustment = self.scroller.get_vadjustment()
@@ -650,31 +1391,86 @@ class CollapsingHeader:
         adjustment.set_value(adjustment.get_value() + step)
         return True
 
-    def update(self, offset: float) -> None:
-        t = clamp(offset / max(1.0, self.full - BAR_HEIGHT))
+    def _on_scroll(self, adjustment: Gtk.Adjustment) -> None:
+        offset = adjustment.get_value()
+        if self.writing or self.steering:
+            # The header's own travel is not a gesture; intent starts afresh after it.
+            self.last_offset = self.anchor = offset
+            self.direction = 0
+            return
+        direction = (offset > self.last_offset) - (offset < self.last_offset)
+        if direction and direction != self.direction:
+            # A new gesture is measured from where it turned.
+            self.direction, self.anchor = direction, self.last_offset
+        self.last_offset = offset
+        travel = offset - self.anchor
+        # Collapsing hides 196 of header, so the list moves by exactly that
+        # from where the gesture began: the rows in view stay in view.
+        point = self.full - BAR_HEIGHT
+        limit = adjustment.get_upper() - adjustment.get_page_size()
+        reachable = limit >= point
+        if not self.collapsed and reachable and travel >= SCROLL_INTENT:
+            self._switch(True, min(limit, self.anchor + point))
+        elif self.collapsed and (not reachable or travel <= -SCROLL_INTENT):
+            self._switch(False, max(0.0, self.anchor - point))
+
+    def _switch(self, collapsed: bool, offset: float) -> None:
+        self.collapsed = collapsed
+        self.spring.target = 1.0 if collapsed else 0.0
+        self.journey = (self.scroller.get_vadjustment().get_value(), offset, self.spring.value)
+        if reduced_motion() or not self.visual.get_mapped():
+            self.spring.value, self.spring.velocity = self.spring.target, 0.0
+            self._steer()
+        elif not self.steering:
+            self.steering = True
+            self.last_frame = None
+            self.visual.add_tick_callback(self._tick)
+
+    def _tick(self, _widget: Gtk.Widget, clock: Gdk.FrameClock) -> bool:
+        frame = clock.get_frame_time()
+        elapsed = min((frame - self.last_frame) / 1_000_000, 1 / 30) if self.last_frame else 0.0
+        self.last_frame = frame
+        self.spring.step(elapsed)
+        self._steer()
+        # Frames are only requested while the header is changing.
+        return GLib.SOURCE_CONTINUE if self.steering else GLib.SOURCE_REMOVE
+
+    def _steer(self) -> None:
+        start_offset, end_offset, start_progress = self.journey
+        target = self.spring.target
+        settled = abs(self.spring.value - target) < 0.002 and abs(self.spring.velocity) < 0.01
+        if settled:
+            self.spring.value, self.spring.velocity = target, 0.0
+            self.steering = False
+        span = target - start_progress
+        amount = 1.0 if settled or abs(span) < 1e-6 else clamp((self.spring.value - start_progress) / span)
+        self.writing = True
+        self.scroller.get_vadjustment().set_value(mix(start_offset, end_offset, amount))
+        self.writing = False
+        self.update(self.spring.value)
+
+    def update(self, progress: float) -> None:
+        t = clamp(progress)
         self.progress = t
-        width = WINDOW_WIDTH
+        width = PANEL_WIDTH
         bar_scale = BAR_TITLE_PX / TITLE_PX
-        group = BAR_MARK + BAR_GAP + self.title_width * bar_scale
-        bar_mark_x = width / 2 - group / 2 + BAR_MARK / 2
-
-        mark_size = mix(HERO_SIZE, BAR_MARK, t)
-        mark_x = mix(width / 2, bar_mark_x, t)
-        mark_y = mix(HERO_TOP + HERO_SIZE / 2, BAR_HEIGHT / 2, t)
-        self._place(self.mark, mark_x - mark_size / 2, mark_y - mark_size / 2, mark_size / HERO_SIZE)
-
         title_scale = mix(1.0, bar_scale, t)
         full_title_y = self.title_top + self.title_height / 2
-        title_x = mix(width / 2, bar_mark_x + BAR_MARK / 2 + BAR_GAP + self.title_width * bar_scale / 2, t)
-        title_y = mix(full_title_y, BAR_HEIGHT / 2, t)
-        self._place(self.title, title_x - self.title_width * title_scale / 2, title_y - self.title_height * title_scale / 2, title_scale)
+        # Everything stays centred; only size and height change.
+        title_y = mix(full_title_y, BAR_MARK_TOP + BAR_MARK + self.title_height * bar_scale / 2, t)
+        mark_size = mix(HERO_SIZE, BAR_MARK, t)
+        mark_y = mix(HERO_TOP + HERO_SIZE / 2, BAR_MARK_TOP + BAR_MARK / 2, t)
+        self._place(self.mark, (width - mark_size) / 2, mark_y - mark_size / 2, mark_size / HERO_SIZE)
+        self._place(self.title, (width - self.title_width * title_scale) / 2, title_y - self.title_height * title_scale / 2, title_scale)
 
         # The detail rides up with the title and is gone before it reaches the bar.
         self._place(self.detail, PAGE_MARGIN, self.detail_top - (full_title_y - title_y), 1.0)
         self.detail.set_opacity(clamp(1 - t / 0.45))
 
         self.height = mix(self.full, BAR_HEIGHT, t)
-        self.handle.set_size_request(width, round(self.height))
+        self.scroll_target.set_size_request(width, round(self.height))
+        # The scroll indicator lives only beside visible content, never under a fade.
+        self.scroller.get_vscrollbar().set_margin_top(round(self.height + HEADER_FEATHER))
         self.backdrop.queue_draw()
 
     def _place(self, widget: Gtk.Widget, x: float, y: float, scale: float) -> None:
@@ -700,36 +1496,40 @@ class CollapsingHeader:
             context.fill()
 
 
-# Window ------------------------------------------------------------------------
+# Styles ------------------------------------------------------------------------
 
 CSS = """
-window.facegate {
-    background: transparent;
-    color: #f5f5f7;
-}
-.surface {
-    background-color: #000000;
-    border-radius: %(radius)dpx;
-    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
-}
-window.facegate label { font-family: "Inter", "SF Pro Text", sans-serif; }
+.settings-panel { color: #f5f5f7; }
+.settings-panel label { font-family: "Inter", "SF Pro Text", sans-serif; }
 /* Line heights are set on the 4-point grid, so every text box is too. */
 .hero-title { font-size: %(title)dpx; line-height: 32px; font-weight: 700; letter-spacing: -0.5px; color: #f5f5f7; }
 .hero-detail { font-size: 15px; line-height: 20px; color: #98989d; }
 .page-title { font-size: 28px; line-height: 32px; font-weight: 700; letter-spacing: -0.5px; color: #f5f5f7; }
 .page-body { font-size: 15px; line-height: 20px; color: #98989d; }
 .section { font-size: 13px; line-height: 16px; font-weight: 600; color: #8e8e93; }
+.preference-row {
+    background-color: #1c1c1e;
+    min-height: %(row)dpx;
+    border-radius: %(row_radius)dpx;
+    padding: 0 %(row_padding)dpx;
+}
+.settings-panel button.preference-row:hover { background-color: #2c2c2e; }
+.settings-panel button.preference-row:active { background-color: #3a3a3c; }
+.chevron { color: #6e6e73; }
+.settings-panel button.global-switch {
+    min-width: 0; min-height: 0; padding: 0; border-radius: %(switch_radius)dpx; background: none;
+}
 .face-row {
     background-color: #1c1c1e;
     min-height: %(row)dpx;
     border-radius: %(row_radius)dpx;
     padding: 0 %(row_padding)dpx;
     /* A rare celebration: the new face's glow lingers, longer than UI motion. */
-    transition: background-color 900ms ease;
+    transition: background-color 900ms ease, box-shadow 180ms ease;
 }
 .face-row.fresh { background-color: rgba(48, 209, 88, 0.22); transition: background-color 160ms %(ease_out)s; }
 .row-title { font-size: 15px; line-height: 20px; font-weight: 600; color: #f5f5f7; }
-.row-detail { font-size: 12px; line-height: 16px; color: #8e8e93; }
+.row-detail { font-size: 12px; line-height: 16px; font-weight: 400; color: #8e8e93; }
 .empty { font-size: 13px; line-height: 16px; color: #6e6e73; padding: 24px 12px; }
 .status { font-size: 13px; line-height: 16px; color: #ff453a; transition: opacity 200ms %(ease_out)s; }
 .status.hidden { opacity: 0; transition: opacity 140ms %(ease_out)s; }
@@ -739,18 +1539,18 @@ window.facegate label { font-family: "Inter", "SF Pro Text", sans-serif; }
     background-image: linear-gradient(to bottom, rgba(0, 0, 0, 0), #000000 %(bottom_feather)dpx);
 }
 /* The scroll indicator lives in the right gutter, beside the rows, never over them. */
-.faces-scroller scrollbar,
-.faces-scroller scrollbar range,
-.faces-scroller scrollbar trough {
+.settings-scroller scrollbar,
+.settings-scroller scrollbar range,
+.settings-scroller scrollbar trough {
     background: none; border: none; box-shadow: none; padding: 0; margin: 0; min-width: 0;
 }
-.faces-scroller scrollbar.vertical { margin: 0 %(gutter)dpx 0 0; }
-.faces-scroller scrollbar slider {
+.settings-scroller scrollbar.vertical { margin: 0 %(gutter)dpx 0 0; }
+.settings-scroller scrollbar slider {
     min-width: 4px; min-height: 40px; margin: 0; border: none; border-radius: 2px;
     background-color: rgba(255, 255, 255, 0.24);
     transition: min-width 160ms ease, background-color 160ms ease;
 }
-.faces-scroller scrollbar.hovering slider { min-width: 6px; border-radius: 3px; background-color: rgba(255, 255, 255, 0.42); }
+.settings-scroller scrollbar.hovering slider { min-width: 6px; border-radius: 3px; background-color: rgba(255, 255, 255, 0.42); }
 .step { transition: opacity 250ms ease; }
 .step.dim { opacity: 0.38; }
 .step-number {
@@ -761,7 +1561,7 @@ window.facegate label { font-family: "Inter", "SF Pro Text", sans-serif; }
 .promise-icon { color: #64d2ff; }
 .promise-title { font-size: 15px; line-height: 20px; font-weight: 600; color: #f5f5f7; }
 .promise-text { font-size: 13px; line-height: 20px; color: #98989d; }
-window.facegate button {
+.settings-panel button {
     border: none;
     outline: none;
     box-shadow: none;
@@ -771,37 +1571,58 @@ window.facegate button {
     transition: background-color 180ms ease, color 180ms ease, opacity 180ms ease, transform 160ms %(ease_out)s;
 }
 /* Press feedback: every button gives slightly under the pointer. */
-window.facegate button:active { transform: scale(0.97); }
-button.close { min-width: %(close)dpx; min-height: %(close)dpx; padding: 0; border-radius: %(close_radius)dpx; background-color: #1c1c1e; color: #98989d; }
-button.close:hover { background-color: #2c2c2e; color: #f5f5f7; }
-button.close:active { background-color: #3a3a3c; color: #f5f5f7; }
-button.primary { min-height: %(button)dpx; padding: 0 %(space_l)dpx; border-radius: %(button_radius)dpx; font-size: 15px; background-color: #f5f5f7; color: #000000; }
-button.primary:disabled { color: #8e8e93; }
-button.primary.secondary { color: #f5f5f7; }
-button.primary label { color: #000000; }
-button.primary:hover { background-color: #ffffff; }
-button.primary:active { background-color: #d1d1d6; }
-button.primary:disabled { background-color: #1c1c1e; }
-button.primary:disabled label { color: #8e8e93; }
-button.primary.secondary { background-color: #1c1c1e; }
-button.primary.secondary label { color: #f5f5f7; }
-button.primary.secondary:hover { background-color: #2c2c2e; }
-button.primary.secondary:active { background-color: #3a3a3c; }
-button.icon { min-width: %(avatar)dpx; min-height: %(avatar)dpx; padding: 0; border-radius: %(avatar_radius)dpx; background-color: transparent; color: #8e8e93; }
-button.icon:hover { background-color: #2c2c2e; color: #ff453a; }
-button.destructive { min-height: %(avatar)dpx; padding: 0 16px; border-radius: %(avatar_radius)dpx; background-color: #ff453a; color: #ffffff; font-size: 14px; }
-button.destructive label { color: #ffffff; }
-button.destructive:hover { background-color: #ff5e55; }
+.settings-panel button:active { transform: scale(0.97); }
+.settings-panel button.close, .settings-panel button.back { min-width: %(close)dpx; min-height: %(close)dpx; padding: 0; border-radius: %(close_radius)dpx; background-color: #1c1c1e; color: #98989d; }
+.settings-panel button.close:hover, .settings-panel button.back:hover { background-color: #2c2c2e; color: #f5f5f7; }
+.settings-panel button.close:active, .settings-panel button.back:active { background-color: #3a3a3c; color: #f5f5f7; }
+.settings-panel button.footer-action { min-height: %(close)dpx; padding: 0 %(space_l)dpx; border-radius: %(close_radius)dpx; background: none; font-size: 13px; font-weight: 500; color: #8e8e93; }
+.settings-panel button.footer-action label { color: inherit; }
+.settings-panel button.footer-action:hover { color: #f5f5f7; }
+.settings-panel button.primary { min-height: %(button)dpx; padding: 0 %(space_l)dpx; border-radius: %(button_radius)dpx; font-size: 15px; background-color: #f5f5f7; color: #000000; }
+.settings-panel button.primary:disabled { color: #8e8e93; }
+.settings-panel button.primary.secondary { color: #f5f5f7; }
+.settings-panel button.primary label { color: #000000; }
+.settings-panel button.primary:hover { background-color: #ffffff; }
+.settings-panel button.primary:active { background-color: #d1d1d6; }
+.settings-panel button.primary:disabled { background-color: #1c1c1e; }
+.settings-panel button.primary:disabled label { color: #8e8e93; }
+.settings-panel button.primary.secondary { background-color: #1c1c1e; }
+.settings-panel button.primary.secondary label { color: #f5f5f7; }
+.settings-panel button.primary.secondary:hover { background-color: #2c2c2e; }
+.settings-panel button.primary.secondary:active { background-color: #3a3a3c; }
+.row-action { color: #8e8e93; transition: color 180ms ease; }
+.row-action.hover { color: #f5f5f7; }
+.row-action.destructive.hover { color: #ff453a; }
+.face-row.editing { box-shadow: inset 0 0 0 1.5px rgba(255, 255, 255, 0.24); }
+.settings-panel text.name-editor { min-height: 20px; padding: 0; margin: 0; background: none; border: none; box-shadow: none; caret-color: #f5f5f7; }
+.settings-panel text.name-editor selection { background-color: rgba(255, 255, 255, 0.24); color: #f5f5f7; }
+.remove-label { font-size: 14px; line-height: 20px; font-weight: 600; color: #ffffff; }
 """ % {
-    "radius": WINDOW_RADIUS, "title": TITLE_PX, "close": CLOSE_SIZE, "close_radius": CLOSE_SIZE // 2,
+    "title": TITLE_PX, "close": CLOSE_SIZE, "close_radius": CLOSE_SIZE // 2,
     "button": BUTTON_HEIGHT, "button_radius": BUTTON_HEIGHT // 2, "bottom_feather": BOTTOM_FEATHER,
     "ease_out": EASE_OUT_CSS,
     "space_l": SPACE_L,
     "row": ROW_HEIGHT, "row_radius": ROW_RADIUS, "row_padding": ROW_PADDING,
-    "avatar": AVATAR_SIZE, "avatar_radius": AVATAR_SIZE // 2,
-    # Centred in the gap between the rows' right edge and the window's.
+    "switch_radius": SWITCH_HEIGHT // 2,
+    # Centred in the gap between the rows' right edge and the island's.
     "gutter": (PAGE_MARGIN - 4) // 2,
 }
+
+_css_installed = False
+
+
+def install_settings_css() -> None:
+    """Install the panel's scoped styles once in the island process."""
+    global _css_installed
+    if _css_installed:
+        return
+    provider = Gtk.CssProvider()
+    provider.load_from_string(CSS)
+    Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+    settings = Gtk.Settings.get_default()
+    settings.set_property("gtk-application-prefer-dark-theme", True)
+    settings.set_property("gtk-overlay-scrolling", True)
+    _css_installed = True
 
 ONBOARDING = ("welcome", "how", "privacy")
 
@@ -990,7 +1811,7 @@ class FlowCanvas(Gtk.Widget):
         return piece
 
     def do_measure(self, orientation: Gtk.Orientation, _for_size: int) -> tuple[int, int, int, int]:
-        return 0, WINDOW_WIDTH if orientation == Gtk.Orientation.HORIZONTAL else WINDOW_HEIGHT, -1, -1
+        return 0, PANEL_WIDTH if orientation == Gtk.Orientation.HORIZONTAL else PANEL_HEIGHT, -1, -1
 
     def do_size_allocate(self, width: int, _height: int, _baseline: int) -> None:
         for piece in self.pieces:
@@ -1126,9 +1947,7 @@ class FlowView(Gtk.Overlay):
     def __init__(self) -> None:
         super().__init__()
         self.canvas = FlowCanvas()
-        handle = Gtk.WindowHandle()
-        handle.set_child(self.canvas)
-        self.set_child(handle)
+        self.set_child(self.canvas)
         self.arts: dict[str, Piece] = {}
         self.steps: dict[str, Step] = {}
         self.current: str | None = None
@@ -1140,6 +1959,22 @@ class FlowView(Gtk.Overlay):
         # dots leaves the buttons exactly where they were.
         self.on_primary: Callable[[], None] = lambda: None
         self.on_secondary: Callable[[], None] = lambda: None
+        self.on_back: Callable[[], None] = lambda: None
+        back_glyph = Gtk.DrawingArea()
+        back_glyph.set_content_width(CLOSE_SIZE)
+        back_glyph.set_content_height(CLOSE_SIZE)
+        back_glyph.set_draw_func(draw_back_glyph)
+        self.back = Gtk.Button(child=back_glyph)
+        self.back.add_css_class("back")
+        self.back.set_focus_on_click(False)
+        self.back.update_property([Gtk.AccessibleProperty.LABEL], ["Back"])
+        self.back.set_halign(Gtk.Align.START)
+        self.back.set_valign(Gtk.Align.START)
+        self.back.set_margin_top(CLOSE_INSET)
+        self.back.set_margin_start(CLOSE_INSET)
+        self.back.connect("clicked", lambda *_: self.on_back())
+        self.back.set_can_target(False)
+        self.back_alpha = Tween(0.0)
         self.row = ActionRow(lambda: self.on_primary(), lambda: self.on_secondary())
         self.row.set_valign(Gtk.Align.END)
         self.row.set_halign(Gtk.Align.CENTER)
@@ -1150,6 +1985,7 @@ class FlowView(Gtk.Overlay):
         self.dots.set_margin_bottom(PAGE_MARGIN + BUTTON_HEIGHT + DOTS_TO_BUTTON)
         self.dots.set_can_target(False)
         self.dots_alpha = Tween(0.0)
+        self.add_overlay(self.back)
         self.add_overlay(self.dots)
         self.add_overlay(self.row)
         self.add_tick_callback(self._tick)
@@ -1181,7 +2017,7 @@ class FlowView(Gtk.Overlay):
         gaps = [TITLE_TO_BODY if following.widget.has_css_class("page-body") else COPY_TO_EXTRA for following in pieces[1:]]
         copy_height = sum(piece.measure() for piece in pieces) + sum(gaps)
         above_buttons = DOTS_TO_BUTTON + PageDots.DOT if step.dots >= 0 else 0
-        bottom = WINDOW_HEIGHT - PAGE_MARGIN - BUTTON_HEIGHT - above_buttons - SPACE_XL
+        bottom = PANEL_HEIGHT - PAGE_MARGIN - BUTTON_HEIGHT - above_buttons - SPACE_XL
         # Spacing is measured from the art's visible edge, never from a slot
         # around it: a 144 mark and a 64 shield both sit 24 above the title.
         art = self.arts[step.art]
@@ -1279,6 +2115,13 @@ class FlowView(Gtk.Overlay):
         self.on_secondary = on_secondary or (lambda: None)
         self.row.set_paired(bool(secondary), animate and not reduced_motion())
 
+    def set_back(self, on_back: Callable[[], None] | None) -> None:
+        """Show Back in the persistent top-left slot after the first step."""
+        shown = on_back is not None
+        self.on_back = on_back or (lambda: None)
+        self.back.set_can_target(shown)
+        self.back_alpha.to(1.0 if shown else 0.0, self.now, 0.18 if self.get_mapped() else 0.0)
+
     def _tick(self, _widget: Gtk.Widget, clock: Gdk.FrameClock) -> bool:
         frame = clock.get_frame_time()
         elapsed = 0.0 if self.last is None else min((frame - self.last) / 1_000_000, 1 / 30)
@@ -1297,27 +2140,136 @@ class FlowView(Gtk.Overlay):
                 piece.scale.step(elapsed)
             piece.widget.set_opacity(piece.alpha.value(now))
         self.dots.set_opacity(self.dots_alpha.value(now))
+        self.back.set_opacity(self.back_alpha.value(now))
         self.dots.advance(elapsed)
         self.row.advance(elapsed)
         self.canvas.queue_allocate()
         return GLib.SOURCE_CONTINUE
 
 
-class SettingsWindow(Gtk.ApplicationWindow):
-    def __init__(self, app: Gtk.Application, welcome: bool) -> None:
-        super().__init__(application=app, title="FaceGate")
-        self.add_css_class("facegate")
-        self.set_default_size(WINDOW_WIDTH, WINDOW_HEIGHT)
-        self.set_resizable(False)
-        # The window draws its own rounded surface; no title bar.
-        self.set_decorated(False)
+class PageStack(Gtk.Widget):
+    """Onboarding, the main screen and its destinations, as one continuous space.
 
-        self.settings = load_settings()
+    Pages move like onboarding copy: forward, the old page leaves 16 pt to the
+    left while the new one enters 24 pt from the right a beat later (Back
+    mirrors it). Onboarding hands over to the main screen with a crossfade.
+    Pages keep their full size throughout; only transform and opacity move.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.pages: dict[str, Piece] = {}
+        self.current: str | None = None
+        self.now = 0.0
+        self.last: int | None = None
+        # Frames are only laid out while a page is moving.
+        self.moving_until: float | None = None
+        self.add_tick_callback(self._tick)
+
+    def add_named(self, widget: Gtk.Widget, name: str) -> None:
+        widget.set_parent(self)
+        widget.set_visible(False)
+        self.pages[name] = Piece(widget, PANEL_WIDTH)
+
+    def get_visible_child_name(self) -> str | None:
+        return self.current
+
+    def show(self, name: str, direction: int = 1, animate: bool = True) -> None:
+        if name == self.current:
+            return
+        now, previous = self.now, self.current
+        animate = animate and previous is not None and self.get_mapped()
+        travel = 0.0 if reduced_motion() or not animate else float(direction)
+        # Travel sequences the pages; a crossfade overlaps them.
+        fade_out, fade_in, delay = (COPY_OUT_SECONDS, COPY_IN_SECONDS, COPY_IN_DELAY) if direction else (0.25, 0.25, 0.0)
+        if not animate:
+            fade_out = fade_in = delay = 0.0
+        if previous:
+            leaving = self.pages[previous]
+            leaving.widget.set_can_target(False)
+            leaving.alpha.to(0.0, now, fade_out)
+            leaving.shift.configure(0.4, 1.0)
+            leaving.shift.target = -LEAVE_SHIFT * travel
+        arriving = self.pages[name]
+        arriving.widget.set_visible(True)
+        arriving.widget.set_can_target(True)
+        arriving.shift.configure(0.45, 0.9)
+        arriving.shift.value, arriving.shift.velocity, arriving.shift.target = ENTER_SHIFT * travel, 0.0, 0.0
+        arriving.start = now + delay
+        arriving.alpha.to(1.0, now, fade_in, delay)
+        self.current = name
+        self.moving_until = now + delay + (0.8 if animate else 0.0)
+        self._tick(self, None)
+
+    def _tick(self, _widget: Gtk.Widget, clock: Gdk.FrameClock | None) -> bool:
+        if clock is not None:
+            frame = clock.get_frame_time()
+            elapsed = 0.0 if self.last is None else min((frame - self.last) / 1_000_000, 1 / 30)
+            self.last = frame
+            self.now += elapsed
+        else:
+            elapsed = 0.0
+        if self.moving_until is None:
+            return GLib.SOURCE_CONTINUE
+        settled = self.now > self.moving_until
+        if settled:
+            self.moving_until = None
+        for name, page in self.pages.items():
+            if settled:
+                page.shift.value, page.shift.velocity = page.shift.target, 0.0
+            elif self.now >= page.start:
+                page.shift.step(elapsed)
+            opacity = page.alpha.value(self.now)
+            page.widget.set_opacity(opacity)
+            # A page that has left is hidden, so it takes no focus or input.
+            if name != self.current and page.alpha.done(self.now):
+                page.widget.set_visible(False)
+        self.queue_allocate()
+        return GLib.SOURCE_CONTINUE
+
+    def do_measure(self, orientation: Gtk.Orientation, _for_size: int) -> tuple[int, int, int, int]:
+        size = PANEL_WIDTH if orientation == Gtk.Orientation.HORIZONTAL else PANEL_HEIGHT
+        return size, size, -1, -1
+
+    def do_size_allocate(self, width: int, height: int, _baseline: int) -> None:
+        for page in self.pages.values():
+            if page.widget.get_visible():
+                page.widget.allocate(width, height, -1, Gsk.Transform().translate(Graphene.Point().init(page.shift.value, 0)))
+
+    def do_snapshot(self, snapshot: Gtk.Snapshot) -> None:
+        for page in self.pages.values():
+            opacity = page.widget.get_opacity()
+            if not page.widget.get_visible() or opacity <= 0.002:
+                continue
+            blur = TRANSITION_BLUR * (1 - opacity)
+            if blur > 0.05:
+                snapshot.push_blur(blur)
+                self.snapshot_child(page.widget, snapshot)
+                snapshot.pop()
+            else:
+                self.snapshot_child(page.widget, snapshot)
+
+
+class SettingsPanel(Gtk.Overlay):
+    """The complete configuration journey, embedded in the layer-shell island."""
+
+    def __init__(self, hud: Any, on_close: Callable[[], None], welcome: bool = False) -> None:
+        super().__init__()
+        install_settings_css()
+        self.add_css_class("settings-panel")
+        self.set_size_request(PANEL_WIDTH, PANEL_HEIGHT)
+        self.set_overflow(Gtk.Overflow.HIDDEN)
+        self.hud = hud
+        self.on_close = on_close
+        self.closed = False
+
+        self.settings = preferences.load()
         self.faces: list[dict[str, Any]] = []
-        self.rows: dict[int, FaceRow] = {}
-        self.fresh_id: int | None = None
+        self.faces_loaded = False
+        self.rows: dict[str, FaceRow] = {}
+        self.fresh_id: str | None = None
         self.result_timer: int | None = None
-        self.island = IslandLink(self._cancel_enroll)
+        self.island = IslandBridge(hud, self._cancel_enroll)
         # One change at a time: an enrollment or a removal.
         self.run: HelperRun | None = None
         # None, "approving" (polkit is asking), "scanning", or "failed".
@@ -1326,13 +2278,27 @@ class SettingsWindow(Gtk.ApplicationWindow):
         self.enroll_from = "manage"
         self.enroll_error = ""
 
-        self.stack = Gtk.Stack()
-        # Onboarding hands over to the list in place: the button and the
-        # surface stay where they are, only the content changes.
-        self.stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
-        self.stack.set_transition_duration(250)
+        self.stack = PageStack()
         self._build_onboarding()
+        self._build_home()
         self._build_manage()
+        self._build_view_options()
+
+        # Setting destinations mirror the close button with Back at top-left.
+        self.back = Gtk.Button(child=self._back_glyph())
+        self.back.add_css_class("back")
+        self.back.set_focus_on_click(False)
+        self.back.set_can_target(False)
+        self.back.update_property([Gtk.AccessibleProperty.LABEL], ["Back"])
+        self.back.connect("clicked", lambda *_: self._show_page("home", direction=-1))
+        self.back_revealer = Gtk.Revealer()
+        self.back_revealer.set_transition_type(Gtk.RevealerTransitionType.CROSSFADE)
+        self.back_revealer.set_transition_duration(180)
+        self.back_revealer.set_halign(Gtk.Align.START)
+        self.back_revealer.set_valign(Gtk.Align.START)
+        self.back_revealer.set_margin_top(CLOSE_INSET)
+        self.back_revealer.set_margin_start(CLOSE_INSET)
+        self.back_revealer.set_child(self.back)
 
         close = Gtk.Button(child=self._close_glyph())
         close.add_css_class("close")
@@ -1342,23 +2308,24 @@ class SettingsWindow(Gtk.ApplicationWindow):
         close.set_valign(Gtk.Align.START)
         close.set_margin_top(CLOSE_INSET)
         close.set_margin_end(CLOSE_INSET)
-        close.connect("clicked", lambda *_: self.close())
+        close.connect("clicked", lambda *_: self.request_close())
 
-        surface = Gtk.Overlay()
-        surface.add_css_class("surface")
-        surface.set_overflow(Gtk.Overflow.HIDDEN)
-        surface.set_child(self.stack)
-        surface.add_overlay(close)
-        self.set_child(surface)
+        self.set_child(self.stack)
+        self.add_overlay(self.back_revealer)
+        self.add_overlay(close)
 
         keys = Gtk.EventControllerKey()
         keys.connect("key-pressed", self._on_key)
         self.add_controller(keys)
-        self.connect("close-request", self._on_close)
-
+        # Seen before any widget handles the click, and never claimed.
+        away = Gtk.GestureClick()
+        away.set_button(0)
+        away.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        away.connect("pressed", self._on_press)
+        self.add_controller(away)
         onboarded = self.settings.get("onboarded") and not welcome
         self.flow.go("welcome", animate=False)
-        self.stack.set_visible_child_name("manage" if onboarded else "flow")
+        self._show_page("home" if onboarded else "flow", animate=False)
         self._render()
         self._load_faces()
 
@@ -1370,6 +2337,14 @@ class SettingsWindow(Gtk.ApplicationWindow):
         glyph.set_draw_func(draw_close_glyph)
         return glyph
 
+    @staticmethod
+    def _back_glyph() -> Gtk.DrawingArea:
+        glyph = Gtk.DrawingArea()
+        glyph.set_content_width(CLOSE_SIZE)
+        glyph.set_content_height(CLOSE_SIZE)
+        glyph.set_draw_func(draw_back_glyph)
+        return glyph
+
     # Building --------------------------------------------------------------
 
     def _build_onboarding(self) -> None:
@@ -1379,10 +2354,7 @@ class SettingsWindow(Gtk.ApplicationWindow):
         flow.add_art("mark", self.mark)
         self.story = IslandStory(self._highlight_step)
         flow.add_art("story", self.story)
-        shield = Gtk.Image.new_from_icon_name("security-high-symbolic")
-        shield.set_pixel_size(64)
-        shield.add_css_class("promise-icon")
-        flow.add_art("shield", shield)
+        flow.add_art("shield", ShieldGlyph(ART_MARK))
 
         flow.add_step("welcome", "mark", [
             label("Meet FaceGate", "page-title", wrap=True),
@@ -1391,14 +2363,10 @@ class SettingsWindow(Gtk.ApplicationWindow):
 
         self.steps: list[Gtk.Box] = []
         steps = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=LIST_GAP)
-        for number, text in (
-            ("1", "When something asks for admin access, the island drops down and says who's asking."),
-            ("2", "Approve, and your camera looks for you. It stays off until you do."),
-            ("3", "Recognized, it continues. If not, just use your password."),
-        ):
+        for number, text in enumerate(STORY_STEPS, start=1):
             step = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=ICON_TO_TEXT)
             step.add_css_class("step")
-            badge = label(number, "step-number")
+            badge = label(str(number), "step-number")
             badge.set_valign(Gtk.Align.START)
             step.append(badge)
             copy = label(text, "step-text", wrap=True, xalign=0)
@@ -1408,30 +2376,28 @@ class SettingsWindow(Gtk.ApplicationWindow):
             self.steps.append(step)
         flow.add_step("how", "story", [label("How it works", "page-title", wrap=True), steps], dots=1)
 
+        # Short promises sit as one block centred under the title, their icons
+        # in a column like the steps' numbers, each level with its title line.
         promises = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=LIST_GAP)
+        promises.set_halign(Gtk.Align.CENTER)
         for icon, title, text in (
-            ("camera-web-symbolic", "Camera only when you approve", "Nothing looks at you until you say so."),
-            ("computer-symbolic", "Stays on this computer", "Your face data is never uploaded."),
-            ("dialog-password-symbolic", "Changes need admin", "Adding or removing a face asks first."),
+            ("camera", "Camera only when you approve", "Nothing looks at you until you say so."),
+            ("computer", "Stays on this computer", "Your face data is never uploaded."),
+            ("lock", "Changes need admin", "Adding, renaming or removing a face asks first."),
         ):
             row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=ICON_TO_TEXT)
-            image = Gtk.Image.new_from_icon_name(icon)
-            # Icons are 20 on a 24 line box, level with the 20-high title line.
-            image.set_pixel_size(20)
-            image.set_size_request(ICON_SIZE, 20)
-            image.add_css_class("promise-icon")
-            image.set_valign(Gtk.Align.START)
-            row.append(image)
+            glyph = PromiseGlyph(icon)
+            glyph.set_valign(Gtk.Align.START)
+            row.append(glyph)
             copy = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-            copy.set_hexpand(True)
             copy.append(label(title, "promise-title", xalign=0))
-            copy.append(label(text, "promise-text", wrap=True, xalign=0))
+            copy.append(label(text, "promise-text", xalign=0))
             row.append(copy)
             promises.append(row)
         flow.add_step("privacy", "shield", [label("Private by design", "page-title", wrap=True), promises], dots=2)
 
-        self.setup_title = label("Approve to add a face", "page-title", wrap=True)
-        self.setup_body = label("Adding a face needs admin approval. The island at the top of your screen will ask.", "page-body", wrap=True)
+        self.setup_title = label("Authenticate to add a face", "page-title", wrap=True)
+        self.setup_body = label("Adding a face needs admin approval first.", "page-body", wrap=True)
         self.setup_pieces = flow.add_step("setup", "mark", [self.setup_title, self.setup_body])
         flow.add_step("added", "mark", [
             label("Face added", "page-title", wrap=True),
@@ -1439,27 +2405,81 @@ class SettingsWindow(Gtk.ApplicationWindow):
         ])
         self.stack.add_named(flow, "flow")
 
-    def _build_manage(self) -> None:
+    @staticmethod
+    def _section(title: str, rows: list[Gtk.Widget], margin_top: int = 0) -> Gtk.Box:
+        section = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        section.set_margin_top(margin_top)
+        heading = label(title, "section", xalign=0)
+        heading.set_margin_start(ROW_TEXT_INSET)
+        heading.set_margin_bottom(SECTION_TO_ROWS)
+        section.append(heading)
+        for index, row in enumerate(rows):
+            if index:
+                row.set_margin_top(ROW_GAP)
+            section.append(row)
+        return section
+
+    def _scroll_page(self, name: str, title: str, detail: str, art: Gtk.Widget | None = None, bottom_fade: int = PANEL_RADIUS) -> tuple[Gtk.Overlay, CollapsingHeader, Gtk.Box]:
+        """A settings page: a hero that collapses over a scrolling body.
+
+        Returns the page, its header and the body, which already starts
+        clear of the header's fade and keeps the page margin.
+        """
         overlay = Gtk.Overlay()
         scroller = Gtk.ScrolledWindow()
-        scroller.add_css_class("faces-scroller")
+        scroller.add_css_class("settings-scroller")
         scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         scroller.set_overlay_scrolling(True)
-        self.scroller = scroller
-        self.header = CollapsingHeader(scroller)
+        header = CollapsingHeader(scroller, title, art)
+        # Nor under whatever fades out the bottom (a button bar, or the rounded corner).
+        scroller.get_vscrollbar().set_margin_bottom(bottom_fade)
+        header.detail.set_text(detail)
+        header.detail_fade.target = detail
 
         content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         spacer = Gtk.Box()
-        spacer.set_size_request(-1, self.header.full)
+        spacer.set_size_request(-1, header.full)
         content.append(spacer)
+        body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        body.set_margin_top(HEADER_FEATHER)
+        body.set_margin_start(PAGE_MARGIN)
+        body.set_margin_end(PAGE_MARGIN)
+        content.append(body)
+        content.append(header.slack)
+        scroller.set_child(content)
+
+        overlay.set_child(scroller)
+        overlay.add_overlay(header.visual)
+        overlay.add_overlay(header.scroll_target)
+        self.stack.add_named(overlay, name)
+        return overlay, header, body
+
+    def _build_home(self) -> None:
+        """The front door: the global switch, then the two setting areas."""
+        page, self.home_header, body = self._scroll_page("home", "FaceGate", "Version %s" % __version__)
+        self.enabled_row = ToggleRow(self._toggle_enabled)
+        self.face_entry = NavigationRow("Face Approval", Mark(PREFERENCE_ICON_SIZE, animated=False), lambda: self._show_page("manage"))
+        self.view_entry = NavigationRow("View Options", DisplayGlyph(PREFERENCE_ICON_SIZE), lambda: self._show_page("view"))
+        body.append(self._section("General", [self.enabled_row]))
+        body.append(self._section("Settings", [self.face_entry, self.view_entry], PREFERENCE_GROUP_GAP))
+        body.set_margin_bottom(PAGE_MARGIN)
+        # The one quiet text action: rarely wanted, so it stays out of the way
+        # at the foot of the page, the page margin from the bottom.
+        replay = Gtk.Button(label="Replay Welcome")
+        replay.add_css_class("footer-action")
+        replay.set_focus_on_click(False)
+        replay.set_halign(Gtk.Align.CENTER)
+        replay.set_valign(Gtk.Align.END)
+        replay.set_margin_bottom(PAGE_MARGIN)
+        replay.connect("clicked", lambda *_: self._replay_onboarding())
+        page.add_overlay(replay)
+
+    def _build_manage(self) -> None:
+        overlay, self.header, body = self._scroll_page("manage", "Face Approval", "", bottom_fade=BOTTOM_BAR)
         section = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=SECTION_TO_ROWS)
-        # Content starts clear of the header's fade.
-        section.set_margin_top(HEADER_FEATHER)
-        section.set_margin_start(PAGE_MARGIN)
-        section.set_margin_end(PAGE_MARGIN)
         heading = label("Faces", "section", xalign=0)
-        # The heading lines up with the rows' content, not their edge.
-        heading.set_margin_start(ROW_PADDING)
+        # Headings share the text inset of rows, clear of their rounded ends.
+        heading.set_margin_start(ROW_TEXT_INSET)
         section.append(heading)
         self.rows_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         section.append(self.rows_box)
@@ -1468,15 +2488,8 @@ class SettingsWindow(Gtk.ApplicationWindow):
         self.empty.set_transition_duration(220)
         self.empty.set_child(label("No faces yet", "empty"))
         section.append(self.empty)
-        content.append(section)
-        bottom_spacer = Gtk.Box()
-        bottom_spacer.set_size_request(-1, BOTTOM_BAR)
-        content.append(bottom_spacer)
-        scroller.set_child(content)
-
-        overlay.set_child(scroller)
-        overlay.add_overlay(self.header.visual)
-        overlay.add_overlay(self.header.handle)
+        body.append(section)
+        body.set_margin_bottom(BOTTOM_BAR)
 
         bar = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         bar.add_css_class("bottom-bar")
@@ -1498,43 +2511,165 @@ class SettingsWindow(Gtk.ApplicationWindow):
         bar.append(self.primary)
         overlay.add_overlay(bar)
         overlay.add_overlay(self.status)
-        self.stack.add_named(overlay, "manage")
+
+    def _build_view_options(self) -> None:
+        _page, self.view_header, self.view_body = self._scroll_page("view", "View Options", "Choose where the island appears.", DisplayGlyph(HERO_SIZE))
+        self.view_body.set_margin_bottom(PAGE_MARGIN)
+        self.choices: dict[tuple[str, str], ChoiceRow] = {}
+        self._refresh_monitor_rows()
+        # Plugging a monitor in or out updates the choices while they're open.
+        self.monitors = Gdk.Display.get_default().get_monitors()
+        self.monitors_changed = self.monitors.connect("items-changed", self._refresh_monitor_rows)
 
     # Navigation ------------------------------------------------------------
 
-    def _go(self, page: str) -> None:
+    def _show_page(self, page: str, direction: int = 1, animate: bool = True) -> None:
+        """Move within the one configuration surface; the close button stays put."""
+        if page == "view":
+            self._refresh_monitor_rows()
+        elif page == "home":
+            self._update_home()
+        self.stack.show(page, direction, animate)
+        shown = page in ("manage", "view")
+        self.back.set_can_target(shown)
+        self.back_revealer.set_reveal_child(shown)
+
+    def _go(self, page: str, direction: int = 1) -> None:
         if page == "how":
             self.story.restart()
-        self.flow.go(page)
+        self.flow.go(page, direction=direction)
         self._render()
+
+    def _back_onboarding(self) -> None:
+        step = self.flow.current
+        if step == "setup":
+            phase = self.enroll_phase
+            self.enroll_phase = None
+            self.enroll_error = ""
+            self.island.close()
+            if self.run:
+                # Once scanning, let the helper ask gazed to release the camera
+                # cleanly. Before that it is waiting on Gaze's polkit request.
+                (self.run.stop if phase == "scanning" else self.run.abort)()
+            self._go("privacy", direction=-1)
+            return
+        target = BACK_TARGETS.get(str(step))
+        if target:
+            self._go(target, direction=-1)
 
     def _highlight_step(self, step: int) -> None:
         for index, row in enumerate(self.steps, start=1):
             (row.remove_css_class if step in (0, index) else row.add_css_class)("dim")
 
-    def _finish_onboarding(self) -> None:
-        self.settings["onboarded"] = True
-        save_settings(self.settings)
+    def _replay_onboarding(self) -> None:
+        """Walk through the welcome again, in the same island."""
+        if self.run:
+            return
         self.enroll_phase = None
-        self.stack.set_visible_child_name("manage")
+        self.flow.go("welcome", animate=False)
+        self._show_page("flow", direction=0)
         self._render()
 
+    def _finish_onboarding(self) -> None:
+        self.settings = preferences.update(onboarded=True)
+        self.enroll_phase = None
+        self._show_page("home", direction=0)
+        self._render()
+
+    def _on_press(self, _gesture: Gtk.GestureClick, _presses: int, x: float, y: float) -> None:
+        """Clicking anywhere else folds Remove away and finishes a rename."""
+        picked = self.pick(x, y, Gtk.PickFlags.DEFAULT)
+        inside = lambda widget: picked is not None and (picked is widget or picked.is_ancestor(widget))
+        for row in self.rows.values():
+            if row.actions.mode == "confirm" and not inside(row.actions):
+                row.dismiss_remove()
+            if row.editing and not (inside(row.editor) or inside(row.actions)):
+                row.end_edit(True)
+
     def _on_key(self, _controller: Any, keyval: int, _keycode: int, _state: Any) -> bool:
+        confirming = [row for row in self.rows.values() if row.actions.mode == "confirm"]
+        if keyval == Gdk.KEY_Escape and confirming:
+            for row in confirming:
+                row.dismiss_remove()
+            return True
         if keyval == Gdk.KEY_Escape:
-            self.close()
+            # Back out one level at a time, unless a face is being added:
+            # then Escape still stops it by closing, as it always has.
+            if self.stack.current in ("manage", "view") and not self.run:
+                self._show_page("home", direction=-1)
+            else:
+                self.request_close()
             return True
         return False
+
+    # Preferences -----------------------------------------------------------
+
+    def _toggle_enabled(self, enabled: bool) -> None:
+        self.hud.set_enabled(enabled)
+        self.settings = preferences.load()
+        self._update_home()
+
+    def _update_home(self) -> None:
+        enabled = preferences.enabled(self.settings)
+        if self.enabled_row.switch.active != enabled:
+            self.enabled_row.switch.set_active(enabled)
+        self.enabled_row.detail.set_text("Approves sudo and admin prompts" if enabled else "sudo and admin prompts work as usual")
+        self.home_header.mark.set_state("approval" if enabled else "off")
+
+        if not self.faces_loaded:
+            face_detail = "Loading faces…"
+        elif self.faces:
+            face_detail = "1 face" if len(self.faces) == 1 else "%d faces" % len(self.faces)
+        else:
+            face_detail = "No faces yet"
+        self.face_entry.detail.set_text(face_detail)
+        self.view_entry.detail.set_text(placement_summary(self.settings, available_monitors()))
+
+    def _refresh_monitor_rows(self, *_args: Any) -> None:
+        """Rebuild the choices when the connected monitors change."""
+        child = self.view_body.get_first_child()
+        while child:
+            following = child.get_next_sibling()
+            self.view_body.remove(child)
+            child = following
+
+        monitors = available_monitors()
+        mode, connector = preferences.placement(self.settings)
+        self.choices = {}
+
+        def choice(title: str, detail: str, choice_mode: str, choice_connector: str) -> ChoiceRow:
+            row = ChoiceRow(title, detail, (mode, connector) == (choice_mode, choice_connector), lambda: self._select_placement(choice_mode, choice_connector))
+            self.choices[(choice_mode, choice_connector)] = row
+            return row
+
+        follow = choice("Follow Pointer", "Shows on the monitor you're using", preferences.FOLLOW_POINTER, "")
+        self.view_body.append(self._section("Automatic", [follow]))
+        rows: list[Gtk.Widget] = [choice(monitor.title, monitor.detail, preferences.FIXED_MONITOR, monitor.connector) for monitor in monitors]
+        if mode == preferences.FIXED_MONITOR and not any(monitor.connector == connector for monitor in monitors):
+            # Keep an unplugged choice visible, and say what happens meanwhile.
+            rows.append(choice(connector, "Not connected · following the pointer", preferences.FIXED_MONITOR, connector))
+        self.view_body.append(self._section("Lock to a monitor", rows or [label("No monitors found", "empty", xalign=0)], PREFERENCE_GROUP_GAP))
+
+    def _select_placement(self, mode: str, connector: str) -> None:
+        """Choosing applies at once: the open island moves to its new monitor."""
+        self.settings = preferences.update(placement=mode, monitor=connector)
+        for key, row in self.choices.items():
+            row.indicator.set_selected(key == (mode, connector))
+        self._update_home()
+        self.hud.relocate_config()
 
     # State -----------------------------------------------------------------
 
     def _render(self) -> None:
+        self._update_home()
         phase, has_faces = self.enroll_phase, bool(self.faces)
         from_manage = self.enroll_from == "manage"
+        setup_title, setup_body, setup_detail = setup_auth_copy(self.faces_loaded, has_faces)
         # Manage page.
         if phase == "approving" and from_manage:
-            detail, button, mark = "Approve in the island to add a face.", None, "approval"
+            detail, button, mark = setup_detail, None, "approval"
         elif phase == "scanning" and from_manage:
-            detail, button, mark = "Look at the camera and follow the island.", "Cancel", "scanning"
+            detail, button, mark = "Keep your face in view.", "Cancel", "scanning"
         elif has_faces:
             detail, button, mark = "Your face approves sudo and admin prompts.", "Add a Face", "approval"
         else:
@@ -1550,6 +2685,7 @@ class SettingsWindow(Gtk.ApplicationWindow):
 
         # Onboarding: the persistent mark and buttons follow the current step.
         flow, step = self.flow, self.flow.current
+        flow.set_back(self._back_onboarding if step != "welcome" else None)
         title, body = self.setup_pieces
         if step == "welcome":
             flow.actions("Continue", lambda: self._go("how"))
@@ -1564,7 +2700,7 @@ class SettingsWindow(Gtk.ApplicationWindow):
         elif step == "setup":
             if phase == "scanning":
                 flow.retext(title, self.setup_title, "Look at the camera")
-                flow.retext(body, self.setup_body, "Keep your face in view. The island at the top of your screen shows what FaceGate sees.")
+                flow.retext(body, self.setup_body, "Keep your face in view while FaceGate learns it.")
                 flow.actions("Cancel", self._cancel_enroll, muted=True)
                 self.mark.set_state("scanning")
             elif phase == "failed":
@@ -1573,8 +2709,8 @@ class SettingsWindow(Gtk.ApplicationWindow):
                 flow.actions("Try Again", lambda: self._enroll("setup"), "Not Now", self._finish_onboarding)
                 self.mark.set_state("failure")
             else:
-                flow.retext(title, self.setup_title, "Approve to add a face")
-                flow.retext(body, self.setup_body, "Adding a face needs admin approval. The island at the top of your screen will ask.")
+                flow.retext(title, self.setup_title, setup_title)
+                flow.retext(body, self.setup_body, setup_body)
                 flow.actions("Waiting for approval…", None)
                 self.mark.set_state("approval")
 
@@ -1610,17 +2746,20 @@ class SettingsWindow(Gtk.ApplicationWindow):
         HelperRun(["list"], on_event, on_exit).start()
 
     def _show_faces(self, faces: list[dict[str, Any]]) -> None:
+        self.faces_loaded = True
         self.faces = [face for face in faces if isinstance(face, dict) and "id" in face]
-        current = {int(face["id"]) for face in self.faces}
+        current = {str(face["id"]) for face in self.faces}
         for face_id, row in list(self.rows.items()):
             if face_id not in current:
                 del self.rows[face_id]
                 self._drop_row(row)
         for face in self.faces:
-            face_id = int(face["id"])
+            face_id = str(face["id"])
             if face_id in self.rows:
+                if not self.rows[face_id].editing:
+                    self.rows[face_id].set_name(face.get("label") or "Face")
                 continue
-            row = FaceRow(face, self._remove)
+            row = FaceRow(face, self._remove, self._rename)
             self.rows[face_id] = row
             self.rows_box.append(row)
             # Reveal on the next frame so the row slides in rather than appearing.
@@ -1663,6 +2802,36 @@ class SettingsWindow(Gtk.ApplicationWindow):
         self.run.start()
         self._render()
 
+    def _rename(self, row: FaceRow, name: str, previous: str) -> None:
+        if self.run:
+            row.set_name(previous)
+            self._say("Wait for the current change to finish.")
+            return
+        self._say("")
+        row.set_busy(True)
+        renamed = False
+        failure = ""
+
+        def on_event(event: dict[str, Any]) -> None:
+            nonlocal renamed, failure
+            if event.get("event") == "faces":
+                renamed = True
+                self._show_faces(event.get("faces") or [])
+            elif event.get("event") == "error":
+                failure = str(event.get("message") or "")
+
+        def on_exit(_status: int) -> None:
+            self.run = None
+            row.set_busy(False)
+            if not renamed:
+                row.set_name(previous)
+                self._say(failure or "Not approved, so the name was kept.")
+            self._render()
+
+        self.run = HelperRun(["rename", str(row.face_id), name], on_event, on_exit)
+        self.run.start()
+        self._render()
+
     # Enrollment --------------------------------------------------------------
 
     def _manage_primary(self) -> None:
@@ -1680,33 +2849,33 @@ class SettingsWindow(Gtk.ApplicationWindow):
         self._say("")
         if origin == "setup":
             self.flow.go("setup")
+        self.island.expect()
         self.run = HelperRun(["enroll"], self._on_enroll_event, self._on_enroll_exit)
         self.run.start()
         self._render()
 
     def _cancel_enroll(self) -> None:
-        if self.run and self.enroll_phase == "scanning":
-            self.run.send({"cmd": "cancel"})
+        if self.run and self.enroll_phase in ("approving", "scanning"):
+            # Closing stdin as well as sending cancel guarantees that a helper
+            # cannot keep a Gaze camera claim alive after the island closes.
+            self.run.stop()
 
     def _on_enroll_event(self, event: dict[str, Any]) -> None:
         kind = event.get("event")
-        if kind in ("frame", "hint", "progress"):
+        if kind in ("frame", "mesh", "arrow", "hint", "progress"):
             if self.enroll_phase == "approving":
-                # Approved: the scan has begun. Hand its preview to the island.
+                # The scan has begun; the island is already showing its preview.
                 self.enroll_phase = "scanning"
-                if not self.island.open():
-                    print("[facegate-settings] island unavailable; scanning without preview", file=sys.stderr)
+                self.island.open()
                 self._render()
             if kind == "frame":
-                self.island.send({"frame": event.get("data"), "w": event.get("w"), "h": event.get("h")})
+                self.island.send({"frame": event.get("data"), "w": event.get("w"), "h": event.get("h"), "face": event.get("face")})
+            elif kind == "arrow":
+                self.island.send({"arrow": event.get("arrow") or ""})
+            elif kind == "mesh":
+                self.island.send({"mesh": event.get("points"), "w": event.get("w"), "h": event.get("h"), "space": event.get("space")})
             elif kind == "hint":
                 self.island.send({"hint": event.get("text")})
-                if not self.island.is_open:
-                    text = str(event.get("text") or "")
-                    if self.enroll_from == "setup":
-                        self.flow.retext(self.setup_pieces[1], self.setup_body, text)
-                    else:
-                        self.header.detail_fade.to(text)
             else:
                 self.island.send({"progress": event.get("value")})
             return
@@ -1740,7 +2909,7 @@ class SettingsWindow(Gtk.ApplicationWindow):
         self.run = None
         self.island.close()
         if self.enroll_phase in ("approving", "scanning"):
-            # pkexec ended before a result: approval was declined or failed.
+            # The helper ended before a result: approval was declined or failed.
             message = "Not approved, so no face was added." if self.enroll_phase == "approving" else "The scan stopped unexpectedly."
             self.enroll_phase, self.enroll_error = "failed", message
             if self.enroll_from == "manage":
@@ -1748,49 +2917,27 @@ class SettingsWindow(Gtk.ApplicationWindow):
                 self._say(message)
         self._render()
 
-    def _on_close(self, *_args: Any) -> bool:
+    def request_close(self) -> None:
+        if not self.closed:
+            self.on_close()
+
+    def shutdown(self) -> None:
+        """Release camera/helper work before the panel is detached."""
+        if self.closed:
+            return
+        self.closed = True
+        self.monitors.disconnect(self.monitors_changed)
         self.island.close()
         if self.run:
-            self.run.stop()
-        return False
-
-
-class SettingsApp(Gtk.Application):
-    def __init__(self, welcome: bool = False) -> None:
-        super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.DEFAULT_FLAGS)
-        self.welcome = welcome
-        self.window: SettingsWindow | None = None
-
-    def do_startup(self) -> None:
-        Gtk.Application.do_startup(self)
-        provider = Gtk.CssProvider()
-        provider.load_from_string(CSS)
-        Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
-        settings = Gtk.Settings.get_default()
-        settings.set_property("gtk-application-prefer-dark-theme", True)
-        # Plasma's GTK settings turn overlay scrolling off; this window wants the
-        # slim indicator that only appears while scrolling.
-        settings.set_property("gtk-overlay-scrolling", True)
-        # `gapplication action org.facegate.Settings add-face` starts a scan.
-        add_face = Gio.SimpleAction.new("add-face", None)
-        add_face.connect("activate", lambda *_: self._add_face())
-        self.add_action(add_face)
-
-    def do_activate(self) -> None:
-        if not self.window:
-            self.window = SettingsWindow(self, self.welcome)
-        self.window.present()
-
-    def _add_face(self) -> None:
-        self.do_activate()
-        if self.window:
-            self.window._enroll("manage")
+            (self.run.stop if self.enroll_phase == "scanning" else self.run.abort)()
 
 
 def main() -> int:
-    # --welcome replays onboarding even after it has been completed.
-    welcome = "--welcome" in sys.argv
-    return SettingsApp(welcome).run([arg for arg in sys.argv if arg != "--welcome"])
+    # Kept for source-tree callers; the installed launcher imports control
+    # directly so opening FaceGate never constructs another GTK window.
+    from .control import main as control_main
+
+    return control_main()
 
 
 if __name__ == "__main__":

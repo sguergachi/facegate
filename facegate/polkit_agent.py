@@ -29,8 +29,11 @@ from . import requester as requesters
 OBJECT_PATH = "/org/facegate/PolkitAgent"
 AUTHORITY = ("org.freedesktop.PolicyKit1", "/org/freedesktop/PolicyKit1/Authority", "org.freedesktop.PolicyKit1.Authority")
 EXEC_ACTION = "org.freedesktop.policykit.exec"
+# Gaze owns this action and checks it before changing enrolled faces.
+MANAGE_FACES_ACTION = "com.gundulabs.gaze.manage-faces"
 MAX_PASSWORD_ATTEMPTS = 3
 RETRY_REGISTER_SECONDS = 5
+LOCKED_PASSWORD = "Password sign-in is temporarily locked. Try again later."
 AGENT_XML = """
 <node>
   <interface name="org.freedesktop.PolicyKit1.AuthenticationAgent">
@@ -81,15 +84,23 @@ def choose_identity(identities: list[tuple[str, dict[str, Any]]]) -> Polkit.Iden
     return Polkit.UnixUser.new(uids[0]) if uids else None
 
 
+def friendly_pam_message(text: object) -> str:
+    """Keep actionable PAM state while hiding low-level helper chatter."""
+    clean = " ".join(str(text or "").split())
+    return LOCKED_PASSWORD if "locked" in clean.lower() else ""
+
+
 @dataclass
 class Authentication:
     cookie: str
     identity: Polkit.Identity
     invocation: Gio.DBusMethodInvocation
     requester: dict[str, Any]
+    action_id: str = ""
     session: Any = None
     password_mode: bool = False
     failed_passwords: int = 0
+    pam_message: str = ""
     cancelled: bool = False
     finished: bool = False
 
@@ -102,14 +113,38 @@ class FaceGatePolkitAgent:
         self.queue: list[Authentication] = []
         self.bus = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
         self.subject: tuple[str, dict[str, GLib.Variant]] | None = None
+        self.registered = False
+        # Retries registration while KDE's agent still holds the session.
+        self.retry: int | None = None
         interface = Gio.DBusNodeInfo.new_for_xml(AGENT_XML).interfaces[0]
         self.registration = self.bus.register_object_with_closures2(OBJECT_PATH, interface, self._on_call, None, None)
 
     # Registration ---------------------------------------------------------
 
     def start(self) -> None:
+        if not (self.registered or self.retry) and self._register():
+            self.retry = GLib.timeout_add_seconds(RETRY_REGISTER_SECONDS, self._retry)
+
+    def _retry(self) -> bool:
         if self._register():
-            GLib.timeout_add_seconds(RETRY_REGISTER_SECONDS, self._register)
+            return True
+        self.retry = None
+        return False
+
+    def release(self) -> None:
+        """Give the session back while FaceGate is off, so KDE's agent can register."""
+        if self.retry:
+            GLib.source_remove(self.retry)
+            self.retry = None
+        # Detach the whole queue first. _cancel normally advances to the next
+        # request, which is exactly what must not happen while turning off.
+        pending = ([self.active] if self.active else []) + list(self.queue)
+        self.active = None
+        self.queue.clear()
+        for auth in pending:
+            self._cancel(auth)
+        self._unregister()
+        log("released the session to the desktop's agent")
 
     def _session_subject(self) -> tuple[str, dict[str, GLib.Variant]]:
         """The user's graphical login session; this service runs outside it."""
@@ -141,11 +176,12 @@ class FaceGatePolkitAgent:
             # Usually another agent (KDE's) still holds the session.
             log("not registered yet (%s); retrying" % error.message)
             return True
+        self.registered = True
         log("registered as the authentication agent for %s %s" % (self.subject[0], {k: v.unpack() for k, v in self.subject[1].items()}))
         return False
 
-    def stop(self) -> None:
-        if self.subject:
+    def _unregister(self) -> None:
+        if self.registered and self.subject:
             try:
                 self.bus.call_sync(
                     *AUTHORITY, "UnregisterAuthenticationAgent",
@@ -154,6 +190,10 @@ class FaceGatePolkitAgent:
                 )
             except GLib.Error:
                 pass
+        self.registered = False
+
+    def stop(self) -> None:
+        self._unregister()
         self.bus.unregister_object(self.registration)
 
     # D-Bus ------------------------------------------------------------------
@@ -166,7 +206,7 @@ class FaceGatePolkitAgent:
                 invocation.return_dbus_error("org.freedesktop.PolicyKit1.Error.Failed", "No identity to authenticate as")
                 return
             log("begin %s" % action_id)
-            self.queue.append(Authentication(cookie, identity, invocation, requester_for(action_id, message, details)))
+            self.queue.append(Authentication(cookie, identity, invocation, requester_for(action_id, message, details), action_id))
             if not self.active:
                 self._next()
         elif method == "CancelAuthentication":
@@ -186,7 +226,8 @@ class FaceGatePolkitAgent:
     def _begin_session(self, auth: Authentication) -> None:
         session = PolkitAgent.Session.new(auth.identity, auth.cookie)
         session.connect("request", lambda _s, prompt, echo: self._on_request(auth, prompt, echo))
-        session.connect("show-error", lambda _s, text: log("helper error: %s" % text))
+        session.connect("show-info", lambda _s, text: self._on_pam_message(auth, text, False))
+        session.connect("show-error", lambda _s, text: self._on_pam_message(auth, text, True))
         session.connect("completed", lambda _s, gained: self._on_completed(auth, gained))
         auth.session = session
         session.initiate()
@@ -198,12 +239,24 @@ class FaceGatePolkitAgent:
 
         def show() -> bool:
             if auth is self.active and not auth.cancelled:
-                self.hud.present_password(auth.requester, lambda password: self._respond(auth, password), lambda: self._cancel(auth), error)
+                self.hud.present_password(
+                    auth.requester,
+                    lambda password: self._respond(auth, password),
+                    lambda: self._cancel(auth),
+                    error,
+                    auth.pam_message,
+                )
             return False
 
         # Let a "Not recognized" result finish its moment before the field appears.
         view = self.hud.view
         GLib.timeout_add(900 if (view and view.state == "failure") else 0, show)
+
+    def _on_pam_message(self, auth: Authentication, text: object, error: bool) -> None:
+        log("helper %s: %s" % ("error" if error else "info", text))
+        message = friendly_pam_message(text)
+        if message:
+            auth.pam_message = message
 
     def _respond(self, auth: Authentication, password: str) -> None:
         if auth.session and not auth.finished:
@@ -215,10 +268,18 @@ class FaceGatePolkitAgent:
             return
         if gained:
             self._finish(auth, None)
+            # An approved Add Face turns straight into its scan.
+            if auth.action_id == MANAGE_FACES_ACTION and self.hud.enrollment_authorized():
+                return
             if self.hud.view and self.hud.view.state == "password":
                 self.hud.present_result(True)
             return
         if auth.password_mode:
+            if auth.pam_message:
+                self._finish(auth, "org.freedesktop.PolicyKit1.Error.Failed")
+                if self.hud.view and self.hud.view.state == "password":
+                    self.hud.present_result(False, "Password unavailable", auth.pam_message)
+                return
             auth.failed_passwords += 1
             if auth.failed_passwords < MAX_PASSWORD_ATTEMPTS:
                 # A fresh helper session; PAM will ask again straight away.

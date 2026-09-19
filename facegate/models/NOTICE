@@ -1,0 +1,25 @@
+face_detector.onnx and face_landmarks.onnx
+
+These are Google MediaPipe's BlazeFace short-range face detector and Face Mesh
+V2 landmark models, converted to ONNX. FaceGate runs them only to draw the
+enrollment preview; they take no part in recognition or authentication.
+
+Copyright 2019-2023 The MediaPipe Authors.
+Licensed under the Apache License, Version 2.0:
+https://www.apache.org/licenses/LICENSE-2.0
+
+Source: https://github.com/google-ai-edge/mediapipe
+Converted files: https://huggingface.co/fernandotonon/QtMeshEditor-models
+  mocap/face/, revision 05285620d1e6ca3beef849e384c752add467ba6b
+
+sha256
+02a04d5d37c3558dc4d5274f7f8f0f0f01ac94e46c5ffb2cee82395d47e23181  face_detector.onnx
+d16e5a55e6a480284d468ee32469692464049518c311662ab3956681de31e3e9  face_landmarks.onnx
+
+face_triangles.npy and face_surface.npy
+
+Triangle vertex indices extracted from Google MediaPipe's canonical face model
+(OBJ face records, zero-based, plus the 468 canonical vertex coordinates
+with Y inverted for screen coordinates; texture coordinates omitted).
+Copyright The MediaPipe Authors. Apache License, Version 2.0, as above.
+Source: https://github.com/google-ai-edge/mediapipe/blob/master/mediapipe/modules/face_geometry/data/canonical_face_model.obj
