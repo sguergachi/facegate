@@ -60,8 +60,28 @@ session is outside this boundary.
 ## Scope
 
 FaceGate changes only the `sudo` and `polkit-1` PAM services. It does not alter
-SDDM, the KDE lock screen, SSH, or Gaze's integrations with other authentication
-surfaces. Uninstalling FaceGate leaves Gaze installed and replaces the managed
+SSH or Gaze's integrations with other authentication surfaces. If you accept the
+optional setup step, `kde-fingerprint` (the lock screen's biometric slot) and
+`plasmalogin` get FaceGate blocks. On the lock screen, the consent module only
+announces the scan (`scanning` mode, always `PAM_IGNORE`) before
+`pam_gaze.so`. In that block, the
+consent module's `greeter` mode reads the password the greeter already holds:
+a typed password goes to the normal stack, and an empty field goes to
+`pam_gaze.so`, whose verdict alone authenticates. The module sends only
+display updates to the greeter user's island socket, and it checks that
+socket's owner and peer uid the same way it does for sudo. Both blocks keep
+`pam_nologin` and `pam_faillock preauth` ahead of the face match. There's no
+consent step on either screen.
+
+To appear over the lock screen, the island's native launcher
+(`/usr/local/bin/facegate-hud`) is granted KWin's `kde_lockscreen_overlay_v1`
+through `org.facegate.Island.desktop`. KWin identifies the client by its
+executable, so the launcher is root-owned and runs only FaceGate's installed
+island in isolated mode. Malware running as the same user could still inject
+into that process and draw over the lock screen, for example to phish the
+password. That is the same exposure as any other trusted Plasma component, and
+it's within the same-user limit stated above. The lock screen itself still
+verifies the password. Uninstalling FaceGate leaves Gaze installed and replaces the managed
 block with Gaze's normal upstream PAM rule.
 
 Biometrics are a convenience credential, not a substitute for a strong

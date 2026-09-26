@@ -108,4 +108,82 @@ EOF
 fi
 write_gated_pam "${polkit_source}" "${polkit_pam}" polkit-1
 
+# Face sign-in at the login and lock screens, when setup opted in.
+face_flag=/etc/facegate/greeter
+consent=/usr/local/lib/security/facegate/consent.so
+
+# Write a FaceGate block into a PAM service, replacing Gaze's own KDE block
+# and any other pam_gaze rule, just above the first auth line matching $5.
+write_face_block() {
+  local service=$1 begin=$2 end=$3 block=$4 anchor=$5
+  local target="/etc/pam.d/${service}" source temporary staged backup
+  source=${target}
+  [[ -f ${source} ]] || source="/usr/lib/pam.d/${service}"
+  [[ -f ${source} ]] || return 0
+  temporary="${work_dir}/${service}.pam"
+  backup="/etc/facegate/${service}.pam.$(date +%Y%m%d-%H%M%S-%N).bak"
+  cp -a "${source}" "${backup}"
+  awk -v begin="${begin}" -v end="${end}" -v block="${block}" -v anchor="${anchor}" '
+    $0 == begin || /^# BEGIN gaze / { managed = 1; next }
+    $0 == end || $0 == "# END gaze" { managed = 0; next }
+    managed { next }
+    /^[[:space:]]*-?auth[[:space:]]/ && $0 ~ /pam_gaze(_grosshack)?[.]so([[:space:]]|$)/ { next }
+    !added && /^[[:space:]]*-?auth[[:space:]]/ && $0 ~ anchor { print block; added = 1 }
+    { print }
+    END { if (!added || managed) exit 42 }
+  ' "${source}" > "${temporary}" || {
+    echo "Refusing to change ${target}: could not construct a complete auth stack." >&2
+    exit 1
+  }
+  staged=$(mktemp "${target}.facegate.XXXXXX")
+  install -o root -g root -m 0644 "${temporary}" "${staged}"
+  mv -f -- "${staged}" "${target}"
+  echo "Updated ${target}; backup: ${backup}"
+}
+
+if [[ -f ${face_flag} ]]; then
+  # Login: Plasma Login Manager's island runs as its greeter user. Clearing
+  # Gaze's own greeter opt-in keeps its package upgrades from adding a second
+  # scan back.
+  greeter_user=plasmalogin
+  if getent passwd "${greeter_user}" >/dev/null; then
+    if command -v gaze-kde-pam >/dev/null; then
+      gaze-kde-pam disable-login >/dev/null || true
+    fi
+    write_face_block plasmalogin '# FaceGate greeter gate - BEGIN' '# FaceGate greeter gate - END' "$(cat <<EOF
+# FaceGate greeter gate - BEGIN
+# A typed password skips to the normal stack; an empty one asks Gaze, whose
+# verdict alone decides. A face mismatch ends here rather than counting as a
+# failed password in pam_faillock.
+-auth requisite                   pam_nologin.so
+-auth requisite                   pam_faillock.so preauth
+auth  [success=ignore default=5]  ${consent} greeter hud_user=${greeter_user}
+auth  [success=2 default=ignore]  ${gaze_pam}
+auth  [default=ignore]            ${consent} notify-failure hud_user=${greeter_user}
+auth  requisite                   pam_deny.so
+auth  [default=ignore]            ${consent} notify-success hud_user=${greeter_user}
+auth  sufficient                  pam_permit.so
+# FaceGate greeter gate - END
+EOF
+)" '.'
+  fi
+
+  # Lock screen: KScreenLocker starts this biometric slot by itself, in the
+  # user's own session, so the user's island reports the scan over the lock.
+  write_face_block kde-fingerprint '# FaceGate lock screen gate - BEGIN' '# FaceGate lock screen gate - END' "$(cat <<EOF
+# FaceGate lock screen gate - BEGIN
+# The island only shows the scan; official pam_gaze.so owns the verdict.
+-auth requisite                   pam_nologin.so
+-auth requisite                   pam_faillock.so preauth
+auth  [default=ignore]            ${consent} scanning
+auth  [success=2 default=ignore]  ${gaze_pam}
+auth  [default=ignore]            ${consent} notify-failure
+auth  [default=2]                 pam_deny.so
+auth  [default=ignore]            ${consent} notify-success
+auth  sufficient                  pam_permit.so
+# FaceGate lock screen gate - END
+EOF
+)" 'pam_fprintd|pam_permit|include'
+fi
+
 systemctl try-restart polkit.service >/dev/null 2>&1 || true
