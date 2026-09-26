@@ -797,7 +797,7 @@ def peer_pid(connection: socket.socket) -> int:
 
 
 def sudo_requester(connection: socket.socket, service: object) -> dict[str, Any] | None:
-    """Who is behind a sudo approval, read from /proc for display only.
+    """Who is behind a sudo approval or password prompt, read from /proc for display only.
 
     The PAM module runs inside sudo itself, so the connecting process's argv is
     the command and its ancestors are the app that ran it.
@@ -2096,7 +2096,7 @@ class HudServer:
                 },
             )
             return
-        if message.get("phase") == "approval" and message.get("service") != "polkit-1" and not message.get("requester"):
+        if message.get("phase") in ("approval", "password") and message.get("service") != "polkit-1" and not message.get("requester"):
             message["requester"] = sudo_requester(connection, message.get("service"))
         GLib.idle_add(self.hud.handle_request, message, connection)
 

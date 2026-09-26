@@ -198,7 +198,7 @@ class RequesterModuleTests(unittest.TestCase):
         import os
         import socket
 
-        from facegate.edge_hud import peer_pid, sudo_requester
+        from facegate.edge_hud import password_view, peer_pid, sudo_requester
         from facegate.requester import command_line, read_process
 
         ours, theirs = socket.socketpair()
@@ -207,6 +207,10 @@ class RequesterModuleTests(unittest.TestCase):
             found = sudo_requester(ours, "sudo")
         self.assertEqual(found["command"], command_line(read_process(os.getpid())[2]))
         self.assertEqual(found["service"], "sudo")
+        # A manual sudo password names the caller too, not "Password required".
+        view = password_view(found)
+        self.assertNotEqual(view.title, "Password required")
+        self.assertEqual(view.command, found["command"])
 
     def test_agent_prefers_the_person_at_the_desk(self):
         import os
