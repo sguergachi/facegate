@@ -51,7 +51,15 @@ find_aur_helper() {
   ask "Install paru now?" || fail "Install paru or yay, then run ./setup.sh again."
   helper_dir=$(mktemp -d)
   git clone --depth 1 https://aur.archlinux.org/paru-bin.git "${helper_dir}/paru-bin"
-  (cd "${helper_dir}/paru-bin" && makepkg -si --noconfirm)
+  # AUR packages are user-submitted: show what will run before building it,
+  # and let pacman confirm the install itself.
+  info "paru-bin's build script (PKGBUILD), from the AUR:"
+  sed 's/^/     /' "${helper_dir}/paru-bin/PKGBUILD"
+  ask "Build and install paru-bin from this PKGBUILD?" || {
+    rm -rf -- "${helper_dir}"
+    fail "Install paru or yay, then run ./setup.sh again."
+  }
+  (cd "${helper_dir}/paru-bin" && makepkg -si)
   rm -rf -- "${helper_dir}"
   aur_helper=paru
 }

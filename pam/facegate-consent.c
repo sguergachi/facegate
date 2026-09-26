@@ -21,7 +21,9 @@
 
 #define _GNU_SOURCE
 
+#include <ctype.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <pwd.h>
 #include <security/pam_appl.h>
 #include <security/pam_ext.h>
@@ -45,7 +47,10 @@
 #define FACEGATE_MAX_MESSAGE 4096
 #define FACEGATE_CONSENT_SECONDS 12
 #define FACEGATE_PASSWORD_SECONDS 60
+#define FACEGATE_PASSWORD_MAX_SECONDS 3600
 #define FACEGATE_SCANNED_DATA "facegate.scanned"
+#define FACEGATE_FAILLOCK_CONF "/etc/security/faillock.conf"
+#define FACEGATE_FAILLOCK_VALID 0x1
 #define FACEGATE_PASSWORD_ASKED_DATA "facegate.password-asked"
 #ifndef PAM_MAX_RESP_SIZE
 #define PAM_MAX_RESP_SIZE 512
@@ -212,11 +217,127 @@ static bool send_all(int fd, const char *message, size_t length)
     return true;
 }
 
+/* pam_faillock's policy: faillock.conf with its defaults. Options given on the
+ * pam_faillock line itself aren't seen; the result is only ever shown. */
+struct faillock_policy {
+    long long deny;
+    long long fail_interval;
+    long long unlock_time;
+    char dir[256];
+};
+
+/* pam_faillock's on-disk record (faillock.h). */
+struct faillock_record {
+    char source[52];
+    uint16_t reserved;
+    uint16_t status;
+    uint64_t time;
+};
+
+static char *trim(char *text)
+{
+    char *end;
+
+    while (isspace((unsigned char)*text))
+        text++;
+    end = text + strlen(text);
+    while (end > text && isspace((unsigned char)end[-1]))
+        *--end = '\0';
+    return text;
+}
+
+static void read_faillock_policy(struct faillock_policy *policy)
+{
+    char line[512];
+    FILE *conf;
+
+    policy->deny = 3;
+    policy->fail_interval = 900;
+    policy->unlock_time = 600;
+    (void)snprintf(policy->dir, sizeof(policy->dir), "%s", "/var/run/faillock");
+    conf = fopen(FACEGATE_FAILLOCK_CONF, "re");
+    if (conf == NULL)
+        return;
+    while (fgets(line, sizeof(line), conf) != NULL) {
+        char *key = line;
+        char *value;
+
+        line[strcspn(line, "#\n")] = '\0';
+        value = strchr(line, '=');
+        if (value == NULL)
+            continue;
+        *value++ = '\0';
+        key = trim(key);
+        value = trim(value);
+        if (strcmp(key, "dir") == 0)
+            (void)snprintf(policy->dir, sizeof(policy->dir), "%s", value);
+        else if (strcmp(key, "deny") == 0)
+            policy->deny = strtoll(value, NULL, 10);
+        else if (strcmp(key, "fail_interval") == 0)
+            policy->fail_interval = strtoll(value, NULL, 10);
+        else if (strcmp(key, "unlock_time") == 0)
+            policy->unlock_time = strcmp(value, "never") == 0 ? 0 : strtoll(value, NULL, 10);
+    }
+    fclose(conf);
+}
+
+/* When pam_faillock will accept a password again: 0 if it does now, -1 if
+ * only an administrator can unlock it. While locked it refuses every
+ * password, even the right one, so the island says so instead of asking. */
+static long long tally_locked_until(const struct faillock_policy *policy, const char *path,
+                                    long long now)
+{
+    struct faillock_record record;
+    struct stat metadata;
+    long long failures = 0;
+    long long latest = 0;
+    int fd;
+
+    if (policy->deny <= 0)
+        return 0;
+    fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0)
+        return 0;
+    if (fstat(fd, &metadata) != 0 || !S_ISREG(metadata.st_mode)) {
+        close(fd);
+        return 0;
+    }
+    while (read(fd, &record, sizeof(record)) == (ssize_t)sizeof(record)) {
+        const long long when = (long long)record.time;
+
+        if (!(record.status & FACEGATE_FAILLOCK_VALID))
+            continue;
+        if (when > latest)
+            latest = when;
+        if (now - when <= policy->fail_interval)
+            failures++;
+    }
+    close(fd);
+    if (failures < policy->deny)
+        return 0;
+    if (policy->unlock_time <= 0)
+        return -1;
+    return latest + policy->unlock_time > now ? latest + policy->unlock_time : 0;
+}
+
+static long long faillock_locked_until(const char *username, uid_t uid)
+{
+    struct faillock_policy policy;
+    char path[512];
+
+    read_faillock_policy(&policy);
+    /* pam_faillock never locks root unless configured to; don't guess. */
+    if (uid == 0 || strchr(username, '/') != NULL ||
+        snprintf(path, sizeof(path), "%s/%s", policy.dir, username) >= (int)sizeof(path))
+        return 0;
+    return tally_locked_until(&policy, path, (long long)time(NULL));
+}
+
 /* Send one request to the island and read its one-line answer to that same
  * request into reply. The answer may hold a password: callers wipe it. */
 static bool ask_hud(uid_t uid, const char *phase, const char *service,
-                    const char *username, int seconds, bool retry, char *reply,
-                    size_t size)
+                    const char *username, int seconds, bool retry,
+                    long long locked_until, char *reply, size_t size)
 {
     char id[64] = {0};
     char service_token[64] = {0};
@@ -233,9 +354,9 @@ static bool ask_hud(uid_t uid, const char *phase, const char *service,
     length = snprintf(message, sizeof(message),
                       "{\"id\":\"%s\",\"phase\":\"%s\","
                       "\"service\":\"%s\",\"username\":\"%s\","
-                      "\"timeout_ms\":%d,\"error\":%s}\n",
+                      "\"timeout_ms\":%d,\"error\":%s,\"locked_until\":%lld}\n",
                       id, phase, service_token, username_token, seconds * 1000,
-                      retry ? "true" : "false");
+                      retry ? "true" : "false", locked_until);
     if (length <= 0 || length >= (int)sizeof(message) ||
         snprintf(expected_id, sizeof(expected_id), "\"id\":\"%s\"", id) >=
             (int)sizeof(expected_id))
@@ -268,7 +389,7 @@ static bool consent_from_hud(uid_t uid, const char *service, const char *usernam
 {
     char reply[FACEGATE_MAX_MESSAGE + 1];
 
-    if (!ask_hud(uid, "approval", service, username, FACEGATE_CONSENT_SECONDS, false,
+    if (!ask_hud(uid, "approval", service, username, FACEGATE_CONSENT_SECONDS, false, 0,
                  reply, sizeof(reply)))
         return false;
     return strstr(reply, "\"approved\":true") != NULL;
@@ -405,9 +526,16 @@ static bool password_from_hud(uid_t uid, const char *service, const char *userna
                               bool retry, char *password, size_t size)
 {
     char reply[FACEGATE_MAX_MESSAGE + 1];
+    const long long locked_until = faillock_locked_until(username, uid);
+    long long seconds = FACEGATE_PASSWORD_SECONDS;
     bool typed = false;
 
-    if (ask_hud(uid, "password", service, username, FACEGATE_PASSWORD_SECONDS, retry,
+    /* The island counts down, then offers the field: wait out the lock too. */
+    if (locked_until > 0)
+        seconds += locked_until - (long long)time(NULL);
+    if (seconds > FACEGATE_PASSWORD_MAX_SECONDS)
+        seconds = FACEGATE_PASSWORD_MAX_SECONDS;
+    if (ask_hud(uid, "password", service, username, (int)seconds, retry, locked_until,
                 reply, sizeof(reply)))
         typed = json_string(reply, "password", password, size) && password[0] != '\0';
     explicit_bzero(reply, sizeof(reply));

@@ -21,6 +21,7 @@ import pwd
 import socket
 import struct
 import threading
+import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable
@@ -1130,6 +1131,7 @@ class EdgeHud:
         # sudo waiting for a password typed in the island (no face enrolled).
         self.sudo_password: socket.socket | None = None
         self.sudo_password_id = ""
+        self.sudo_lock_timer: int | None = None
         self.sudo_password_watch: int | None = None
         # While pam_faillock refuses every password, when to offer the field.
         self.enrollment: Enrollment | None = None
@@ -2162,7 +2164,7 @@ class EdgeHud:
     # sudo without a face: the password is typed here and handed back to PAM,
     # where pam_unix checks it. The island never judges it.
 
-    def ask_sudo_password(self, connection: socket.socket, requester: object, error: bool, request_id: str = "") -> None:
+    def ask_sudo_password(self, connection: socket.socket, requester: object, error: bool, locked_until: float = 0, request_id: str = "") -> None:
         if self.dismiss_timeout:
             # A retry after a wrong password replaces the checking state.
             GLib.source_remove(self.dismiss_timeout)
@@ -2171,7 +2173,37 @@ class EdgeHud:
         self.sudo_password_id = request_id
         # Ctrl+C in the terminal closes sudo's end; don't keep asking.
         self.sudo_password_watch = GLib.io_add_watch(connection.fileno(), GLib.PRIORITY_DEFAULT, GLib.IO_IN | GLib.IO_HUP | GLib.IO_ERR, self._sudo_hung_up)
-        self.present_password(requester, self._submit_sudo_password, error)
+        if locked_until and (locked_until < 0 or locked_until > time.time()):
+            self._show_sudo_lock(requester, error, locked_until)
+        else:
+            self.present_password(requester, self._submit_sudo_password, error)
+
+    def _show_sudo_lock(self, requester: object, error: bool, until: float) -> None:
+        """Say when sudo will accept a password, rather than take one it must refuse."""
+        if until < 0:
+            message = "Too many failed attempts. An administrator needs to unlock sudo."
+        else:
+            message = "Too many failed attempts. Try again at %s." % time.strftime("%H:%M", time.localtime(until + 59))
+        self.present_password(requester, self._submit_sudo_password, False, message)
+        self.entry.set_sensitive(False)
+        self.approve.set_sensitive(False)
+        self.mark.set_state("denied")
+        # Waiting may take minutes: don't hold the keyboard until it can be used.
+        Gtk4LayerShell.set_keyboard_mode(self.window, Gtk4LayerShell.KeyboardMode.ON_DEMAND)
+        if until > 0:
+
+            def unlocked() -> bool:
+                self.sudo_lock_timer = None
+                if self.sudo_password:
+                    self.present_password(requester, self._submit_sudo_password, error)
+                return False
+
+            self.sudo_lock_timer = GLib.timeout_add(max(0, int((until - time.time()) * 1000)) + 500, unlocked)
+
+    def _clear_sudo_lock(self) -> None:
+        if self.sudo_lock_timer:
+            GLib.source_remove(self.sudo_lock_timer)
+            self.sudo_lock_timer = None
 
     def _submit_sudo_password(self, password: str) -> None:
         self._answer_sudo_password(password)
@@ -2179,6 +2211,7 @@ class EdgeHud:
         self.dismiss_timeout = GLib.timeout_add(SUDO_CHECK_MS, self.dismiss)
 
     def _answer_sudo_password(self, password: str | None) -> None:
+        self._clear_sudo_lock()
         connection, self.sudo_password = self.sudo_password, None
         if self.sudo_password_watch:
             GLib.source_remove(self.sudo_password_watch)
@@ -2188,6 +2221,7 @@ class EdgeHud:
 
     def _sudo_hung_up(self, *_args: Any) -> bool:
         self.sudo_password_watch = None
+        self._clear_sudo_lock()
         connection, self.sudo_password = self.sudo_password, None
         if connection:
             connection.close()
@@ -2227,6 +2261,10 @@ class EdgeHud:
             if self.pending or self.enrolling or self.sudo_password or (self.polkit and self.polkit.active):
                 self.reply(connection, {"id": str(message.get("id", "")), "password": None, "reason": "busy"})
                 return False
+            try:
+                locked_until = float(message.get("locked_until") or 0)
+            except (TypeError, ValueError):
+                locked_until = 0
             requester = message.get("requester")
             error = message.get("error") is True
             request_id = str(message.get("id", ""))
@@ -2236,7 +2274,7 @@ class EdgeHud:
                 if self.silenced or self.enrolling or self.sudo_password or (self.polkit and self.polkit.active):
                     self.reply(connection, {"id": request_id, "password": None, "reason": "busy"})
                     return False
-                self.ask_sudo_password(connection, requester, error, request_id)
+                self.ask_sudo_password(connection, requester, error, locked_until, request_id)
                 return False
 
             if delay:
