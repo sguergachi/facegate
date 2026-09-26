@@ -193,6 +193,21 @@ class RequesterModuleTests(unittest.TestCase):
         self.assertIn("command", describe_command(os.getpid()))
         self.assertIsInstance(describe_app(os.getpid()), dict)
 
+    def test_sudo_approval_names_the_connecting_process(self):
+        # The C PAM module sends no requester; the HUD reads it from the peer.
+        import os
+        import socket
+
+        from facegate.edge_hud import peer_pid, sudo_requester
+        from facegate.requester import command_line, read_process
+
+        ours, theirs = socket.socketpair()
+        with ours, theirs:
+            self.assertEqual(peer_pid(ours), os.getpid())
+            found = sudo_requester(ours, "sudo")
+        self.assertEqual(found["command"], command_line(read_process(os.getpid())[2]))
+        self.assertEqual(found["service"], "sudo")
+
     def test_agent_prefers_the_person_at_the_desk(self):
         import os
 
