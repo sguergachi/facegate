@@ -12,7 +12,7 @@ independent security audit.
 | `gazed` | Root, system service | Owns cameras, liveness, recognition, templates, and enrollment writes |
 | Official `pam_gaze.so` | Loaded by PAM | Returns the biometric authentication verdict |
 | `facegate-consent.so` | Loaded by PAM | Asks whether a scan may start and reports UI state; never returns authentication success to the application |
-| FaceGate HUD | Logged-in user | Displays consent, progress, results, and the polkit password fallback |
+| FaceGate HUD | Logged-in user | Displays consent, progress, results, and the sudo and polkit password fallback |
 | FaceGate Settings/helper | Logged-in user | Calls Gaze's D-Bus API; cannot access template files and cannot waive Gaze's polkit checks |
 | `polkitd` and its helper | System | Select the permitted identity and validate the password/PAM result |
 
@@ -46,12 +46,31 @@ or display a false result. It still cannot make `pam_gaze.so` return success,
 change Gaze templates without passing Gaze's polkit authorization, or replace
 the root-owned installed code.
 
-FaceGate is the polkit authentication agent in order to preserve the existing
-password-in-island fallback. Consequently, the FaceGate UI process receives a
-password typed into that field before forwarding it to `PolkitAgent.Session`.
-A compromised UI could capture that password. The stricter alternative is to
-leave Plasma's stock polkit agent enabled; doing that changes the fallback UI.
-`sudo` passwords stay in the terminal and never pass through FaceGate.
+The island is also the password fallback, so the FaceGate UI process receives
+a password typed into that field. For polkit it forwards it to
+`PolkitAgent.Session`; for `sudo` it hands it back over the socket to the
+consent module, which sets it as `PAM_AUTHTOK` for `pam_unix` to check. A
+compromised UI could capture that password. The stricter alternative is to
+leave Plasma's stock polkit agent enabled and press Escape to use `sudo`'s
+terminal prompt.
+
+Two checks keep other programs from borrowing the genuine island to ask for
+that password:
+
+- The HUD answers `approval` and `password` requests only from a peer whose
+  kernel-attested (`SO_PEERCRED`) uid is root, which PAM always is inside
+  `sudo` and polkit's helper. Anything else running as the user is refused
+  before the island appears.
+- The polkit agent accepts `BeginAuthentication` only from the D-Bus name owner
+  of `org.freedesktop.PolicyKit1`, so no other system-bus client can put its
+  own message in the island.
+
+The consent module asks the island for a `sudo` password only in the user's
+own session (never for polkit, the login screen, or the lock screen), decodes
+it exactly (all JSON escapes, rejecting a NUL or truncation rather than
+submitting a wrong password that would count toward `pam_faillock`), and wipes
+its buffers afterwards. The requesting app and command shown in the island are
+read from `/proc` for the connecting process and are display-only.
 
 Malware with root access, write access to PAM configuration or installed
 modules, control of Gaze, or the ability to tamper with the user's whole desktop

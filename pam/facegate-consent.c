@@ -46,11 +46,20 @@
 #define FACEGATE_CONSENT_SECONDS 12
 #define FACEGATE_PASSWORD_SECONDS 60
 #define FACEGATE_PASSWORD_ONLY_DATA "facegate.password-only"
+#define FACEGATE_PASSWORD_ASKED_DATA "facegate.password-asked"
 #ifndef PAM_MAX_RESP_SIZE
 #define PAM_MAX_RESP_SIZE 512
 #endif
 
 static char password_only_marker;
+static char password_asked_marker;
+
+static bool has_marker(pam_handle_t *pamh, const char *name, const char *marker)
+{
+    const void *data = NULL;
+
+    return pam_get_data(pamh, name, &data) == PAM_SUCCESS && data == marker;
+}
 
 static void log_message(const char *message)
 {
@@ -195,16 +204,18 @@ static bool send_all(int fd, const char *message, size_t length)
     return true;
 }
 
-static bool consent_from_hud(uid_t uid, const char *service, const char *username,
-                             bool *password_only)
+/* Send one request to the island and read its one-line answer to that same
+ * request into reply. The answer may hold a password: callers wipe it. */
+static bool ask_hud(uid_t uid, const char *phase, const char *service,
+                    const char *username, int seconds, bool retry, char *reply,
+                    size_t size)
 {
     char id[64] = {0};
     char service_token[64] = {0};
     char username_token[64] = {0};
     char message[512];
-    char response[FACEGATE_MAX_MESSAGE + 1];
     char expected_id[96];
-    ssize_t received;
+    size_t received = 0;
     int length;
     int fd;
 
@@ -212,33 +223,49 @@ static bool consent_from_hud(uid_t uid, const char *service, const char *usernam
     safe_token(service, service_token, sizeof(service_token));
     safe_token(username, username_token, sizeof(username_token));
     length = snprintf(message, sizeof(message),
-                      "{\"id\":\"%s\",\"phase\":\"approval\","
+                      "{\"id\":\"%s\",\"phase\":\"%s\","
                       "\"service\":\"%s\",\"username\":\"%s\","
-                      "\"timeout_ms\":%d,\"pid\":%ld}\n",
-                      id, service_token, username_token, FACEGATE_CONSENT_SECONDS * 1000,
-                      (long)getpid());
-    if (length <= 0 || length >= (int)sizeof(message))
+                      "\"timeout_ms\":%d,\"error\":%s}\n",
+                      id, phase, service_token, username_token, seconds * 1000,
+                      retry ? "true" : "false");
+    if (length <= 0 || length >= (int)sizeof(message) ||
+        snprintf(expected_id, sizeof(expected_id), "\"id\":\"%s\"", id) >=
+            (int)sizeof(expected_id))
         return false;
 
-    fd = connect_hud(uid, FACEGATE_CONSENT_SECONDS + 2);
+    fd = connect_hud(uid, seconds + 2);
     if (fd < 0)
         return false;
     if (!send_all(fd, message, (size_t)length)) {
         close(fd);
         return false;
     }
-    received = recv(fd, response, FACEGATE_MAX_MESSAGE, 0);
+    /* A stream socket may deliver the line in pieces. */
+    while (received + 1 < size && memchr(reply, '\n', received) == NULL) {
+        const ssize_t got = recv(fd, reply + received, size - 1 - received, 0);
+        if (got <= 0)
+            break;
+        received += (size_t)got;
+    }
     close(fd);
-    if (received <= 0)
+    reply[received] = '\0';
+    if (memchr(reply, '\n', received) == NULL || strstr(reply, expected_id) == NULL) {
+        explicit_bzero(reply, size);
         return false;
-    response[received] = '\0';
-    if (snprintf(expected_id, sizeof(expected_id), "\"id\":\"%s\"", id) >=
-        (int)sizeof(expected_id))
+    }
+    return true;
+}
+
+static bool consent_from_hud(uid_t uid, const char *service, const char *username,
+                             bool *password_only)
+{
+    char reply[FACEGATE_MAX_MESSAGE + 1];
+
+    if (!ask_hud(uid, "approval", service, username, FACEGATE_CONSENT_SECONDS, false,
+                 reply, sizeof(reply)))
         return false;
-    if (strstr(response, expected_id) == NULL)
-        return false;
-    *password_only = strstr(response, "\"reason\":\"password-only\"") != NULL;
-    return strstr(response, "\"approved\":true") != NULL;
+    *password_only = strstr(reply, "\"reason\":\"password-only\"") != NULL;
+    return strstr(reply, "\"approved\":true") != NULL;
 }
 
 /* A scan is starting; the service tells the island which screen it is on. */
@@ -261,101 +288,141 @@ static void notify_scanning(uid_t uid, const char *service)
     close(fd);
 }
 
-static bool extract_json_string(const char *json, const char *key, char *out, size_t size)
+static bool put_byte(char *out, size_t size, size_t *used, unsigned int byte)
+{
+    if (*used + 1 >= size)
+        return false;
+    out[(*used)++] = (char)byte;
+    return true;
+}
+
+static bool read_hex4(const char *text, unsigned int *value)
+{
+    *value = 0;
+    for (int index = 0; index < 4; index++) {
+        const char ch = text[index];
+        *value <<= 4;
+        if (ch >= '0' && ch <= '9')
+            *value |= (unsigned int)(ch - '0');
+        else if (ch >= 'a' && ch <= 'f')
+            *value |= (unsigned int)(ch - 'a' + 10);
+        else if (ch >= 'A' && ch <= 'F')
+            *value |= (unsigned int)(ch - 'A' + 10);
+        else
+            return false;
+    }
+    return true;
+}
+
+/* Decode the JSON string value of "key" as UTF-8, including \u escapes, so a
+ * password with any character reaches pam_unix exactly as it was typed.
+ * Anything malformed, or a NUL that would cut the password short, fails. */
+static bool json_string(const char *json, const char *key, char *out, size_t size)
 {
     char needle[40];
     const char *cursor;
     size_t used = 0;
+    unsigned int code;
 
-    if (snprintf(needle, sizeof(needle), "\"%s\":\"", key) >= (int)sizeof(needle))
+    if (size == 0 ||
+        snprintf(needle, sizeof(needle), "\"%s\":\"", key) >= (int)sizeof(needle))
         return false;
     cursor = strstr(json, needle);
     if (cursor == NULL)
         return false;
     cursor += strlen(needle);
-    while (*cursor != '\0' && used + 1 < size) {
-        if (*cursor == '\\' && cursor[1] != '\0') {
-            cursor++;
-            if (*cursor == 'n')
-                out[used++] = '\n';
-            else if (*cursor == 't')
-                out[used++] = '\t';
-            else
-                out[used++] = *cursor;
-            cursor++;
+    while (*cursor != '"') {
+        if (*cursor == '\0')
+            return false;
+        if (*cursor != '\\') {
+            if (!put_byte(out, size, &used, (unsigned char)*cursor++))
+                return false;
             continue;
         }
-        if (*cursor == '"') {
-            out[used] = '\0';
-            return true;
+        cursor++;
+        switch (*cursor++) {
+        case '"': code = '"'; break;
+        case '\\': code = '\\'; break;
+        case '/': code = '/'; break;
+        case 'b': code = '\b'; break;
+        case 'f': code = '\f'; break;
+        case 'n': code = '\n'; break;
+        case 'r': code = '\r'; break;
+        case 't': code = '\t'; break;
+        case 'u':
+            if (!read_hex4(cursor, &code))
+                return false;
+            cursor += 4;
+            if (code >= 0xD800 && code <= 0xDBFF) {
+                unsigned int low;
+
+                if (cursor[0] != '\\' || cursor[1] != 'u' || !read_hex4(cursor + 2, &low) ||
+                    low < 0xDC00 || low > 0xDFFF)
+                    return false;
+                cursor += 6;
+                code = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00);
+            } else if (code >= 0xDC00 && code <= 0xDFFF) {
+                return false;
+            }
+            break;
+        default:
+            return false;
         }
-        out[used++] = *cursor++;
+        if (code == 0)
+            return false;
+        if (code < 0x80) {
+            if (!put_byte(out, size, &used, code))
+                return false;
+        } else if (code < 0x800) {
+            if (!put_byte(out, size, &used, 0xC0 | (code >> 6)) ||
+                !put_byte(out, size, &used, 0x80 | (code & 0x3F)))
+                return false;
+        } else if (code < 0x10000) {
+            if (!put_byte(out, size, &used, 0xE0 | (code >> 12)) ||
+                !put_byte(out, size, &used, 0x80 | ((code >> 6) & 0x3F)) ||
+                !put_byte(out, size, &used, 0x80 | (code & 0x3F)))
+                return false;
+        } else if (!put_byte(out, size, &used, 0xF0 | (code >> 18)) ||
+                   !put_byte(out, size, &used, 0x80 | ((code >> 12) & 0x3F)) ||
+                   !put_byte(out, size, &used, 0x80 | ((code >> 6) & 0x3F)) ||
+                   !put_byte(out, size, &used, 0x80 | (code & 0x3F))) {
+            return false;
+        }
     }
-    return false;
+    out[used] = '\0';
+    return true;
 }
 
+/* The password typed into the island, or false to leave sudo its own prompt.
+ * retry makes the island say the last password was wrong. */
 static bool password_from_hud(uid_t uid, const char *service, const char *username,
-                              char *password, size_t size)
+                              bool retry, char *password, size_t size)
 {
-    char id[64] = {0};
-    char service_token[64] = {0};
-    char username_token[64] = {0};
-    char message[512];
-    char response[FACEGATE_MAX_MESSAGE + 1];
-    char expected_id[96];
-    ssize_t received;
-    int length;
+    char reply[FACEGATE_MAX_MESSAGE + 1];
+    bool typed = false;
+
+    if (ask_hud(uid, "password", service, username, FACEGATE_PASSWORD_SECONDS, retry,
+                reply, sizeof(reply)))
+        typed = json_string(reply, "password", password, size) && password[0] != '\0';
+    explicit_bzero(reply, sizeof(reply));
+    if (!typed)
+        explicit_bzero(password, size);
+    return typed;
+}
+
+static void notify_result(uid_t uid, const char *result)
+{
+    char message[64];
+    const int length = snprintf(message, sizeof(message),
+                                "{\"phase\":\"result\",\"result\":\"%s\"}\n", result);
     int fd;
 
-    request_id(id, sizeof(id));
-    safe_token(service, service_token, sizeof(service_token));
-    safe_token(username, username_token, sizeof(username_token));
-    length = snprintf(message, sizeof(message),
-                      "{\"id\":\"%s\",\"phase\":\"password\","
-                      "\"service\":\"%s\",\"username\":\"%s\","
-                      "\"timeout_ms\":%d,\"pid\":%ld}\n",
-                      id, service_token, username_token,
-                      FACEGATE_PASSWORD_SECONDS * 1000, (long)getpid());
     if (length <= 0 || length >= (int)sizeof(message))
-        return false;
-    fd = connect_hud(uid, FACEGATE_PASSWORD_SECONDS + 2);
-    if (fd < 0)
-        return false;
-    if (!send_all(fd, message, (size_t)length)) {
-        close(fd);
-        return false;
-    }
-    received = recv(fd, response, FACEGATE_MAX_MESSAGE, 0);
-    close(fd);
-    if (received <= 0)
-        return false;
-    response[received] = '\0';
-    if (snprintf(expected_id, sizeof(expected_id), "\"id\":\"%s\"", id) >=
-        (int)sizeof(expected_id))
-        return false;
-    if (strstr(response, expected_id) == NULL)
-        return false;
-    if (strstr(response, "\"password\":null") != NULL)
-        return false;
-    return extract_json_string(response, "password", password, size);
-}
-
-static void notify_hud(uid_t uid, const char *phase, const char *result)
-{
-    char message[192];
-    int length;
-    int fd = connect_hud(uid, 1);
-
+        return;
+    fd = connect_hud(uid, 1);
     if (fd < 0)
         return;
-    if (result == NULL)
-        length = snprintf(message, sizeof(message), "{\"phase\":\"%s\"}\n", phase);
-    else
-        length = snprintf(message, sizeof(message),
-                          "{\"phase\":\"%s\",\"result\":\"%s\"}\n",
-                          phase, result);
-    if (length > 0 && length < (int)sizeof(message))
-        (void)send_all(fd, message, (size_t)length);
+    (void)send_all(fd, message, (size_t)length);
     close(fd);
 }
 
@@ -387,7 +454,6 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc,
     const char *username;
     const char *service;
     const char *mode = module_mode(argc, argv);
-    const void *password_only_data = NULL;
     bool password_only = false;
     uid_t uid;
     int context;
@@ -402,21 +468,24 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc,
     if (strcmp(mode, "notify-failure") == 0) {
         char password[PAM_MAX_RESP_SIZE];
 
-        if (pam_get_data(pamh, FACEGATE_PASSWORD_ONLY_DATA,
-                         &password_only_data) != PAM_SUCCESS ||
-            password_only_data != &password_only_marker)
-            notify_hud(hud, "result", "failure");
+        if (!has_marker(pamh, FACEGATE_PASSWORD_ONLY_DATA, &password_only_marker))
+            notify_result(hud, "failure");
         /* Polkit collects the password through its agent session and the
          * greeter through its own field. sudo has nowhere else to type, so
-         * the island takes it and pam_unix (try_first_pass) checks it. */
+         * the island takes it and pam_unix (try_first_pass) checks it. sudo
+         * retries on the same handle, so a second ask means the first failed. */
         if (strcmp(service, "sudo") == 0 && hud == uid &&
-            password_from_hud(uid, service, username, password, sizeof(password)))
+            password_from_hud(uid, service, username,
+                              has_marker(pamh, FACEGATE_PASSWORD_ASKED_DATA, &password_asked_marker),
+                              password, sizeof(password))) {
             (void)pam_set_item(pamh, PAM_AUTHTOK, password);
+            (void)pam_set_data(pamh, FACEGATE_PASSWORD_ASKED_DATA, &password_asked_marker, NULL);
+        }
         explicit_bzero(password, sizeof(password));
         return PAM_IGNORE;
     }
     if (strcmp(mode, "notify-success") == 0) {
-        notify_hud(hud, "result", "success");
+        notify_result(hud, "success");
         return PAM_IGNORE;
     }
     if (strcmp(mode, "greeter") == 0) {
@@ -438,6 +507,11 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc,
     }
     if (strcmp(mode, "consent") != 0 || !local_request(pamh))
         return PAM_AUTHINFO_UNAVAIL;
+    if (has_marker(pamh, FACEGATE_PASSWORD_ASKED_DATA, &password_asked_marker)) {
+        /* After a wrong password, ask for the password again, not the face. */
+        (void)pam_set_data(pamh, FACEGATE_PASSWORD_ONLY_DATA, &password_only_marker, NULL);
+        return PAM_AUTHINFO_UNAVAIL;
+    }
 
     if (!consent_from_hud(uid, service, username, &password_only)) {
         if (password_only)

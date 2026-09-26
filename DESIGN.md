@@ -408,8 +408,8 @@ its height follows the state rather than leaving dead space.
 
 Text blocks are 280 wide (32 from each edge) so copy never runs to the rim.
 Only two button levels exist: a white primary (**Approve**, right) and a dark
-secondary (**Deny**, left; declining the scan leaves sudo at its password
-prompt). Scanning and result states show no button, because Gaze cannot be
+secondary (**Deny**, left; declining the scan turns the island into the
+password field). Scanning and result states show no button, because Gaze cannot be
 interrupted once it is running.
 
 #### Motion

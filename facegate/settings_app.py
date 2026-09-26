@@ -2175,9 +2175,6 @@ class PageStack(Gtk.Widget):
         widget.set_visible(False)
         self.pages[name] = Piece(widget, PANEL_WIDTH)
 
-    def get_visible_child_name(self) -> str | None:
-        return self.current
-
     def show(self, name: str, direction: int = 1, animate: bool = True) -> None:
         if name == self.current:
             return
@@ -2522,7 +2519,7 @@ class SettingsPanel(Gtk.Overlay):
         overlay.add_overlay(self.status)
 
     def _build_view_options(self) -> None:
-        _page, self.view_header, self.view_body = self._scroll_page("view", "View Options", "Choose where the island appears.", DisplayGlyph(HERO_SIZE))
+        _page, _header, self.view_body = self._scroll_page("view", "View Options", "Choose where the island appears.", DisplayGlyph(HERO_SIZE))
         self.view_body.set_margin_bottom(PAGE_MARGIN)
         self.choices: dict[tuple[str, str], ChoiceRow] = {}
         self._refresh_monitor_rows()
@@ -2850,12 +2847,9 @@ class SettingsPanel(Gtk.Overlay):
         self._say("")
         row.set_busy(True)
         self.busy = True
-        removed = False
 
         def on_event(event: dict[str, Any]) -> None:
-            nonlocal removed
             if event.get("event") == "faces":
-                removed = True
                 self.busy = False
                 self._show_faces(event.get("faces") or [])
                 self._render()
@@ -2877,12 +2871,9 @@ class SettingsPanel(Gtk.Overlay):
         self._say("")
         row.set_busy(True)
         self.busy = True
-        renamed = False
 
         def on_event(event: dict[str, Any]) -> None:
-            nonlocal renamed
             if event.get("event") == "faces":
-                renamed = True
                 self.busy = False
                 row.set_busy(False)
                 self._show_faces(event.get("faces") or [])

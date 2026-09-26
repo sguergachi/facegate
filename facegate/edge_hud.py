@@ -21,7 +21,6 @@ import pwd
 import socket
 import struct
 import threading
-import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable
@@ -982,22 +981,27 @@ class Enrollment:
     on_cancel: Callable[[], None] | None = None
 
 
-def peer_pid(connection: socket.socket) -> int:
-    """The pid the kernel attests for the other end of a Unix socket."""
+# Only PAM asks for consent or a password, and it always runs as root: inside
+# sudo, or in polkit's setuid helper. Anything else running as you is refused,
+# so it can't borrow the island to collect a password.
+PAM_PHASES = frozenset({"approval", "password"})
+
+
+def peer_credentials(connection: socket.socket) -> tuple[int, int]:
+    """The pid and uid the kernel attests for the other end of a Unix socket."""
     try:
-        pid, _uid, _gid = struct.unpack("3i", connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")))
+        pid, uid, _gid = struct.unpack("3i", connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")))
     except (OSError, struct.error):
-        return 0
-    return pid
+        return 0, -1
+    return pid, uid
 
 
-def sudo_requester(connection: socket.socket, service: object) -> dict[str, Any] | None:
+def sudo_requester(pid: int, service: object) -> dict[str, Any] | None:
     """Who is behind a sudo approval or password prompt, read from /proc for display only.
 
     The PAM module runs inside sudo itself, so the connecting process's argv is
     the command and its ancestors are the app that ran it.
     """
-    pid = peer_pid(connection)
     if pid <= 1:
         return None
     try:
@@ -1128,7 +1132,6 @@ class EdgeHud:
         self.sudo_password_id = ""
         self.sudo_password_watch: int | None = None
         # While pam_faillock refuses every password, when to offer the field.
-        self.sudo_lock_timer: int | None = None
         self.enrollment: Enrollment | None = None
         # The panel's scan, announced before its admin approval so the island
         # can turn straight into the preview once approval is granted.
@@ -1199,7 +1202,6 @@ class EdgeHud:
         self.entry.connect("activate", lambda *_: self._primary())
         # Set by the polkit agent while it shows the password view.
         self.on_password: Callable[[str], None] | None = None
-        self.on_password_cancel: Callable[[], None] | None = None
         self.polkit: Any = None
 
         self.preview = PreviewArea()
@@ -1579,7 +1581,7 @@ class EdgeHud:
         self.deny.set_sensitive(False)
         self.entry.set_sensitive(False)
         self.entry.set_text("")
-        self.on_password = self.on_password_cancel = None
+        self.on_password = None
         Gtk4LayerShell.set_keyboard_mode(self.window, Gtk4LayerShell.KeyboardMode.ON_DEMAND)
         for item in self.items:
             item.alpha.to(0, self.now, 0.16)
@@ -1733,10 +1735,10 @@ class EdgeHud:
         self.entry.grab_focus()
         return False
 
-    def present_password(self, requester: object, on_password: Callable[[str], None], on_cancel: Callable[[], None], error: bool = False, message: str = "") -> None:
+    def present_password(self, requester: object, on_password: Callable[[str], None], error: bool = False, message: str = "") -> None:
         """The password in the island: polkit's fallback, or sudo without a face."""
         self.silenced = False
-        self.on_password, self.on_password_cancel = on_password, on_cancel
+        self.on_password = on_password
         # Every request is a fresh attempt: never resubmit what was just rejected,
         # even when the view looks the same as the last one.
         self.entry.set_text("")
@@ -1760,7 +1762,7 @@ class EdgeHud:
 
     def cancel(self) -> None:
         """Close on the user's request: decline any pending approval and stay
-        hidden for the rest of this attempt, even if Howdy reports back later."""
+        hidden for the rest of this attempt, even if Gaze reports back later."""
         self.silenced = True
         if self.dismiss_timeout:
             GLib.source_remove(self.dismiss_timeout)
@@ -1900,7 +1902,7 @@ class EdgeHud:
         """Return from an auth/scan interlude to the panel underneath."""
         self.departing = False
         self.scheduled.clear()
-        self.on_password = self.on_password_cancel = None
+        self.on_password = None
         self.entry.set_text("")
         Gtk4LayerShell.set_keyboard_mode(self.window, Gtk4LayerShell.KeyboardMode.ON_DEMAND)
         for item in self.items:
@@ -1959,7 +1961,7 @@ class EdgeHud:
         self._present(approval_view(requester))
 
     def present_scanning(self) -> None:
-        # Howdy cannot be interrupted once running, so no action is offered.
+        # A Gaze scan cannot be interrupted once running, so no action is offered.
         # If sudo is cancelled mid-scan no result ever arrives; never linger.
         if self.greeter or self.unlocking:
             # Each attempt is a fresh request; Escape silenced only the last.
@@ -1991,6 +1993,10 @@ class EdgeHud:
         self._present(view)
         if success:
             self.dismiss_timeout = GLib.timeout_add(1100, self.dismiss)
+            return
+        if self.greeter or self.unlocking:
+            # The login and lock screens take the password in their own field.
+            self.dismiss_timeout = GLib.timeout_add(1600, self.dismiss)
             return
         # Face failed: PAM falls back to a password. Keep the island up so
         # the field can replace this result instead of the island vanishing.
@@ -2156,7 +2162,7 @@ class EdgeHud:
     # sudo without a face: the password is typed here and handed back to PAM,
     # where pam_unix checks it. The island never judges it.
 
-    def ask_sudo_password(self, connection: socket.socket, requester: object, error: bool, locked_until: float = 0, request_id: str = "") -> None:
+    def ask_sudo_password(self, connection: socket.socket, requester: object, error: bool, request_id: str = "") -> None:
         if self.dismiss_timeout:
             # A retry after a wrong password replaces the checking state.
             GLib.source_remove(self.dismiss_timeout)
@@ -2165,55 +2171,23 @@ class EdgeHud:
         self.sudo_password_id = request_id
         # Ctrl+C in the terminal closes sudo's end; don't keep asking.
         self.sudo_password_watch = GLib.io_add_watch(connection.fileno(), GLib.PRIORITY_DEFAULT, GLib.IO_IN | GLib.IO_HUP | GLib.IO_ERR, self._sudo_hung_up)
-        if locked_until and (locked_until < 0 or locked_until > time.time()):
-            self._show_sudo_lock(requester, error, locked_until)
-        else:
-            self.present_password(requester, self._submit_sudo_password, lambda: self._answer_sudo_password(None), error)
-
-    def _show_sudo_lock(self, requester: object, error: bool, until: float) -> None:
-        """Say when sudo will accept a password, rather than take one it must refuse."""
-        if until < 0:
-            message = "Too many failed attempts. An administrator needs to unlock sudo."
-        else:
-            message = "Too many failed attempts. Try again at %s." % time.strftime("%H:%M", time.localtime(until + 59))
-        self.present_password(requester, self._submit_sudo_password, lambda: self._answer_sudo_password(None), False, message)
-        self.entry.set_sensitive(False)
-        self.approve.set_sensitive(False)
-        self.mark.set_state("denied")
-        # Waiting may take minutes: don't hold the keyboard until it can be used.
-        Gtk4LayerShell.set_keyboard_mode(self.window, Gtk4LayerShell.KeyboardMode.ON_DEMAND)
-        if until > 0:
-
-            def unlocked() -> bool:
-                self.sudo_lock_timer = None
-                if self.sudo_password:
-                    self.present_password(requester, self._submit_sudo_password, lambda: self._answer_sudo_password(None), error)
-                return False
-
-            self.sudo_lock_timer = GLib.timeout_add(max(0, int((until - time.time()) * 1000)) + 500, unlocked)
+        self.present_password(requester, self._submit_sudo_password, error)
 
     def _submit_sudo_password(self, password: str) -> None:
         self._answer_sudo_password(password)
         # The field keeps spinning until sudo reports success or asks again.
         self.dismiss_timeout = GLib.timeout_add(SUDO_CHECK_MS, self.dismiss)
 
-    def _clear_sudo_lock(self) -> None:
-        if self.sudo_lock_timer:
-            GLib.source_remove(self.sudo_lock_timer)
-            self.sudo_lock_timer = None
-
     def _answer_sudo_password(self, password: str | None) -> None:
-        self._clear_sudo_lock()
         connection, self.sudo_password = self.sudo_password, None
         if self.sudo_password_watch:
             GLib.source_remove(self.sudo_password_watch)
             self.sudo_password_watch = None
         if connection:
-            self.reply(connection, {"id": getattr(self, "sudo_password_id", ""), "password": password})
+            self.reply(connection, {"id": self.sudo_password_id, "password": password})
 
     def _sudo_hung_up(self, *_args: Any) -> bool:
         self.sudo_password_watch = None
-        self._clear_sudo_lock()
         connection, self.sudo_password = self.sudo_password, None
         if connection:
             connection.close()
@@ -2253,10 +2227,6 @@ class EdgeHud:
             if self.pending or self.enrolling or self.sudo_password or (self.polkit and self.polkit.active):
                 self.reply(connection, {"id": str(message.get("id", "")), "password": None, "reason": "busy"})
                 return False
-            try:
-                locked_until = float(message.get("locked_until") or 0)
-            except (TypeError, ValueError):
-                locked_until = 0
             requester = message.get("requester")
             error = message.get("error") is True
             request_id = str(message.get("id", ""))
@@ -2266,7 +2236,7 @@ class EdgeHud:
                 if self.silenced or self.enrolling or self.sudo_password or (self.polkit and self.polkit.active):
                     self.reply(connection, {"id": request_id, "password": None, "reason": "busy"})
                     return False
-                self.ask_sudo_password(connection, requester, error, locked_until, request_id)
+                self.ask_sudo_password(connection, requester, error, request_id)
                 return False
 
             if delay:
@@ -2348,20 +2318,21 @@ class HudServer:
         if message.get("phase") == "enroll":
             self._stream(connection, rest)
             return
-        if message.get("phase") == "approval" and not face_scan_available(message.get("username")):
-            # With no enrolled face there is nothing useful to scan. False can
-            # only fall through to password; it can never authorize the caller.
-            self.hud.reply(
-                connection,
-                {
-                    "id": str(message.get("id", "")),
-                    "approved": False,
-                    "reason": "password-only",
-                },
-            )
-            return
-        if message.get("phase") in ("approval", "password") and message.get("service") != "polkit-1" and not message.get("requester"):
-            message["requester"] = sudo_requester(connection, message.get("service"))
+        phase = message.get("phase")
+        if phase in PAM_PHASES:
+            pid, uid = peer_credentials(connection)
+            if uid != 0:
+                print("[facegate] refused a %s request from pid %d (uid %d): not PAM" % (phase, pid, uid), flush=True)
+                self.hud.reply(connection, {"id": str(message.get("id", "")), **DISABLED_REPLIES[phase], "reason": "untrusted"})
+                return
+            if phase == "approval" and not face_scan_available(message.get("username")):
+                # With no enrolled face there is nothing useful to scan. False can
+                # only fall through to password; it can never authorize the caller.
+                self.hud.reply(connection, {"id": str(message.get("id", "")), "approved": False, "reason": "password-only"})
+                return
+            # polkit's agent names its own caller; sudo's is the connecting process.
+            if message.get("service") != "polkit-1":
+                message["requester"] = sudo_requester(pid, message.get("service"))
         GLib.idle_add(self.hud.handle_request, message, connection)
 
     @staticmethod
@@ -2408,7 +2379,7 @@ class HudServer:
 
 
 class Demo:
-    """Loops the real request flow without PAM, Howdy, or the camera.
+    """Loops the real request flow without PAM, Gaze, or the camera.
 
     Approve pretends to scan, then alternates success and failure. Use
     Deny or Escape decline. A new request follows each ending.

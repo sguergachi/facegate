@@ -5,7 +5,6 @@ from unittest import mock
 import cairo
 
 from facegate.edge_hud import APPROVAL, ISLAND_WIDTH, approval_view, face_scan_available, MARK_PROFILES, MarkModel, Spring, Tween, island_path, mark_values, paint_mark, ring_head
-from facegate.hud import approval_timeout_ms
 
 
 class HudRequestTests(unittest.TestCase):
@@ -96,11 +95,6 @@ class HudRequestTests(unittest.TestCase):
         self.assertFalse(face_scan_available(username, Faces()))
         self.assertTrue(face_scan_available(username, Faces([("Face", 5, True, True)])))
         self.assertFalse(face_scan_available("a-different-user", Faces([("Face", 5, True, True)])))
-
-    def test_approval_timeout_is_clamped_without_an_int_base_error(self):
-        self.assertEqual(approval_timeout_ms(12_000), 12_000)
-        self.assertEqual(approval_timeout_ms(80_000), 30_000)
-        self.assertEqual(approval_timeout_ms(1), 1_000)
 
     def test_presence_mark_draws_all_interaction_states_and_blends(self):
         """The animated mark must never disappear because one state raises."""
@@ -256,19 +250,52 @@ class RequesterModuleTests(unittest.TestCase):
         import os
         import socket
 
-        from facegate.edge_hud import password_view, peer_pid, sudo_requester
+        from facegate.edge_hud import password_view, peer_credentials, sudo_requester
         from facegate.requester import command_line, read_process
 
         ours, theirs = socket.socketpair()
         with ours, theirs:
-            self.assertEqual(peer_pid(ours), os.getpid())
-            found = sudo_requester(ours, "sudo")
+            self.assertEqual(peer_credentials(ours), (os.getpid(), os.getuid()))
+        found = sudo_requester(os.getpid(), "sudo")
         self.assertEqual(found["command"], command_line(read_process(os.getpid())[2]))
         self.assertEqual(found["service"], "sudo")
         # A manual sudo password names the caller too, not "Password required".
         view = password_view(found)
         self.assertNotEqual(view.title, "Password required")
         self.assertEqual(view.command, found["command"])
+
+    def test_only_root_pam_may_ask_for_consent_or_a_password(self):
+        # Anything else running as you must not borrow the island to phish.
+        import socket
+
+        from facegate.edge_hud import EdgeHud, HudServer
+        from facegate.protocol import decode, encode
+
+        server = HudServer.__new__(HudServer)
+        server.hud = mock.Mock()
+        server.hud.reply = EdgeHud.reply
+        for phase, refused in (("password", {"password": None}), ("approval", {"approved": False})):
+            client, hud_side = socket.socketpair()
+            with client:
+                client.sendall(encode({"id": "x", "phase": phase, "service": "sudo"}))
+                with mock.patch("facegate.edge_hud.GLib.idle_add") as idle:
+                    server._read_one(hud_side)
+                idle.assert_not_called()
+                self.assertEqual(decode(client.recv(4096).strip()), {"id": "x", **refused, "reason": "untrusted"})
+
+    def test_agent_only_answers_polkitd(self):
+        from facegate.polkit_agent import FaceGatePolkitAgent
+
+        agent = FaceGatePolkitAgent.__new__(FaceGatePolkitAgent)
+        agent.queue, agent.active = [], None
+        agent.bus = mock.Mock()
+        agent.bus.call_sync.return_value.unpack.return_value = (":1.7",)
+        invocation = mock.Mock()
+        agent._on_call(None, ":1.99", "", "", "BeginAuthentication", mock.Mock(), invocation)
+        invocation.return_dbus_error.assert_called_once()
+        self.assertEqual(invocation.return_dbus_error.call_args[0][0], "org.freedesktop.DBus.Error.AccessDenied")
+        self.assertEqual(agent.queue, [])
+        self.assertTrue(agent._from_polkitd(":1.7"))
 
     def test_agent_prefers_the_person_at_the_desk(self):
         import os
@@ -288,7 +315,8 @@ class SudoPasswordTests(unittest.TestCase):
         self.edge_hud = edge_hud
         hud = edge_hud.EdgeHud.__new__(edge_hud.EdgeHud)
         hud.pending = hud.enrollment = hud.expected_enrollment = hud.polkit = hud.view = None
-        hud.sudo_password = hud.sudo_password_watch = hud.sudo_lock_timer = hud.dismiss_timeout = hud.enrollment_start = None
+        hud.sudo_password = hud.sudo_password_watch = hud.dismiss_timeout = hud.enrollment_start = None
+        hud.sudo_password_id = ""
         hud.silenced = False
         hud.config_active = False
         hud.enabled = True
@@ -317,20 +345,6 @@ class SudoPasswordTests(unittest.TestCase):
         self.assertEqual(self.pam_side.recv(4096), b'{"id":"","password":null}\n')
         self.hud.dismiss.assert_called_once()
 
-    def test_a_locked_sudo_says_when_instead_of_taking_a_password(self):
-        import time
-
-        self.hud._show_sudo_lock = mock.Mock()
-        until = time.time() + 300
-        self.hud.handle_request({"phase": "password", "locked_until": until}, self.hud_side)
-        self.hud._show_sudo_lock.assert_called_once_with(None, False, until)
-        self.hud.present_password.assert_not_called()
-        # An expired lock just asks for the password.
-        self.hud.sudo_password = None
-        self.edge_hud.GLib.source_remove(self.hud.sudo_password_watch)
-        self.hud.handle_request({"phase": "password", "locked_until": time.time() - 5}, socket.socketpair()[1])
-        self.hud.present_password.assert_called_once()
-
     def test_a_retry_always_starts_with_an_empty_field(self):
         hud = self.edge_hud.EdgeHud.__new__(self.edge_hud.EdgeHud)
         hud.silenced = False
@@ -339,7 +353,7 @@ class SudoPasswordTests(unittest.TestCase):
         hud._present = mock.Mock()
         hud.password_busy = mock.Mock()
         with mock.patch.object(self.edge_hud.GLib, "timeout_add"):
-            self.edge_hud.EdgeHud.present_password(hud, {"app": "paru"}, lambda _p: None, lambda: None, error=True)
+            self.edge_hud.EdgeHud.present_password(hud, {"app": "paru"}, lambda _p: None, error=True)
         hud.entry.set_text.assert_called_once_with("")
         hud.mark.set_state.assert_called_once_with("denied")
 

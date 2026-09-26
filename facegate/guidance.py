@@ -29,8 +29,6 @@ TURN = 0.16
 TILT = 0.07
 # A face's box must span this share of the frame's short side (enrollment).
 FACE_SIZE = (0.25, 0.78)
-STEADY_YAW = 0.08
-STEADY_PITCH = 0.06
 
 # A new instruction must hold this long before it replaces the one showing,
 # so a wavering head doesn't make the words flicker. Problems show at once.

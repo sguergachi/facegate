@@ -75,9 +75,10 @@ island for face sign-in on the lock screen and the login screen (see
 - **Verified** closes the arc into a green ring before authentication continues.
 - **Not recognized** shakes red, then falls back to the normal password prompt.
 
-Press **Deny** to decline, or Escape to dismiss the island. `sudo` uses its
-terminal password prompt. For `pkexec`, Discover, and System Settings, the island
-becomes the password field after denial, timeout, or a failed match.
+Press **Deny** to decline, or Escape to dismiss the island. After denial,
+timeout, or a failed match, the island becomes the password field for `sudo`,
+`pkexec`, Discover, and System Settings. Escape on the password field hands
+`sudo` back to its terminal prompt.
 
 The visual behavior and spacing remain governed by [DESIGN.md](DESIGN.md).
 
