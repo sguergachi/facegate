@@ -19,6 +19,7 @@ import math
 import os
 import pwd
 import socket
+import struct
 import threading
 import time
 from dataclasses import dataclass, replace
@@ -38,6 +39,7 @@ gi.require_version("Pango", "1.0")
 from gi.repository import Gdk, Gio, GLib, Graphene, Gsk, Gtk, Gtk4LayerShell, Pango  # noqa: E402
 
 from . import preferences
+from . import requester as requesters
 from .faces import GazeClient, GazeError
 from .protocol import MAX_MESSAGE_BYTES, MAX_STREAM_BYTES, PREVIEW_HEIGHT, PREVIEW_WIDTH, decode, default_socket_path, encode
 
@@ -783,6 +785,31 @@ class Enrollment:
     connection: Any
     finished: bool = False
     on_cancel: Callable[[], None] | None = None
+
+
+def peer_pid(connection: socket.socket) -> int:
+    """The pid the kernel attests for the other end of a Unix socket."""
+    try:
+        pid, _uid, _gid = struct.unpack("3i", connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")))
+    except (OSError, struct.error):
+        return 0
+    return pid
+
+
+def sudo_requester(connection: socket.socket, service: object) -> dict[str, Any] | None:
+    """Who is behind a sudo approval or password prompt, read from /proc for display only.
+
+    The PAM module runs inside sudo itself, so the connecting process's argv is
+    the command and its ancestors are the app that ran it.
+    """
+    pid = peer_pid(connection)
+    if pid <= 1:
+        return None
+    try:
+        found = requesters.describe_command(pid)
+    except (OSError, ValueError, IndexError):
+        return None
+    return {**found, "service": str(service or "sudo")}
 
 
 class ConfigHost(Gtk.Widget):
@@ -2069,6 +2096,8 @@ class HudServer:
                 },
             )
             return
+        if message.get("phase") in ("approval", "password") and message.get("service") != "polkit-1" and not message.get("requester"):
+            message["requester"] = sudo_requester(connection, message.get("service"))
         GLib.idle_add(self.hud.handle_request, message, connection)
 
     @staticmethod
