@@ -136,7 +136,8 @@ runuser -u "${target_user}" -- env "XDG_RUNTIME_DIR=/run/user/${target_uid}" kbu
 # polkit agent as the only session agent. polkitd/PAM still validate passwords.
 "${user_systemctl[@]}" stop plasma-polkit-agent.service 2>/dev/null || true
 "${user_systemctl[@]}" mask plasma-polkit-agent.service >/dev/null 2>&1 || true
-"${user_systemctl[@]}" enable --now facegate.service
+# reenable moves an older install's default.target link to plasma-workspace.target.
+"${user_systemctl[@]}" reenable facegate.service
 "${user_systemctl[@]}" restart facegate.service
 
 echo "FaceGate installed with Gaze as its biometric backend."

@@ -59,6 +59,14 @@ class SecurityBoundaryTests(unittest.TestCase):
         self.assertIn("Target = gaze-bin", hook)
         self.assertIn("Exec = /usr/local/lib/facegate/refresh-pam", hook)
 
+    def test_island_starts_with_plasma_not_at_boot(self):
+        # With lingering, default.target starts before any display; the island
+        # would crash-loop until systemd stopped restarting it.
+        unit = (ROOT / "packaging/facegate.service").read_text()
+        self.assertIn("WantedBy=plasma-workspace.target", unit)
+        self.assertNotIn("WantedBy=default.target", unit)
+        self.assertIn('"${user_systemctl[@]}" reenable facegate.service', (ROOT / "install.sh").read_text())
+
     def test_no_face_path_does_not_report_a_false_biometric_failure(self):
         source = (ROOT / "pam/facegate-consent.c").read_text()
         # "Not recognized" only after Gaze really scanned: not after Deny,

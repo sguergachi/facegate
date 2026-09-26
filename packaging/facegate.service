@@ -1,6 +1,9 @@
 [Unit]
 Description=FaceGate approval HUD for Gaze authentication
-After=graphical-session.target
+# Start with Plasma itself, never at boot: with lingering, default.target runs
+# before any display exists, and anything can pull graphical-session.target
+# early, so the island crash-loops until systemd gives up on it.
+After=graphical-session.target plasma-kwin_wayland.service
 PartOf=graphical-session.target
 Wants=facegate-tray.service
 Before=facegate-tray.service
@@ -18,4 +21,4 @@ Restart=on-failure
 RestartSec=2
 
 [Install]
-WantedBy=default.target
+WantedBy=plasma-workspace.target
