@@ -50,6 +50,26 @@ class StarlightMotionTests(unittest.TestCase):
             stars.advance(1 / 60)
         self.assertEqual(stars.arrow, "")
 
+    def test_guide_dust_is_drawn_apart_in_its_own_colour(self):
+        from facegate.starlight import Look
+
+        stars = self.make_face()
+        stars.presence_target = 1.0
+        stars.set_arrow("turn-left")
+        for _ in range(60):
+            stars.advance(1 / 60)
+        calls = []
+        splat = stars._splat
+        stars._splat = lambda scale, lights, *rest, **kw: calls.append(lights) or splat(scale, lights, *rest, **kw)
+        stars.stars(1.0, Look(guide=(0.39, 0.82, 1.0)))
+        (face, _), (guide, _) = calls[-2:]
+        # The guide's few hundred motes are splatted into their own box only.
+        (texture,), box = stars.splat_cropped(1.0, guide)
+        self.assertLess(box.get_width() * box.get_height(), 0.5 * 312 * 208)
+        self.assertEqual(float(face[stars.arrow_stars].max()), 0.0)
+        self.assertEqual(float(guide[stars.face_stars].max()), 0.0)
+        self.assertGreater(float(guide[stars.arrow_stars].max()), 0.0)
+
     def test_result_releases_face_and_guide(self):
         stars = self.make_face()
         stars.set_arrow("closer")

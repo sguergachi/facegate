@@ -54,6 +54,8 @@ gi.require_version("Gtk", "4.0")
 import numpy  # noqa: E402
 from gi.repository import Gdk, GLib, Graphene, Gsk, Gtk  # noqa: E402
 
+from .facemesh import Framing  # noqa: E402
+
 # Canonical MediaPipe connectivity over all 468 surface landmarks. A
 # triangulation fitted to one camera frame can omit the forehead or bridge
 # eye/mouth openings; topology must stay anatomical across every pose.
@@ -135,11 +137,21 @@ GUIDE_TAIL_SPREAD = 3.0
 GUIDE_FLOW = 0.45
 GUIDE_NUDGE_SECONDS = 1.6
 GUIDE_FADE_SECONDS = 0.3
+# Guide grains and hairlines take the guide colour this far toward white, so
+# they stay luminous; their glow keeps the pure colour.
+GUIDE_LIFT = 0.3
 # A head silhouette moves through depth: larger means closer to the lens.
-# A quiet destination silhouette and explicit radial chevrons explain scale.
+# It starts on the face itself (its outline this much outside the face) and
+# grows or shrinks to a quiet destination silhouette with explicit radial
+# chevrons, so the guide can never contradict the face's own size. The
+# destination is the size the face has at Gaze's ideal distance (the preview
+# frames it so, see facemesh.Framing), and at least this step from the face.
+# Without a face it takes a head's size where "closer" begins.
 DISTANCE_RADIUS = (69.0, 81.0)
+DISTANCE_PAD = 1.08
+DISTANCE_NOMINAL = 0.7
 DISTANCE_SECONDS = 1.8
-DISTANCE_SCALE = (0.84, 1.12)
+DISTANCE_STEP = (0.85, 1.15)
 ARROW_WING_SHARE = 0.16
 ARROWS = {
     "turn-left", "turn-right", "tilt-up", "tilt-down",
@@ -181,6 +193,10 @@ def drift_of(wander: numpy.ndarray, share: float) -> numpy.ndarray:
     return wander * share
 
 
+def mix(first: float, second: float, amount: float) -> float:
+    return first + (second - first) * amount
+
+
 def smoothstep(edge0: float, edge1: float, value: numpy.ndarray) -> numpy.ndarray:
     amount = numpy.clip((value - edge0) / (edge1 - edge0), 0, 1)
     return amount * amount * (3 - 2 * amount)
@@ -218,6 +234,9 @@ class Look:
 
     tint: tuple[float, float, float] = (1.0, 1.0, 1.0)
     glow: tuple[float, float, float] = (1.0, 1.0, 1.0)
+    # The guide is an instruction, not part of the reflection, so it has a
+    # colour of its own.
+    guide: tuple[float, float, float] = (1.0, 1.0, 1.0)
     shake: float = 0.0
 
 
@@ -615,11 +634,20 @@ class Starlight:
         cycle = (clock / DISTANCE_SECONDS) % 1.0
         progress = 1 - (1 - cycle) ** 3
         closer = name == "closer"
-        low, high = DISTANCE_SCALE
-        scale = low + (high - low) * (progress if closer else 1 - progress)
-        destination = high if closer else low
-        alpha = float(smoothstep(0.0, 0.12, cycle) * (1 - smoothstep(0.72, 1.0, cycle)))
         centre = numpy.array([self.width / 2, self.height / 2], numpy.float32)
+        size = DISTANCE_NOMINAL
+        if self.vertices is not None:
+            low, high = self.vertices[:468, :2].min(axis=0), self.vertices[:468, :2].max(axis=0)
+            centre = ((low + high) / 2).astype(numpy.float32)
+            size = float(high[1] - low[1]) * DISTANCE_PAD / (2 * DISTANCE_RADIUS[1])
+        ideal = self.height / Framing.ZOOM * DISTANCE_PAD / (2 * DISTANCE_RADIUS[1])
+        step = size * DISTANCE_STEP[1 if closer else 0]
+        destination = max(ideal, step) if closer else min(ideal, step)
+        # The destination stays within the preview.
+        room = (min(float(centre[1]), self.height - float(centre[1])) - 1) / DISTANCE_RADIUS[1]
+        destination = min(destination, max(room, 0.1))
+        scale = size + (destination - size) * progress
+        alpha = float(smoothstep(0.0, 0.12, cycle) * (1 - smoothstep(0.72, 1.0, cycle)))
 
         def contour(angle: numpy.ndarray, size: float) -> numpy.ndarray:
             # Broad forehead, narrower jaw, rounded chin: a head, not a ring.
@@ -786,6 +814,17 @@ class Starlight:
 
         Without lights, one texture of every mote's own light.
         """
+        return self._splat(device_scale, lights, minimum_scale, crop=False)[0]
+
+    def splat_cropped(self, device_scale: float, *lights: numpy.ndarray) -> tuple[list[Gdk.Texture], Graphene.Rect] | None:
+        """``splat`` into just the box around the lit motes, and that box in points.
+
+        A few hundred motes then cost a few hundred motes, not a whole
+        canvas of shoulder curve and upload; none lit gives None.
+        """
+        return self._splat(device_scale, lights, 2.0, crop=True)
+
+    def _splat(self, device_scale: float, lights: tuple[numpy.ndarray, ...], minimum_scale: float, crop: bool) -> tuple[list[Gdk.Texture], Graphene.Rect] | None:
         # At least 2x supersampling resolves sub-point grains. Preserve the
         # actual fractional scale instead of rounding 1.25/1.5 to an integer.
         scale = max(minimum_scale, float(device_scale))
@@ -805,6 +844,18 @@ class Starlight:
         offsets = numpy.arange(-radius, radius + 1)
         columns_x = numpy.rint(x).astype(numpy.int64)[:, None] + offsets
         rows_y = numpy.rint(y).astype(numpy.int64)[:, None] + offsets
+        left = top = 0
+        if crop:
+            if not len(lit):
+                return None
+            left, top = max(0, int(columns_x.min())), max(0, int(rows_y.min()))
+            right, bottom = min(width, int(columns_x.max()) + 1), min(height, int(rows_y.max()) + 1)
+            if right <= left or bottom <= top:
+                return None
+            width, height = right - left, bottom - top
+            columns_x -= left
+            rows_y -= top
+            x, y = x - left, y - top
         # Separable Gaussian: only 2K exponentials per particle, not K².
         wx = numpy.exp(-(columns_x.astype(numpy.float32) - x[:, None]) ** 2 / (2 * sigma ** 2))
         wy = numpy.exp(-(rows_y.astype(numpy.float32) - y[:, None]) ** 2 / (2 * sigma ** 2))
@@ -824,7 +875,7 @@ class Starlight:
             # clipping overlapping grains into opaque white blobs.
             pixels = numpy.rint(-numpy.expm1(-linear) * 255).astype(numpy.uint8)
             textures.append(Gdk.MemoryTexture.new(width, height, Gdk.MemoryFormat.A8, GLib.Bytes.new(pixels.tobytes()), width))
-        return textures
+        return textures, rect(left / scale, top / scale, width / scale, height / scale)
 
     def _tinted(self, texture: Gdk.Texture, bounds: Graphene.Rect, color: tuple[float, float, float]) -> Gsk.RenderNode:
         colored = Gtk.Snapshot()
@@ -834,6 +885,17 @@ class Starlight:
         colored.append_color(Gdk.RGBA(red=color[0], green=color[1], blue=color[2], alpha=1), bounds)
         colored.pop()
         return colored.to_node()
+
+    def _glowing(self, snapshot: Gtk.Snapshot, bounds: Graphene.Rect, grains: Gdk.Texture, glowing: Gdk.Texture, tint: tuple[float, float, float], glow: tuple[float, float, float]) -> None:
+        """Grains over a wide faint bloom and a tighter glow of their bright motes."""
+        halo = self._tinted(glowing, bounds, glow)
+        for radius, alpha in ((self.style["bloom"], self.style["bloom_alpha"]), (self.style["glow"], self.style["glow_alpha"])):
+            snapshot.push_opacity(alpha)
+            snapshot.push_blur(radius)
+            snapshot.append_node(halo)
+            snapshot.pop()
+            snapshot.pop()
+        snapshot.append_node(self._tinted(grains, bounds, tint))
 
     def _disc(self, snapshot: Gtk.Snapshot, x: float, y: float, width: float, height: float, alpha: float, color: tuple[float, float, float]) -> None:
         if alpha <= 0.002:
@@ -881,19 +943,26 @@ class Starlight:
         # The dust: bright motes spread into a wide faint bloom and a tighter
         # glow, under every grain itself. Only bright motes glow, so faint dust
         # stays fine and crisp.
-        grains, glowing = self.splat(device_scale, self.light, self.light * self.glow_share)
-        glow = self._tinted(glowing, bounds, look.glow)
-        for radius, alpha in ((self.style["bloom"], self.style["bloom_alpha"]), (self.style["glow"], self.style["glow_alpha"])):
-            snapshot.push_opacity(alpha)
-            snapshot.push_blur(radius)
-            snapshot.append_node(glow)
-            snapshot.pop()
-            snapshot.pop()
-        snapshot.append_node(self._tinted(grains, bounds, look.tint))
+        amount = self.arrow_amount * presence
+        if amount > 0.01:
+            # The guide's dust is drawn apart from the face's, in the guide's
+            # colour, lifted toward white so the chevron stays the brightest
+            # point. It blends back to the face's tint as the guide fades.
+            guide = numpy.zeros(len(self.light), bool)
+            guide[self.arrow_stars] = True
+            dust = numpy.where(guide, 0, self.light)
+            led = numpy.where(guide, self.light, 0)
+            # Two splats: the guide's pass only touches its own few hundred motes.
+            grains, glowing = self.splat(device_scale, dust, dust * self.glow_share)
+            guided = self.splat_cropped(device_scale, led, led * self.glow_share)
+            guide_glow = tuple(mix(look.glow[index], look.guide[index], self.arrow_amount) for index in range(3))
+            guide_tint = tuple(mix(look.tint[index], mix(look.guide[index], 1.0, GUIDE_LIFT), self.arrow_amount) for index in range(3))
+        else:
+            grains, glowing = self.splat(device_scale, self.light, self.light * self.glow_share)
+        self._glowing(snapshot, bounds, grains, glowing, look.tint, look.glow)
 
         # The guide's hairlines: precise geometry under its dust, the chevron
         # the brightest point of the scene.
-        amount = self.arrow_amount * presence
         if amount > 0.01 and self.guide_lines:
             lines = Gtk.Snapshot()
             # Segments share one path per step of opacity: a fading line in a
@@ -911,7 +980,7 @@ class Starlight:
             stroke.set_line_cap(Gsk.LineCap.ROUND)
             stroke.set_line_join(Gsk.LineJoin.ROUND)
             for step, builder in steps.items():
-                lines.append_stroke(builder.to_path(), stroke, Gdk.RGBA(red=look.tint[0], green=look.tint[1], blue=look.tint[2], alpha=min(1.0, step / 12)))
+                lines.append_stroke(builder.to_path(), stroke, Gdk.RGBA(red=guide_tint[0], green=guide_tint[1], blue=guide_tint[2], alpha=min(1.0, step / 12)))
             node = lines.to_node()
             if node is not None:
                 snapshot.push_opacity(amount)
@@ -922,6 +991,9 @@ class Starlight:
                 snapshot.pop()
                 snapshot.append_node(node)
                 snapshot.pop()
+        if amount > 0.01 and guided is not None:
+            (guide_grains, guide_glowing), guide_bounds = guided
+            self._glowing(snapshot, guide_bounds, guide_grains, guide_glowing, guide_tint, guide_glow)
 
         # Bokeh: a few large motes out of focus, drifting past the lens.
         for index, (x, y, size) in enumerate(BOKEH):

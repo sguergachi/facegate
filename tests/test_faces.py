@@ -457,12 +457,14 @@ class MeshPreviewTests(unittest.TestCase):
         self.assertEqual(len(meshes), 1)
         self.assertNotIn("frame", [event["event"] for event in events])
         points = numpy.frombuffer(base64.b64decode(meshes[0]["points"]), numpy.float32).reshape(-1, 3)
-        # The face fills the preview's height, centred.
-        self.assertAlmostEqual(float(points[:, 1].max() - points[:, 1].min()), PREVIEW_HEIGHT / faces_mesh.Framing.ZOOM, places=3)
+        # The face is centred, as large as its share of the camera's frame.
+        short = min(faces._decode_rgb(PreviewTests.jpeg()).shape[:2])
+        scale = PREVIEW_HEIGHT * faces_mesh.Framing.GAIN / short
+        self.assertAlmostEqual(float(points[:, 1].max() - points[:, 1].min()), 200 * scale, places=3)
         self.assertAlmostEqual(float(points[:, 0].mean()), PREVIEW_WIDTH / 2, places=3)
         # Depth scales by exactly the same factor as x/y.
         self.assertLess(points[0, 2], points[2, 2])
-        self.assertAlmostEqual(float(points[1, 2]), PREVIEW_HEIGHT / (200 * faces_mesh.Framing.ZOOM), places=6)
+        self.assertAlmostEqual(float(points[1, 2]), scale, places=5)
         self.assertEqual(meshes[0]["space"], "xyz")
 
     def test_a_mirrored_eye_pair_is_not_a_face_upside_down(self):
@@ -582,6 +584,47 @@ class CoachingArrowTests(unittest.TestCase):
         height = lambda points: float(numpy.ptp(points[:, 1]))
         self.assertAlmostEqual(height(after), height(before), delta=1.0)
 
+    def test_the_preview_face_is_as_large_as_gaze_measures_it(self):
+        import numpy
+
+        Framing = faces_mesh.Framing
+        framing = Framing(PREVIEW_WIDTH, PREVIEW_HEIGHT)
+        height = lambda points: float(numpy.ptp(points[:, 1]))
+
+        def face(share):
+            # A face whose box spans ``share`` of a 640 × 480 frame's short side.
+            return numpy.array([[320, 240 - 240 * share, 0.5], [340, 240, 1.0], [300, 240 + 240 * share, 0.2]], numpy.float32)
+
+        # At Gaze's ideal distance, the face fills 1 / ZOOM of the height.
+        self.assertAlmostEqual(height(framing.place(face(Framing.IDEAL_SHARE), (640, 480))), PREVIEW_HEIGHT / Framing.ZOOM, delta=0.5)
+        # Coming closer or moving back grows or shrinks it, as in a mirror.
+        for share in (0.3, 0.55, 0.3):
+            for _ in range(20):
+                placed = framing.place(face(share), (640, 480))
+            self.assertAlmostEqual(height(placed), PREVIEW_HEIGHT * Framing.GAIN * share, delta=0.5)
+        # Where "Move a little closer" begins, the face looks small.
+        from facegate.guidance import FACE_SIZE, SIZE_MARGIN
+
+        self.assertLess(Framing.GAIN * FACE_SIZE[0] * SIZE_MARGIN[0], 0.5)
+        # Far past the limits, the zoom gives way rather than lose the face.
+        for _ in range(40):
+            huge = framing.place(face(1.5), (640, 480))
+        self.assertAlmostEqual(height(huge), PREVIEW_HEIGHT * Framing.FILL[1], delta=1.0)
+
+    def test_a_camera_switch_settles_to_the_new_cameras_zoom(self):
+        import numpy
+
+        Framing = faces_mesh.Framing
+        framing = Framing(PREVIEW_WIDTH, PREVIEW_HEIGHT)
+        face = numpy.array([[320, 140, 0.5], [340, 240, 1.0], [300, 340, 0.2]], numpy.float32)
+        before = framing.place(face, (640, 480))
+        # The IR camera: a narrower view, the same face larger in it.
+        infrared = numpy.array([[170, 20, 0.5], [180, 170, 1.0], [160, 320, 0.2]], numpy.float32)
+        height = lambda points: float(numpy.ptp(points[:, 1]))
+        self.assertAlmostEqual(height(framing.place(infrared, (340, 340))), height(before), delta=1.0)
+        for _ in range(40):
+            after = framing.place(infrared, (340, 340))
+        self.assertAlmostEqual(height(after), min(PREVIEW_HEIGHT * Framing.FILL[1], 300 * PREVIEW_HEIGHT * Framing.GAIN / 340), delta=1.0)
 
 class CameraTests(unittest.TestCase):
     def setUp(self):

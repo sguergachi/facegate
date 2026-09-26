@@ -492,6 +492,31 @@ MESH_POINTS = 1_024
 # A result holds the finished face this long before its stars wink out.
 STARS_HOLD_SECONDS = 0.45
 PREVIEW_COLORS = {"scanning": MARK_PROFILES["scanning"][:3], "success": MARK_PROFILES["success"][:3], "failure": MARK_PROFILES["failure"][:3]}
+# The guide asks something of you, as the camera's cyan: your face stays
+# starlight white, so an instruction never reads as part of the reflection.
+GUIDE_COLOR = PREVIEW_COLORS["scanning"]
+# Gaze captures five poses; the rim is cut into one segment for each, so what
+# is done and what is left can be counted at a glance.
+ENROLL_STEPS = 5
+# Along the rim between segments; the round caps take 1.25 of it.
+SEGMENT_GAP = 8.0
+# A step not yet done is a faint white track. The step being asked for is a
+# dim cyan track with a shimmer running along it, over the guide's own cycle,
+# so it reads as under way rather than done. Done steps are solid cyan light.
+TRACK_ALPHA = 0.16
+CURRENT_ALPHA = 0.26
+SHIMMER = (0.3, 0.6)
+CURRENT_SECONDS = 1.6
+DONE_WIDTH = 1.75
+# A finished step ignites: its fill sweeps clockwise, white-hot, and flares,
+# then cools to cyan, shedding sparks inward as the sweep passes.
+IGNITE_SECONDS = 0.36
+FLARE_SECONDS = 0.5
+SPARKS_PER_STEP = 22
+SPARK_SECONDS = 0.9
+SPARK_TRAVEL = (14.0, 36.0)
+SPARK_SIZE = (1.6, 2.8)
+SPARK_STEPS = 8
 
 
 def rounded_rect_path(context: Any, x: float, y: float, width: float, height: float, radius: float) -> float:
@@ -530,12 +555,50 @@ def rim_path(x: float, y: float, width: float, height: float, radius: float) -> 
     return builder.to_path()
 
 
+def rim_point(x: float, y: float, width: float, height: float, radius: float, distance: float) -> tuple[float, float, float, float]:
+    """A point along ``rim_path``'s rounded rectangle, and its inward normal.
+
+    ``distance`` runs clockwise from top centre, as on the path itself.
+    """
+    radius = max(0.0, min(radius, width / 2, height / 2))
+    right, bottom = x + width, y + height
+    straight_x, straight_y, quarter = width - 2 * radius, height - 2 * radius, math.pi * radius / 2
+    pieces = (
+        ("line", straight_x / 2, (x + width / 2, y), (1, 0)),
+        ("arc", quarter, (right - radius, y + radius), -math.pi / 2),
+        ("line", straight_y, (right, y + radius), (0, 1)),
+        ("arc", quarter, (right - radius, bottom - radius), 0.0),
+        ("line", straight_x, (right - radius, bottom), (-1, 0)),
+        ("arc", quarter, (x + radius, bottom - radius), math.pi / 2),
+        ("line", straight_y, (x, bottom - radius), (0, -1)),
+        ("arc", quarter, (x + radius, y + radius), math.pi),
+        ("line", straight_x / 2, (x + radius, y), (1, 0)),
+    )
+    total = sum(piece[1] for piece in pieces)
+    distance %= total
+    for kind, length, origin, direction in pieces:
+        if distance <= length:
+            break
+        distance -= length
+    else:
+        distance = length
+    if kind == "line":
+        dx, dy = direction
+        return origin[0] + dx * distance, origin[1] + dy * distance, -dy, dx
+    angle = direction + (distance / radius if radius else 0.0)
+    cx, cy = origin
+    return cx + math.cos(angle) * radius, cy + math.sin(angle) * radius, -math.cos(angle), -math.sin(angle)
+
+
 @dataclass
 class PreviewModel:
     """One frame of the enrollment preview."""
 
     state: str = "scanning"
     progress: float = 0.0
+    # Poses captured, and when each one's segment ignited (model.elapsed).
+    steps: int = 0
+    ignited: tuple[float, ...] = ()
     # 0 while scanning, rising to 1 as the result colour takes over.
     result: float = 0.0
     # A brief brightening each time a sample is captured.
@@ -570,14 +633,15 @@ class PreviewArea(Gtk.Widget):
 
         self.set_size_request(PREVIEW_WIDTH + 2 * PREVIEW_BLEED, PREVIEW_HEIGHT + 2 * PREVIEW_BLEED)
         self.model = PreviewModel()
-        self.progress = Spring(0.0)
-        self.progress.configure(0.45, 0.9)
+        # Sparks shed by igniting segments: (born, x, y, dx, dy, size), in rim points.
+        self.sparks = numpy.zeros((0, 6), numpy.float32)
+        self.random = numpy.random.default_rng()
         # Written by the socket thread or the panel, picked up on the frame clock:
         # the newest frame, and whether the camera found a face in it.
         self.latest: tuple[bytes, bool] | None = None
         self.latest_mesh: numpy.ndarray | None = None
         self.stars = Starlight(PREVIEW_WIDTH, PREVIEW_HEIGHT, STAR_STYLE)
-        self.look = Look()
+        self.look = Look(guide=GUIDE_COLOR)
         self.rim = rim_path(TRACE_INSET, TRACE_INSET, PREVIEW_WIDTH - 2 * TRACE_INSET, PREVIEW_HEIGHT - 2 * TRACE_INSET, PREVIEW_RADIUS - TRACE_INSET)
         self.rim_length = Gsk.PathMeasure.new(self.rim).get_length()
 
@@ -615,23 +679,57 @@ class PreviewArea(Gtk.Widget):
 
     def reset(self) -> None:
         self.model = PreviewModel()
-        self.progress.value = self.progress.target = self.progress.velocity = 0.0
+        self.sparks = self.sparks[:0]
         self.latest = self.latest_mesh = None
         self.stars.reset()
 
     def set_progress(self, value: float) -> None:
+        """Gaze's progress, a share of its poses: each new one ignites its segment."""
         value = clamp(value)
-        if value > self.progress.target:
-            self.model.pulse = 1.0
-        self.progress.target = value
+        self.model.progress = max(self.model.progress, value)
+        self._complete(round(value * ENROLL_STEPS))
+
+    def _complete(self, steps: int) -> None:
+        model = self.model
+        steps = min(ENROLL_STEPS, steps)
+        ignited = list(model.ignited)
+        for index in range(model.steps, steps):
+            # Steps landing together ignite one after another, not as one.
+            born = max(model.elapsed, ignited[-1] + IGNITE_SECONDS * 0.6 if ignited else 0.0)
+            ignited.append(born)
+            self._shed(index, born)
+            model.pulse = 1.0
+        model.steps = max(model.steps, steps)
+        model.ignited = tuple(ignited)
+
+    def _segment(self, index: int, gap: float = SEGMENT_GAP) -> tuple[float, float]:
+        """Where step ``index``'s segment starts along the rim, and its length."""
+        share = self.rim_length / ENROLL_STEPS
+        return index * share + gap / 2, share - gap
+
+    def _shed(self, index: int, born: float) -> None:
+        """Sparks along a segment, each loosed as the sweep passes it."""
+        if reduced_motion():
+            return
+        start, length = self._segment(index)
+        random = self.random
+        along = random.uniform(0, 1, SPARKS_PER_STEP)
+        rows = []
+        for share in along:
+            x, y, nx, ny = rim_point(TRACE_INSET, TRACE_INSET, PREVIEW_WIDTH - 2 * TRACE_INSET, PREVIEW_HEIGHT - 2 * TRACE_INSET, PREVIEW_RADIUS - TRACE_INSET, start + share * length)
+            travel = random.uniform(*SPARK_TRAVEL)
+            # Mostly inward, a little along the rim.
+            aside = random.normal(0, 0.35)
+            rows.append((born + EASE_OUT(share) * IGNITE_SECONDS, x, y, (nx - ny * aside) * travel, (ny + nx * aside) * travel, random.uniform(*SPARK_SIZE)))
+        self.sparks = numpy.concatenate([self.sparks, numpy.array(rows, numpy.float32)])
 
     def set_state(self, state: str) -> None:
         if state != self.model.state:
             self.model.state = state
             self.model.state_elapsed = 0.0
             if state == "success":
-                self.progress.target = 1.0
-                self.model.pulse = 1.0
+                self.model.progress = 1.0
+                self._complete(ENROLL_STEPS)
 
     def advance(self, elapsed: float) -> None:
         model = self.model
@@ -643,8 +741,8 @@ class PreviewArea(Gtk.Widget):
             self.stars.submit_mesh(mesh)
         model.elapsed += elapsed
         model.state_elapsed += elapsed
-        self.progress.step(elapsed)
-        model.progress = clamp(self.progress.value)
+        if len(self.sparks):
+            self.sparks = self.sparks[model.elapsed - self.sparks[:, 0] < SPARK_SECONDS]
         model.pulse = max(0.0, model.pulse - elapsed / 0.45)
         target = 0.0 if model.state == "scanning" else 1.0
         model.result += (target - model.result) * (1 - math.exp(-elapsed * 8))
@@ -655,6 +753,26 @@ class PreviewArea(Gtk.Widget):
         look.tint, look.glow, look.shake = preview_look(model)
         self.queue_draw()
 
+    def _segment_stroke(self, snapshot: Gtk.Snapshot, index: int, fill: float, width: float, color: tuple[float, float, float], alpha: float, gap: float, begin: float = 0.0) -> None:
+        """Step ``index``'s segment from ``begin`` to ``fill``, as shares of it."""
+        start, length = self._segment(index, gap)
+        on = length * (fill - begin)
+        if on < 0.5 or alpha <= 0.002:
+            return
+        # A dash from the segment's start; the pattern outruns the rim.
+        period = on + 2 * self.rim_length
+        self._stroke(snapshot, width, color, alpha, [on, 2 * self.rim_length], period - start - length * begin)
+
+    def _segments_stroke(self, snapshot: Gtk.Snapshot, indices: list[int], width: float, color: tuple[float, float, float], alpha: float, gap: float) -> None:
+        """Whole segments as one dashed stroke, so they share one draw and one blur."""
+        if not indices or alpha <= 0.002:
+            return
+        spans = [self._segment(index, gap) for index in sorted(indices)]
+        dash: list[float] = []
+        for (start, length), following in zip(spans, spans[1:] + [None]):
+            dash += [length, following[0] - start - length if following else 2 * self.rim_length]
+        self._stroke(snapshot, width, color, alpha, dash, sum(dash) - spans[0][0])
+
     def _stroke(self, snapshot: Gtk.Snapshot, width: float, color: tuple[float, float, float], alpha: float, dash: list[float] | None = None, offset: float = 0.0) -> None:
         stroke = Gsk.Stroke.new(width)
         stroke.set_line_cap(Gsk.LineCap.ROUND)
@@ -664,7 +782,7 @@ class PreviewArea(Gtk.Widget):
         snapshot.append_stroke(self.rim, stroke, Gdk.RGBA(red=color[0], green=color[1], blue=color[2], alpha=alpha))
 
     def do_snapshot(self, snapshot: Gtk.Snapshot) -> None:
-        model, look, length = self.model, self.look, self.rim_length
+        model, look = self.model, self.look
         native = self.get_native()
         surface = native.get_surface() if native else None
         scale = surface.get_scale() if surface else float(self.get_scale_factor())
@@ -672,22 +790,77 @@ class PreviewArea(Gtk.Widget):
         snapshot.translate(Graphene.Point().init(PREVIEW_BLEED + look.shake, PREVIEW_BLEED))
         self.stars.snapshot(snapshot, scale, look)
         color = PREVIEW_COLORS.get(model.state, PREVIEW_COLORS["scanning"])
-        searching = max(0.0, 1 - model.progress / 0.04) * (1 - model.result)
-        if searching > 0.01:
-            # A short comet circles until the first sample lands.
-            phase = (model.elapsed * 0.4) % 1.0
-            self._stroke(snapshot, 1.25, color, 0.48 * searching, [length * 0.12, length * 0.88], (1 - phase) * length)
-        progress = max(model.progress, model.result if model.state == "success" else 0.0)
-        if progress > 0.002:
-            # Captured samples fill the rim clockwise from the top.
-            dash = None if progress >= 0.999 else [length * progress, length * 2]
+        # A result fuses the segments into one closed ring.
+        gap = SEGMENT_GAP * (1 - model.result) if model.state == "success" else SEGMENT_GAP
+        instant = reduced_motion()
+        # Tracks and settled segments are each one stroke; only a segment
+        # still igniting gets strokes (and a blur) of its own.
+        tracks, settled, igniting = [], [], []
+        for index in range(ENROLL_STEPS):
+            if index < len(model.ignited) and model.elapsed >= model.ignited[index]:
+                age = model.elapsed - model.ignited[index]
+                fill = 1.0 if instant else EASE_OUT(clamp(age / IGNITE_SECONDS))
+                flare = clamp(age / 0.08) * math.exp(-max(0.0, age - IGNITE_SECONDS * 0.5) / FLARE_SECONDS * 2.5)
+                if fill >= 1.0 and flare < 0.01:
+                    settled.append(index)
+                    continue
+                igniting.append((index, fill, flare))
+                if fill >= 1.0:
+                    continue
+            # Not done, or the unlit rest of a segment under its sweep.
+            tracks.append(index)
+        self._segments_stroke(snapshot, tracks, 1.25, WHITE, TRACK_ALPHA * (1 - model.result), gap)
+        if model.state == "scanning" and model.steps < ENROLL_STEPS and model.steps not in {index for index, _, _ in igniting}:
+            current = model.steps
+            self._segment_stroke(snapshot, current, 1.0, 1.25, GUIDE_COLOR, CURRENT_ALPHA, gap)
+            if not instant:
+                head = (model.elapsed / CURRENT_SECONDS) % 1.0 * (1 + SHIMMER[0])
+                fade = math.sin(math.pi * clamp(head / (1 + SHIMMER[0])))
+                self._segment_stroke(snapshot, current, min(1.0, head), 1.25, GUIDE_COLOR, SHIMMER[1] * fade, gap, max(0.0, head - SHIMMER[0]))
+        if settled:
             # A thin luminous trace, not a second solid border. Blur the halo
             # itself so progress reads as light rather than a thick neon tube.
             snapshot.push_blur(2.0)
-            self._stroke(snapshot, 2.5, color, 0.18 + 0.18 * model.pulse, dash)
+            self._segments_stroke(snapshot, settled, 2.5, color, 0.2, gap)
             snapshot.pop()
-            self._stroke(snapshot, 1.25, color, 0.72 + 0.14 * model.pulse, dash)
+            self._segments_stroke(snapshot, settled, DONE_WIDTH, color, 0.9, gap)
+        for index, fill, flare in igniting:
+            # White-hot as it ignites, cooling to the state's colour.
+            hot = tuple(mix(color[channel], 1.0, 0.7 * flare) for channel in range(3))
+            snapshot.push_blur(2.0 + 2.0 * flare)
+            self._segment_stroke(snapshot, index, fill, 2.5 + 2.5 * flare, hot, 0.2 + 0.55 * flare, gap)
+            snapshot.pop()
+            self._segment_stroke(snapshot, index, fill, DONE_WIDTH + 0.75 * flare, hot, 0.9 + 0.1 * flare, gap)
+            if fill < 1.0:
+                # The sweep's head: a bright bead running clockwise.
+                start, span = self._segment(index, gap)
+                x, y, _, _ = rim_point(TRACE_INSET, TRACE_INSET, PREVIEW_WIDTH - 2 * TRACE_INSET, PREVIEW_HEIGHT - 2 * TRACE_INSET, PREVIEW_RADIUS - TRACE_INSET, start + span * fill)
+                self.stars._disc(snapshot, x, y, 9.0, 9.0, 0.55 * (1 - fill), GUIDE_COLOR)
+                self.stars._disc(snapshot, x, y, 3.2, 3.2, 0.95, WHITE)
+        self._sparks(snapshot)
         snapshot.restore()
+
+    def _sparks(self, snapshot: Gtk.Snapshot) -> None:
+        """Every live spark as a dot, one filled path per step of age, not a node each."""
+        if not len(self.sparks):
+            return
+        age = (self.model.elapsed - self.sparks[:, 0]) / SPARK_SECONDS
+        live = (age >= 0) & (age < 1)
+        if not live.any():
+            return
+        sparks, age = self.sparks[live], age[live]
+        travel = numpy.array([EASE_OUT(float(value)) for value in age], numpy.float32)
+        x = sparks[:, 1] + sparks[:, 3] * travel
+        y = sparks[:, 2] + sparks[:, 4] * travel
+        # A spark cools from white to cyan as it fades; eight steps read as smooth.
+        steps = numpy.minimum((age * SPARK_STEPS).astype(int), SPARK_STEPS - 1)
+        for step in numpy.unique(steps):
+            builder = Gsk.PathBuilder.new()
+            for index in numpy.flatnonzero(steps == step):
+                builder.add_circle(Graphene.Point().init(float(x[index]), float(y[index])), float(sparks[index, 5]) / 2)
+            middle = (step + 0.5) / SPARK_STEPS
+            tint = tuple(mix(1.0, GUIDE_COLOR[channel], middle) for channel in range(3))
+            snapshot.append_fill(builder.to_path(), Gsk.FillRule.WINDING, Gdk.RGBA(red=tint[0], green=tint[1], blue=tint[2], alpha=0.9 * (1 - middle) ** 2))
 
 
 @dataclass(frozen=True)
