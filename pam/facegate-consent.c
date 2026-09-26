@@ -45,13 +45,13 @@
 #define FACEGATE_MAX_MESSAGE 4096
 #define FACEGATE_CONSENT_SECONDS 12
 #define FACEGATE_PASSWORD_SECONDS 60
-#define FACEGATE_PASSWORD_ONLY_DATA "facegate.password-only"
+#define FACEGATE_SCANNED_DATA "facegate.scanned"
 #define FACEGATE_PASSWORD_ASKED_DATA "facegate.password-asked"
 #ifndef PAM_MAX_RESP_SIZE
 #define PAM_MAX_RESP_SIZE 512
 #endif
 
-static char password_only_marker;
+static char scanned_marker;
 static char password_asked_marker;
 
 static bool has_marker(pam_handle_t *pamh, const char *name, const char *marker)
@@ -59,6 +59,14 @@ static bool has_marker(pam_handle_t *pamh, const char *name, const char *marker)
     const void *data = NULL;
 
     return pam_get_data(pamh, name, &data) == PAM_SUCCESS && data == marker;
+}
+
+/* Whether this attempt handed a face scan to Gaze. Only then can a failure
+ * mean "Not recognized"; a declined, skipped or cancelled scan must not say so.
+ * sudo retries on the same handle, so every attempt sets it afresh. */
+static void set_scanned(pam_handle_t *pamh, bool scanned)
+{
+    (void)pam_set_data(pamh, FACEGATE_SCANNED_DATA, scanned ? &scanned_marker : NULL, NULL);
 }
 
 static void log_message(const char *message)
@@ -256,15 +264,13 @@ static bool ask_hud(uid_t uid, const char *phase, const char *service,
     return true;
 }
 
-static bool consent_from_hud(uid_t uid, const char *service, const char *username,
-                             bool *password_only)
+static bool consent_from_hud(uid_t uid, const char *service, const char *username)
 {
     char reply[FACEGATE_MAX_MESSAGE + 1];
 
     if (!ask_hud(uid, "approval", service, username, FACEGATE_CONSENT_SECONDS, false,
                  reply, sizeof(reply)))
         return false;
-    *password_only = strstr(reply, "\"reason\":\"password-only\"") != NULL;
     return strstr(reply, "\"approved\":true") != NULL;
 }
 
@@ -454,7 +460,6 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc,
     const char *username;
     const char *service;
     const char *mode = module_mode(argc, argv);
-    bool password_only = false;
     uid_t uid;
     int context;
 
@@ -468,7 +473,7 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc,
     if (strcmp(mode, "notify-failure") == 0) {
         char password[PAM_MAX_RESP_SIZE];
 
-        if (!has_marker(pamh, FACEGATE_PASSWORD_ONLY_DATA, &password_only_marker))
+        if (has_marker(pamh, FACEGATE_SCANNED_DATA, &scanned_marker))
             notify_result(hud, "failure");
         /* Polkit collects the password through its agent session and the
          * greeter through its own field. sudo has nowhere else to type, so
@@ -489,38 +494,35 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc,
         return PAM_IGNORE;
     }
     if (strcmp(mode, "greeter") == 0) {
-        if (!local_request(pamh))
+        set_scanned(pamh, false);
+        if (!local_request(pamh) || greeter_password_typed(pamh))
             return PAM_AUTHINFO_UNAVAIL;
-        if (greeter_password_typed(pamh)) {
-            (void)pam_set_data(pamh, FACEGATE_PASSWORD_ONLY_DATA,
-                               &password_only_marker, NULL);
-            return PAM_AUTHINFO_UNAVAIL;
-        }
         log_message("login submitted without a password; delegating to Gaze");
+        set_scanned(pamh, true);
         notify_scanning(hud, service);
         return PAM_SUCCESS;
     }
     if (strcmp(mode, "scanning") == 0) {
-        if (local_request(pamh))
+        const bool local = local_request(pamh);
+
+        set_scanned(pamh, local);
+        if (local)
             notify_scanning(hud, service);
         return PAM_IGNORE;
     }
+    set_scanned(pamh, false);
     if (strcmp(mode, "consent") != 0 || !local_request(pamh))
         return PAM_AUTHINFO_UNAVAIL;
-    if (has_marker(pamh, FACEGATE_PASSWORD_ASKED_DATA, &password_asked_marker)) {
-        /* After a wrong password, ask for the password again, not the face. */
-        (void)pam_set_data(pamh, FACEGATE_PASSWORD_ONLY_DATA, &password_only_marker, NULL);
+    /* After a wrong password, ask for the password again, not the face. */
+    if (has_marker(pamh, FACEGATE_PASSWORD_ASKED_DATA, &password_asked_marker))
         return PAM_AUTHINFO_UNAVAIL;
-    }
 
-    if (!consent_from_hud(uid, service, username, &password_only)) {
-        if (password_only)
-            (void)pam_set_data(pamh, FACEGATE_PASSWORD_ONLY_DATA,
-                               &password_only_marker, NULL);
+    if (!consent_from_hud(uid, service, username)) {
         log_message("face scan was not approved; using password authentication");
         return PAM_AUTHINFO_UNAVAIL;
     }
     log_message("face scan approved; delegating authentication to Gaze");
+    set_scanned(pamh, true);
     notify_scanning(uid, service);
     return PAM_SUCCESS;
 }

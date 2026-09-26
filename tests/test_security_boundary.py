@@ -61,8 +61,10 @@ class SecurityBoundaryTests(unittest.TestCase):
 
     def test_no_face_path_does_not_report_a_false_biometric_failure(self):
         source = (ROOT / "pam/facegate-consent.c").read_text()
-        self.assertIn('"facegate.password-only"', source)
-        self.assertIn('"\\\"reason\\\":\\\"password-only\\\""', source)
+        # "Not recognized" only after Gaze really scanned: not after Deny,
+        # a skipped scan, or a cancelled request.
+        self.assertIn('"facegate.scanned"', source)
+        self.assertIn("if (has_marker(pamh, FACEGATE_SCANNED_DATA, &scanned_marker))\n            notify_result(hud, \"failure\");", source)
         self.assertIn("password_from_hud", source)
         self.assertIn("pam_set_item", source)
         # Only sudo takes its password from the island; polkit and the greeter have their own.
