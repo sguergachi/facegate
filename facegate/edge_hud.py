@@ -629,7 +629,7 @@ class PreviewArea(Gtk.Widget):
 
     def __init__(self) -> None:
         super().__init__()
-        from .starlight import Look, Starlight
+        from .starlight import Look, StarField, Starlight
 
         self.set_size_request(PREVIEW_WIDTH + 2 * PREVIEW_BLEED, PREVIEW_HEIGHT + 2 * PREVIEW_BLEED)
         self.model = PreviewModel()
@@ -640,7 +640,10 @@ class PreviewArea(Gtk.Widget):
         # the newest frame, and whether the camera found a face in it.
         self.latest: tuple[bytes, bool] | None = None
         self.latest_mesh: numpy.ndarray | None = None
-        self.stars = Starlight(PREVIEW_WIDTH, PREVIEW_HEIGHT, STAR_STYLE)
+        self.latest_mark = False
+        self.latest_axis = ""
+        # Simulated and drawn off the GTK thread; see StarField.
+        self.stars = StarField(Starlight(PREVIEW_WIDTH, PREVIEW_HEIGHT, STAR_STYLE))
         self.look = Look(guide=GUIDE_COLOR)
         self.rim = rim_path(TRACE_INSET, TRACE_INSET, PREVIEW_WIDTH - 2 * TRACE_INSET, PREVIEW_HEIGHT - 2 * TRACE_INSET, PREVIEW_RADIUS - TRACE_INSET)
         self.rim_length = Gsk.PathMeasure.new(self.rim).get_length()
@@ -673,6 +676,8 @@ class PreviewArea(Gtk.Widget):
                 # Compatibility with a helper from before physical z transport.
                 points[:, 2] *= max(float(numpy.ptp(points[:468, 1])), 1.0) * 0.32
             self.latest_mesh = numpy.clip(points, (-PREVIEW_WIDTH, -PREVIEW_HEIGHT, -PREVIEW_HEIGHT), (2 * PREVIEW_WIDTH, 2 * PREVIEW_HEIGHT, PREVIEW_HEIGHT))
+            self.latest_mark = bool(message.get("mark")) and len(points) == 0
+            self.latest_axis = str(message.get("axis") or "") if self.latest_mark else ""
             self.latest = None
         except (KeyError, TypeError, ValueError):
             pass
@@ -681,6 +686,8 @@ class PreviewArea(Gtk.Widget):
         self.model = PreviewModel()
         self.sparks = self.sparks[:0]
         self.latest = self.latest_mesh = None
+        self.latest_mark = False
+        self.latest_axis = ""
         self.stars.reset()
 
     def set_progress(self, value: float) -> None:
@@ -737,8 +744,16 @@ class PreviewArea(Gtk.Widget):
         if latest is not None:
             self.stars.submit(*latest)
         mesh, self.latest_mesh = self.latest_mesh, None
+        mark, self.latest_mark = self.latest_mark, False
+        axis, self.latest_axis = self.latest_axis, ""
+        if mark and not axis:
+            stars = getattr(self.stars, "field", self.stars)
+            axis = {"turn-left": "left", "turn-right": "right", "tilt-up": "up", "tilt-down": "down"}.get(
+                getattr(stars, "arrow", "") or getattr(stars, "pending_arrow", ""),
+                "",
+            )
         if mesh is not None:
-            self.stars.submit_mesh(mesh)
+            self.stars.submit_mesh(mesh, mark, axis)
         model.elapsed += elapsed
         model.state_elapsed += elapsed
         if len(self.sparks):
@@ -1110,6 +1125,7 @@ class EdgeHud:
         self.enabled = greeter or preferences.enabled(preferences.load())
         # sudo waiting for a password typed in the island (no face enrolled).
         self.sudo_password: socket.socket | None = None
+        self.sudo_password_id = ""
         self.sudo_password_watch: int | None = None
         # While pam_faillock refuses every password, when to offer the field.
         self.sudo_lock_timer: int | None = None
@@ -1450,13 +1466,11 @@ class EdgeHud:
         self.approve.set_sensitive(view.actions)
         self.deny.set_sensitive(view.actions)
         self.entry.set_sensitive(view.password)
+        self.entry.set_can_target(view.password)
+        self.entry.set_can_focus(view.password)
         if view.password and view != self.view:
             self.entry.set_text("")
-        # Typing a password needs the keyboard without a click first.
-        Gtk4LayerShell.set_keyboard_mode(
-            self.window,
-            Gtk4LayerShell.KeyboardMode.EXCLUSIVE if view.password else Gtk4LayerShell.KeyboardMode.ON_DEMAND,
-        )
+        self._want_keyboard(bool(view.password))
         if not self.visible:
             self._arrive(view)
             return
@@ -1499,7 +1513,7 @@ class EdgeHud:
             for index, item in enumerate(incoming):
                 item.alpha.to(1, now, 0.26, index * 0.04)
             if view.password:
-                self.entry.grab_focus()
+                self._focus_password()
 
         self._at(0.15, swap)
 
@@ -1546,7 +1560,7 @@ class EdgeHud:
         for index, item in enumerate(stagger):
             item.alpha.to(1, self.now, 0.3, 0.1 + index * 0.04)
         if view.password:
-            GLib.idle_add(lambda: (self.entry.grab_focus(), False)[1])
+            GLib.idle_add(self._focus_password)
         # Follow the pointer: choose the output afresh every time we appear.
         if not self.apply_monitor_placement():
             self.positioned = False
@@ -1695,6 +1709,30 @@ class EdgeHud:
             return
         self.resolve(False)
 
+    def _want_keyboard(self, exclusive: bool) -> None:
+        """Exclusive keyboard on an already-mapped layer surface needs a kick.
+
+        Switching ON_DEMAND → EXCLUSIVE in place is ignored by KWin; drop to
+        NONE first, then take exclusive and present so typing works without a click.
+        """
+        Gtk4LayerShell.set_keyboard_mode(self.window, Gtk4LayerShell.KeyboardMode.NONE)
+        Gtk4LayerShell.set_keyboard_mode(
+            self.window,
+            Gtk4LayerShell.KeyboardMode.EXCLUSIVE if exclusive else Gtk4LayerShell.KeyboardMode.ON_DEMAND,
+        )
+        if exclusive and self.visible:
+            self.window.present()
+
+    def _focus_password(self) -> bool:
+        if not (self.view and self.view.password):
+            return False
+        self.entry.set_sensitive(True)
+        self.entry.set_editable(True)
+        self.entry.set_can_target(True)
+        self.entry.set_can_focus(True)
+        self.entry.grab_focus()
+        return False
+
     def present_password(self, requester: object, on_password: Callable[[str], None], on_cancel: Callable[[], None], error: bool = False, message: str = "") -> None:
         """The password in the island: polkit's fallback, or sudo without a face."""
         self.silenced = False
@@ -1704,6 +1742,7 @@ class EdgeHud:
         self.entry.set_text("")
         self._present(password_view(requester, error, message))
         self.password_busy(False)
+        GLib.idle_add(self._focus_password)
         if error:
             # The lock shakes, then settles back to waiting for the password.
             self.mark.set_state("denied")
@@ -1717,7 +1756,7 @@ class EdgeHud:
         self.deny.set_sensitive(True)
         self.mark.set_state("checking" if busy else "password")
         if not busy:
-            self.entry.grab_focus()
+            self._focus_password()
 
     def cancel(self) -> None:
         """Close on the user's request: decline any pending approval and stay
@@ -1946,8 +1985,16 @@ class EdgeHud:
         if self.view and self.view.password:
             # A typed password resolves on the lock, never on the face.
             view = replace(view, state="unlocked" if success else "denied")
+            self._present(view)
+            self.dismiss_timeout = GLib.timeout_add(1100 if success else 1600, self.dismiss)
+            return
         self._present(view)
-        self.dismiss_timeout = GLib.timeout_add(1100 if success else 1600, self.dismiss)
+        if success:
+            self.dismiss_timeout = GLib.timeout_add(1100, self.dismiss)
+            return
+        # Face failed: PAM falls back to a password. Keep the island up so
+        # the field can replace this result instead of the island vanishing.
+        self.dismiss_timeout = GLib.timeout_add(20_000, self.dismiss)
 
     @staticmethod
     def reply(connection: socket.socket, payload: dict[str, Any]) -> None:
@@ -2109,12 +2156,13 @@ class EdgeHud:
     # sudo without a face: the password is typed here and handed back to PAM,
     # where pam_unix checks it. The island never judges it.
 
-    def ask_sudo_password(self, connection: socket.socket, requester: object, error: bool, locked_until: float = 0) -> None:
+    def ask_sudo_password(self, connection: socket.socket, requester: object, error: bool, locked_until: float = 0, request_id: str = "") -> None:
         if self.dismiss_timeout:
             # A retry after a wrong password replaces the checking state.
             GLib.source_remove(self.dismiss_timeout)
             self.dismiss_timeout = None
         self.sudo_password = connection
+        self.sudo_password_id = request_id
         # Ctrl+C in the terminal closes sudo's end; don't keep asking.
         self.sudo_password_watch = GLib.io_add_watch(connection.fileno(), GLib.PRIORITY_DEFAULT, GLib.IO_IN | GLib.IO_HUP | GLib.IO_ERR, self._sudo_hung_up)
         if locked_until and (locked_until < 0 or locked_until > time.time()):
@@ -2161,7 +2209,7 @@ class EdgeHud:
             GLib.source_remove(self.sudo_password_watch)
             self.sudo_password_watch = None
         if connection:
-            self.reply(connection, {"password": password})
+            self.reply(connection, {"id": getattr(self, "sudo_password_id", ""), "password": password})
 
     def _sudo_hung_up(self, *_args: Any) -> bool:
         self.sudo_password_watch = None
@@ -2203,13 +2251,28 @@ class EdgeHud:
             self.open_config(message.get("welcome") is True)
         elif phase == "password":
             if self.pending or self.enrolling or self.sudo_password or (self.polkit and self.polkit.active):
-                self.reply(connection, {"password": None, "reason": "busy"})
+                self.reply(connection, {"id": str(message.get("id", "")), "password": None, "reason": "busy"})
                 return False
             try:
                 locked_until = float(message.get("locked_until") or 0)
             except (TypeError, ValueError):
                 locked_until = 0
-            self.ask_sudo_password(connection, message.get("requester"), message.get("error") is True, locked_until)
+            requester = message.get("requester")
+            error = message.get("error") is True
+            request_id = str(message.get("id", ""))
+            delay = 900 if (self.view and self.view.state == "failure") else 0
+
+            def show() -> bool:
+                if self.silenced or self.enrolling or self.sudo_password or (self.polkit and self.polkit.active):
+                    self.reply(connection, {"id": request_id, "password": None, "reason": "busy"})
+                    return False
+                self.ask_sudo_password(connection, requester, error, locked_until, request_id)
+                return False
+
+            if delay:
+                GLib.timeout_add(delay, show)
+            else:
+                show()
         elif phase == "approval":
             if self.pending or self.enrolling or self.sudo_password:
                 self.reply(connection, {"approved": False, "reason": "busy"})

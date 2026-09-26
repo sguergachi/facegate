@@ -353,9 +353,10 @@ friendly and sensing, and never a literal or mask-like face.
 
 - **Consent before camera.** The camera never starts without an explicit
   Approve, or an admin approval in the enrollment flow.
-- **Changes need admin, every time.** Listing faces needs no prompt. Adding or
-  removing one always asks for admin approval in the island (polkit
-  `auth_admin`, never kept).
+- **Changes need admin.** Listing faces needs no prompt. Adding or removing
+  one asks for admin approval in the island. Gaze keeps that grant on the
+  helper process (`auth_admin_keep`), so a later change in the same session
+  does not ask again.
 - **Destructive actions take two steps** and revert themselves if not confirmed.
 - **Escape always backs out**: it declines an approval, cancels a scan, or
   closes the window.
@@ -485,13 +486,15 @@ Principles, in order:
 1. **Hierarchy.** Subject (the face), then call to action (the guide), then
    atmosphere. When the guide speaks, the face steps back and ambient
    effects pause. The chevron is the single brightest point.
-2. **Depth in layers.** Deep field (240 faint stars) → back light (a soft
-   220 × 260 glow at 10%, breathing over 7 s) → haze (90 motes orbiting the
-   head, blurred) → the dust face → guide hairlines → bokeh (five discs
-   under 7% opacity). Parallax ties them to the head's turn: the deep field
-   shifts 7 pt against it, the bokeh with it.
-3. **One motivated light.** The key light that models the face also back-lights
-   the haze; nothing is lit from nowhere.
+2. **Depth in layers.** Deep field (240 faint stars) → source behind the
+   head (a small core, a corona wrapping the silhouette, a faint wash,
+   breathing over 7 s) → haze (90 motes orbiting the source, brighter near
+   the core) → the dust face → guide hairlines → bokeh (five discs under 7%
+   opacity). Parallax ties them to the head's turn: the deep field shifts 7
+   pt against it, the source lags behind it, the bokeh with it.
+3. **One motivated light.** A concentrated source sits behind the head; it
+   wraps the silhouette, lights the haze, and is the origin the star dust
+   seems to come from. Nothing is lit from nowhere.
 4. **Futurism is precision meeting the organic.** Hairline geometry carries
    meaning; free dust carries life. The formed face keeps steady illumination;
    no periodic scan band or independent spark pulses cross its features.
@@ -519,7 +522,8 @@ and grows to fit (surface height 440).
     soft strokes along the upper lids, brows and mouth, including a five-mote
     glint in each iris. No scanline bands or first-camera-pose density bias.
   - *Lit like a sculpture:* a broad key from above-left, a quiet opposing fill,
-    and a restrained rim. A broad, low-intensity highlight models the nose and
+    a restrained rim, and a wrap from the source behind the head that catches
+    the silhouette. A broad, low-intensity highlight models the nose and
     cheek planes. Signed normals suppress back faces; every visible surface
     grain remains present in the shadows. A single display-rate XYZ pose drives both shading and attached particles;
     adaptive smoothing is 140 ms for noise and 50 ms for deliberate turns.
@@ -527,12 +531,11 @@ and grows to fit (surface height 440).
     ambient motes stay drifting faintly around the face.
   - *Framing:* the view follows the face's centre, eased. Its zoom is fixed
     per camera so the face's size in the preview is its size as Gaze measures
-    it (box share of the frame's short side): at Gaze's ideal distance (the
-    middle of the coached band, a 45% share) the mesh fills 1 / 1.35 of the
-    height; where "closer" begins it fills under half; where "back" begins
-    it spills over. Moving closer or back grows or shrinks the face as in a
-    mirror, and the preview never shows a small-looking face as too close or
-    a large one as too far. Past 25–115% of the height the zoom gives way.
+    it (box share of the frame's short side): just close enough (a little
+    past where "closer" ends) the mesh fills 1 / 1.35 of the height, the
+    "closer" guide's destination outline; further away is smaller, too close
+    spills over. Moving closer or back grows or shrinks the face as in a
+    mirror. Past 25–115% of the height the zoom gives way.
     Gaze switches between its colour and IR cameras at every pose; the view
     is carried across the switch in face heights, so it never jumps, then
     eases to the new camera's zoom.

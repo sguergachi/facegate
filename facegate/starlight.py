@@ -15,10 +15,10 @@ are faint grains, some are stars, a few are sparks that glint and bloom. They
 never quite hold still: each drifts a fraction of a point and scintillates.
 
 The face stands in a scene built in layers, back to front: a deep field of
-faint distant stars that shifts against the head's turn, a back light that
-separates the head from the dark and breathes slowly, haze orbiting through
-it, the steadily illuminated face itself, the
-coaching guide, and a few out-of-focus motes drifting past the lens.
+faint distant stars that shifts against the head's turn, a concentrated
+source behind the head that the star dust seems to come from, haze orbiting
+through it, the steadily illuminated face itself, the coaching guide, and a
+few out-of-focus motes drifting past the lens.
 
 To coach, a guide appears in precise hairline geometry with its own dust
 streaming along it: an arc orbiting the head for a turn or tilt, a straight
@@ -30,8 +30,11 @@ result's colour and winks out, in random order.
 Without a face mesh (no ONNX Runtime), each mote instead takes a spot on a
 field over the frame and that spot's brightness, as before.
 
-The camera gives a frame about every 70 ms, but the dust moves on springs
-every display frame, so motion is as smooth as the display. Nothing is
+Gaze's infrared bursts between poses release the dust; it gathers into a
+tilted ring of dust with a check floating in its mouth, then condenses again
+when the colour camera returns. The camera gives a frame about every 70 ms,
+but the dust moves on springs every display frame, so motion is as smooth as
+the display. Nothing is
 rasterised by Python drawing code: NumPy integrates the motes and splats
 them into two small textures at the display's own pixel density (every mote,
 and the bright ones for glow), and render nodes (drawn on the GPU by GTK's
@@ -42,7 +45,10 @@ blurs.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+import threading
+import time
+from collections import deque
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import gi
@@ -97,18 +103,50 @@ GRAIN = 0.72
 ARRIVE_SECONDS = 0.7
 SWIRL = 18.0
 LEAVE_SPEED = 1.8
+# Between poses the face's dust becomes a seal: a thick ring, a faint inner
+# volume, then a check written in front. Shares of face motes; geometry in
+# 208-tall preview points, y down, +z toward the camera. It arrives already
+# tilted and keeps turning (fast at first, easing out) until the colour
+# camera returns and the dust becomes the face.
+MARK_SECONDS = 0.14
+MARK_RING = 0.80
+MARK_FILL = 0.03
+MARK_RADIUS = 62.0
+MARK_TUBE = 5.4
+MARK_TILT_FROM = 0.46
+MARK_TILT_AWAY = -0.26
+MARK_TURN_SECONDS = 0.28
+MARK_FOCAL = 340.0
+# Yaw, tilt of the seal. Amount starts at FROM and eases toward AWAY, so
+# the sign is the direction the head just turned: left yaws leftward, up
+# nods upward (mirrored, as the user sees themself).
+MARK_AXIS = {
+    "left": (1.0, 0.0),
+    "right": (-1.0, 0.0),
+    "up": (0.0, -1.0),
+    "down": (0.0, 1.0),
+    "straight": (0.0, 1.0),
+}
+MARK_CHECK = ((-22.0, 7.0, 8.0), (-5.5, 20.0, 9.0), (30.0, -22.0, 10.0))
+MARK_CHECK_SHORT = 0.32
 # How bright the nebula is, and on the face how far a mote drifts, in points.
 NEBULA_LIGHT = 0.45
 DRIFT = 0.08
 
 # The scene around the face, back to front, in preview points. A deep field of
 # faint distant stars shifts `PARALLAX` points against the head's turn (the
-# foreground bokeh the other way), a back light glows behind the head and
-# breathes every `BREATH_SECONDS`, haze motes orbit slowly through it, and a
-# few large out-of-focus motes drift past the lens.
+# foreground bokeh the other way). Behind the head sits the source the dust
+# is lit by: a small core, a corona that wraps the silhouette, and a faint
+# wash, breathing every `BREATH_SECONDS`. Sizes are at the "close enough"
+# fill and scale with the face. Haze motes orbit through it, brighter near
+# the core, and a few large out-of-focus motes drift past the lens.
 PARALLAX = 7.0
 BREATH_SECONDS = 7.0
-HALO = (220.0, 260.0, 0.035)
+SOURCE = (
+    (52.0, 58.0, 0.16),
+    (168.0, 200.0, 0.09),
+    (236.0, 272.0, 0.020),
+)
 HAZE_MOTES = 90
 BOKEH = ((0.12, 0.2, 13.0), (0.86, 0.14, 9.0), (0.93, 0.78, 16.0), (0.06, 0.84, 11.0), (0.7, 0.95, 7.0))
 BOKEH_ALPHA = 0.07
@@ -143,10 +181,11 @@ GUIDE_LIFT = 0.3
 # A head silhouette moves through depth: larger means closer to the lens.
 # It starts on the face itself (its outline this much outside the face) and
 # grows or shrinks to a quiet destination silhouette with explicit radial
-# chevrons, so the guide can never contradict the face's own size. The
-# destination is the size the face has at Gaze's ideal distance (the preview
-# frames it so, see facemesh.Framing), and at least this step from the face.
-# Without a face it takes a head's size where "closer" begins.
+# chevrons, so the guide can never contradict the face's own size. Closer's
+# destination is the face's size once close enough (the preview frames it so,
+# see facemesh.Framing), so the face fills it as the instruction ends; back's
+# is this step smaller. Without a face it takes a head's size where "closer"
+# begins.
 DISTANCE_RADIUS = (69.0, 81.0)
 DISTANCE_PAD = 1.08
 DISTANCE_NOMINAL = 0.7
@@ -195,6 +234,36 @@ def drift_of(wander: numpy.ndarray, share: float) -> numpy.ndarray:
 
 def mix(first: float, second: float, amount: float) -> float:
     return first + (second - first) * amount
+
+
+def gaussian_blur(image: numpy.ndarray, sigma: float) -> numpy.ndarray:
+    """A separable Gaussian blur of a 2D float32 image, in pixels, edges dark."""
+    if sigma < 0.3:
+        return image
+    reach = max(1, math.ceil(3 * sigma))
+    kernel = numpy.exp(-numpy.arange(-reach, reach + 1, dtype=numpy.float32) ** 2 / (2 * sigma * sigma))
+    kernel /= kernel.sum()
+    height, width = image.shape
+    padded = numpy.zeros((height, width + 2 * reach), numpy.float32)
+    padded[:, reach:reach + width] = image
+    rows = numpy.zeros_like(image)
+    for offset, weight in enumerate(kernel):
+        rows += weight * padded[:, offset:offset + width]
+    padded = numpy.zeros((height + 2 * reach, width), numpy.float32)
+    padded[reach:reach + height] = rows
+    out = numpy.zeros_like(image)
+    for offset, weight in enumerate(kernel):
+        out += weight * padded[offset:offset + height]
+    return out
+
+
+def shoulder(linear: numpy.ndarray) -> numpy.ndarray:
+    """Light to 8-bit alpha through a soft exposure shoulder, in place, float32."""
+    numpy.negative(linear, out=linear)
+    numpy.exp(linear, out=linear)
+    numpy.multiply(linear, -255, out=linear)
+    numpy.add(linear, 255.5, out=linear)
+    return linear.astype(numpy.uint8)
 
 
 def smoothstep(edge0: float, edge1: float, value: numpy.ndarray) -> numpy.ndarray:
@@ -308,6 +377,19 @@ class Starlight:
         self.arrow_side = numpy.where(random.uniform(0, 1, arrows) < 0.5, -1.0, 1.0).astype(numpy.float32)
         self.arrow_scatter = random.normal(0, 0.45, (arrows, 2)).astype(numpy.float32)
         self.arrow_wobble = random.uniform(0, math.tau, arrows).astype(numpy.float32)
+        faces = len(self.face_stars)
+        self.mark_along = random.uniform(0, 1, faces).astype(numpy.float32)
+        self.mark_width = random.normal(0, 1, faces).astype(numpy.float32)
+        self.mark_phi = random.uniform(0, math.tau, faces).astype(numpy.float32)
+        along = self.mark_along
+        ring_t = numpy.clip(along / MARK_RING, 0, 1)
+        fill_t = numpy.clip((along - MARK_RING) / MARK_FILL, 0, 1)
+        check_t = numpy.clip((along - MARK_RING - MARK_FILL) / (1 - MARK_RING - MARK_FILL), 0, 1)
+        self.mark_delay = numpy.where(
+            along < MARK_RING,
+            0.01 * ring_t,
+            numpy.where(along < MARK_RING + MARK_FILL, 0.02 + 0.02 * fill_t, 0.04 + 0.06 * check_t),
+        ).astype(numpy.float32)
         self.reset()
 
     def reset(self) -> None:
@@ -327,6 +409,11 @@ class Starlight:
         self.dust: tuple[numpy.ndarray, numpy.ndarray] | None = None
         # Seconds the face has been condensing, eased back down when it's lost.
         self.formed = 0.0
+        # Between poses the dust writes a check instead of spreading to the cloud.
+        self.mark = False
+        self.marked = 0.0
+        self.mark_spin = 0.0
+        self.mark_axis = "straight"
         self.arrow = ""
         self.pending_arrow = ""
         self.arrow_target = 0.0
@@ -361,10 +448,21 @@ class Starlight:
         self.face = face
         self.vertices = None
 
-    def submit_mesh(self, points: numpy.ndarray) -> None:
-        """The face mesh's points as (x, y, z) in preview pixels rows; none means no face."""
+    def submit_mesh(self, points: numpy.ndarray, mark: bool = False, axis: str = "") -> None:
+        """The face mesh's points as (x, y, z) in preview pixels rows; none means no face.
+
+        ``mark`` is an IR burst between poses: the face's dust writes a check
+        instead of spreading into the cloud. ``axis`` is the pose just captured
+        (left, right, up, down, straight), so the seal turns the same way.
+        """
         if len(points) == 0:
             self.face = False
+            if mark and not self.mark:
+                self.mark_spin = 0.0
+                self.mark_axis = axis if axis in MARK_AXIS else "straight"
+            self.mark = bool(mark)
+            if self.mark:
+                self.set_arrow("")
             return
         if self.triangles is None or len(points) < 468:
             return
@@ -381,6 +479,7 @@ class Starlight:
         size = numpy.maximum(high - low, 1.0)
         self.parallax_target = numpy.clip((points[NOSE_TIP, :2] - (low + high) / 2) / size * 5, -1, 1).astype(numpy.float32)
         self.face = True
+        self.mark = False
 
     def set_arrow(self, name: str) -> None:
         """Show the coaching arrow ("turn-left", "tilt-up", "move-right", …), or none."""
@@ -396,6 +495,7 @@ class Starlight:
         """The scan is over: the dust winks out."""
         self.presence_target = 0.0
         self.face = False
+        self.mark = False
         self.set_arrow("")
 
     # The face's dust --------------------------------------------------------------
@@ -477,6 +577,10 @@ class Starlight:
         self.surface = {
             "corners": corners_of,
             "weights": weights,
+            "blend": (
+                tuple(numpy.ascontiguousarray(corners_of[:, corner]) for corner in range(3)),
+                tuple(numpy.ascontiguousarray(weights[:, corner:corner + 1]) for corner in range(3)),
+            ),
             "feature": feature,
             "scatter": scatter,
             "delay": delay.astype(numpy.float32),
@@ -501,16 +605,23 @@ class Starlight:
             for iris, socket in zip(IRISES, ((33, 133, 159, 145), (263, 362, 386, 374))):
                 normals[list(iris)] = normals[list(socket)].mean(axis=0)
         length = numpy.linalg.norm(normals, axis=1, keepdims=True)
-        return normals / numpy.maximum(length, 1e-6)
+        return (normals / numpy.maximum(length, 1e-6)).astype(numpy.float32)
+
+    def _blend(self, values: numpy.ndarray) -> numpy.ndarray:
+        """Each face mote's barycentric mix of per-vertex ``values``.
+
+        Three contiguous gathers, several times faster than one (n, 3, k)
+        gather and sum, every frame.
+        """
+        (c0, c1, c2), (w0, w1, w2) = self.surface["blend"]
+        return w0 * values[c0] + w1 * values[c1] + w2 * values[c2]
 
     def _face_dust(self) -> tuple[numpy.ndarray, numpy.ndarray]:
         """Where each face mote rests on the newest face, and how lit it is there."""
         surface, points = self.surface, self.vertices
-        corners, weights = surface["corners"], surface["weights"][:, :, None]
         span = float(numpy.ptp(points[:, 1])) or 1.0
-        rest = (weights * points[corners, :2]).sum(axis=1) + surface["scatter"] * span
-        normals = self._normals(points)
-        normal = (weights * normals[corners]).sum(axis=1)
+        rest = self._blend(points[:, :2]) + surface["scatter"] * span
+        normal = self._blend(self._normals(points))
         normal /= numpy.maximum(numpy.linalg.norm(normal, axis=1, keepdims=True), 1e-6)
         def direction(value):
             vector = numpy.asarray(value, numpy.float32)
@@ -520,11 +631,14 @@ class Starlight:
         key = numpy.maximum(normal @ key_direction, 0)
         fill = numpy.maximum(normal @ direction(FILL_LIGHT), 0)
         rim = numpy.maximum(normal @ direction(RIM_DIRECTION), 0) ** 1.5
+        # Light wrapping from the source behind the head, strongest where
+        # the dust is seen edge-on, so the silhouette catches it.
+        wrap = (1 - numpy.clip(normal[:, 2], 0, 1)) ** 2
         # Broad diffuse planes plus a restrained view-dependent highlight.
         # The specular lobe moves across the cheeks/nose as the head turns.
         half_vector = direction(key_direction + [0, 0, 1])
         specular = numpy.maximum(normal @ half_vector, 0) ** 12 * key
-        shade = 0.13 + 0.64 * key + 0.22 * fill + 0.15 * rim
+        shade = 0.13 + 0.64 * key + 0.22 * fill + 0.15 * rim + 0.14 * wrap
         feature = surface["feature"]
         shade = numpy.where(feature, shade * 1.12, shade)
         visibility = smoothstep(0.02, 0.20, normal[:, 2])
@@ -640,9 +754,10 @@ class Starlight:
             low, high = self.vertices[:468, :2].min(axis=0), self.vertices[:468, :2].max(axis=0)
             centre = ((low + high) / 2).astype(numpy.float32)
             size = float(high[1] - low[1]) * DISTANCE_PAD / (2 * DISTANCE_RADIUS[1])
-        ideal = self.height / Framing.ZOOM * DISTANCE_PAD / (2 * DISTANCE_RADIUS[1])
+        enough = self.height / Framing.ZOOM * DISTANCE_PAD / (2 * DISTANCE_RADIUS[1])
         step = size * DISTANCE_STEP[1 if closer else 0]
-        destination = max(ideal, step) if closer else min(ideal, step)
+        # Too close spills past the preview, so back can only show a step.
+        destination = max(enough, step) if closer else step
         # The destination stays within the preview.
         room = (min(float(centre[1]), self.height - float(centre[1])) - 1) / DISTANCE_RADIUS[1]
         destination = min(destination, max(room, 0.1))
@@ -702,7 +817,7 @@ class Starlight:
         self.presence = min(self.presence_target, self.presence + change) if self.presence_target > self.presence else max(self.presence_target, self.presence - change)
 
         self.parallax += (self.parallax_target * (1.0 if self.face else 0.0) - self.parallax) * (1 - math.exp(-elapsed / 0.4))
-        self.scene += ((1.0 if self.face else 0.0) - self.scene) * (1 - math.exp(-elapsed / 0.8))
+        self.scene += ((1.0 if (self.face or self.mark or self.marked > 0.02) else 0.0) - self.scene) * (1 - math.exp(-elapsed / 0.8))
         cloud = self._cloud()
         twinkle = 1 - style["twinkle"] * (0.5 + 0.5 * numpy.sin(self.twinkle_rate * self.clock + self.twinkle_phase))
         if self.vertices is not None and self.surface is not None:
@@ -749,7 +864,11 @@ class Starlight:
         self.position += self.velocity * elapsed
         if self.vertices is not None and self.surface is not None:
             arrival = numpy.clip((self.formed - self.surface["delay"]) / ARRIVE_SECONDS, 0, 1)
-            attached = smoothstep(0.65, 1.0, arrival)[:, None]
+            mark_arrival = numpy.clip((self.marked - self.mark_delay) / MARK_SECONDS, 0, 1)
+            attached = numpy.maximum(
+                smoothstep(0.65, 1.0, arrival) * (1 - mark_arrival),
+                smoothstep(0.65, 1.0, mark_arrival),
+            )[:, None]
             stars = self.face_stars
             self.position[stars] += (target[stars] - self.position[stars]) * attached
             self.velocity[stars] *= 1 - attached
@@ -766,17 +885,125 @@ class Starlight:
         alive = alive * alive * (3 - 2 * alive)
         self.light = light * alive * feather(self.position, self.width, self.height, style["corner"], style["feather"])
 
+    def _mark_basis(self) -> tuple[float, float]:
+        """Yaw and tilt along the pose just captured: starts fast and eases out."""
+        yaw_axis, tilt_axis = MARK_AXIS.get(self.mark_axis, MARK_AXIS["straight"])
+        amount = MARK_TILT_AWAY + (MARK_TILT_FROM - MARK_TILT_AWAY) * math.exp(-self.mark_spin / MARK_TURN_SECONDS)
+        return amount * yaw_axis, amount * tilt_axis
+
+    def _mark_project(self, local: numpy.ndarray, tilt: float | None = None, yaw: float | None = None) -> tuple[numpy.ndarray, numpy.ndarray, numpy.ndarray]:
+        """Project local 208-pt XYZ (y down, +z toward camera) into preview points."""
+        base_yaw, base_tilt = self._mark_basis()
+        yaw = base_yaw if yaw is None else yaw
+        tilt = base_tilt if tilt is None else tilt
+        cy, sy = math.cos(yaw), math.sin(yaw)
+        ct, st = math.cos(tilt), math.sin(tilt)
+        x, y, z = local[:, 0], local[:, 1], local[:, 2]
+        x1 = x * cy + z * sy
+        z1 = -x * sy + z * cy
+        y1 = y * ct - z1 * st
+        z2 = y * st + z1 * ct
+        persp = MARK_FOCAL / numpy.maximum(MARK_FOCAL - z2, 80.0)
+        scale = (self.height / 208.0) * persp
+        centre = numpy.array([self.width / 2, self.height / 2 + 2], numpy.float32)
+        xy = centre + numpy.stack([x1 * scale, y1 * scale], axis=1)
+        return xy.astype(numpy.float32), z2.astype(numpy.float32), persp.astype(numpy.float32)
+
+    def _mark_points(self) -> tuple[numpy.ndarray, numpy.ndarray, numpy.ndarray]:
+        """The check's short start, corner, and long end, in preview points."""
+        local = numpy.array(MARK_CHECK, numpy.float32)
+        xy, _, _ = self._mark_project(local)
+        xy = xy + (self._mark_ring_line().mean(axis=0) - xy.mean(axis=0))
+        return xy[0], xy[1], xy[2]
+
+    def _mark_ring_line(self, steps: int = 64) -> numpy.ndarray:
+        """The ring's centreline as a closed polyline in preview points."""
+        theta = numpy.linspace(0, math.tau, steps, dtype=numpy.float32)
+        local = numpy.stack([MARK_RADIUS * numpy.cos(theta), MARK_RADIUS * numpy.sin(theta), numpy.zeros(steps, numpy.float32)], axis=1)
+        xy, _, _ = self._mark_project(local)
+        return xy
+
+    def _mark_dust(self) -> tuple[numpy.ndarray, numpy.ndarray]:
+        """Where each face mote rests on the seal, and how lit it is there."""
+        along = self.mark_along
+        width = self.mark_width
+        phi = self.mark_phi
+        on_ring = along < MARK_RING
+        on_fill = (along >= MARK_RING) & (along < MARK_RING + MARK_FILL)
+        ring_t = numpy.clip(along / MARK_RING, 0, 1)
+        fill_t = numpy.clip((along - MARK_RING) / MARK_FILL, 0, 1)
+        check_t = numpy.clip((along - MARK_RING - MARK_FILL) / (1 - MARK_RING - MARK_FILL), 0, 1)
+        theta = ring_t * math.tau
+        radial = MARK_RADIUS + MARK_TUBE * numpy.cos(phi)
+        ring = numpy.stack([radial * numpy.cos(theta), radial * numpy.sin(theta), MARK_TUBE * numpy.sin(phi)], axis=1)
+        fill_r = MARK_RADIUS * 0.62 * numpy.sqrt(numpy.clip(fill_t, 0, 1))
+        fill_a = fill_t * math.tau * 7.13
+        fill = numpy.stack([fill_r * numpy.cos(fill_a), fill_r * numpy.sin(fill_a), -3.0 + 2.0 * width], axis=1)
+        short = MARK_CHECK_SHORT
+        on_short = check_t < short
+        u = numpy.where(on_short, check_t / short, (check_t - short) / (1 - short))
+        a = numpy.array(MARK_CHECK[0], numpy.float32)
+        b = numpy.array(MARK_CHECK[1], numpy.float32)
+        c = numpy.array(MARK_CHECK[2], numpy.float32)
+        start = numpy.where(on_short[:, None], a, b)
+        end = numpy.where(on_short[:, None], b, c)
+        tangent = end - start
+        tangent /= numpy.maximum(numpy.linalg.norm(tangent, axis=1, keepdims=True), 1e-3)
+        # Screen-plane normal for stroke thickness, plus a little depth.
+        normal = numpy.stack([-tangent[:, 1], tangent[:, 0], numpy.zeros(len(tangent))], axis=1)
+        check = start + (end - start) * u[:, None] + normal * (numpy.clip(width, -2.4, 2.4) * 3.8)[:, None]
+        check[:, 2] += 8.0 + 0.6 * width
+        ring_xy, ring_depth, ring_persp = self._mark_project(ring)
+        fill_xy, fill_depth, fill_persp = self._mark_project(fill)
+        check_xy, check_depth, check_persp = self._mark_project(check)
+        on_check = ~on_ring & ~on_fill
+        offset = ring_xy[on_ring].mean(axis=0) - check_xy[on_check].mean(axis=0)
+        check_xy = check_xy + offset
+        xy = numpy.where(on_ring[:, None], ring_xy, numpy.where(on_fill[:, None], fill_xy, check_xy))
+        depth = numpy.where(on_ring, ring_depth, numpy.where(on_fill, fill_depth, check_depth))
+        persp = numpy.where(on_ring, ring_persp, numpy.where(on_fill, fill_persp, check_persp))
+        # Torus normals, rotated with the seal, lit by the same key as the face.
+        nx = numpy.cos(phi) * numpy.cos(theta)
+        ny = numpy.cos(phi) * numpy.sin(theta)
+        nz = numpy.sin(phi)
+        yaw, tilt = self._mark_basis()
+        cy, sy = math.cos(yaw), math.sin(yaw)
+        ct, st = math.cos(tilt), math.sin(tilt)
+        nx1 = nx * cy + nz * sy
+        nz1 = -nx * sy + nz * cy
+        ny1 = ny * ct - nz1 * st
+        nz2 = ny * st + nz1 * ct
+        key = numpy.asarray(KEY_LIGHT, numpy.float32)
+        key = key / numpy.linalg.norm(key)
+        shade = 0.10 + 0.72 * numpy.maximum(nx1 * key[0] + ny1 * key[1] + nz2 * key[2], 0) + 0.38 * numpy.maximum(nz2, 0)
+        facing = smoothstep(-6.0, 28.0, depth)
+        mag = self.magnitude[self.face_stars]
+        ring_light = (0.32 + 0.85 * mag) * shade * (0.38 + 0.62 * facing) * (0.85 + 0.25 * persp)
+        fill_light = (0.05 + 0.08 * mag) * (0.55 + 0.45 * facing)
+        check_light = (0.22 + 0.38 * mag) * (0.70 + 0.20 * check_t)
+        light = numpy.where(on_ring, ring_light, numpy.where(on_fill, fill_light, check_light))
+        return xy.astype(numpy.float32), numpy.clip(light, 0, 1.45).astype(numpy.float32)
+
     def _advance_dust(self, elapsed: float, cloud: numpy.ndarray) -> tuple[numpy.ndarray, numpy.ndarray]:
         """Targets and light while the face is dust: condensing, resting, or spreading."""
         if self.face:
             self.formed += elapsed
+            self.marked = max(0.0, self.marked - elapsed * LEAVE_SPEED)
+        elif self.mark:
+            self.formed = max(0.0, self.formed - elapsed * LEAVE_SPEED * 1.7)
+            self.marked += elapsed
         else:
             self.formed = max(0.0, self.formed - elapsed * LEAVE_SPEED)
+            self.marked = max(0.0, self.marked - elapsed * LEAVE_SPEED)
+        if self.mark or self.marked > 0.0:
+            self.mark_spin += elapsed
         # Saturate at the final mote's arrival, so losing a long-held face
         # starts releasing dust immediately instead of waiting seconds.
         self.formed = min(self.formed, float(self.surface["delay"].max()) + ARRIVE_SECONDS)
-        # Once spread back out, the next face condenses afresh.
-        if not self.face and self.formed <= 0.0:
+        self.marked = min(self.marked, MARK_SECONDS + 0.20)
+        # Once spread back out, the next face condenses afresh. A check keeps
+        # the face's rest so the dust can gather there again.
+        if not self.face and not self.mark and self.formed <= 0.0 and self.marked <= 0.0:
             self.vertices = None
 
         target = cloud.copy()
@@ -797,6 +1024,17 @@ class Starlight:
         flare = (4 * eased * (1 - eased)) ** 2 * 0.25 * self.magnitude[stars]
         settled = lit * eased
         light[stars] = self.cloud_light[stars] * NEBULA_LIGHT * (1 - eased) ** 2 + settled + flare
+        mark_arrival = numpy.clip((self.marked - self.mark_delay) / MARK_SECONDS, 0, 1)
+        mark_eased = 1 - (1 - mark_arrival) ** 3
+        if float(mark_eased.max()) > 0.002:
+            check, check_light = self._mark_dust()
+            check_path = check - target[stars]
+            check_side = numpy.stack([-check_path[:, 1], check_path[:, 0]], axis=1)
+            check_side /= numpy.maximum(numpy.linalg.norm(check_side, axis=1, keepdims=True), 1e-3)
+            mark_swirl = numpy.sin(math.pi * mark_eased)[:, None] * check_side * (SWIRL * 0.45) * self.swirl_side[stars, None]
+            target[stars] = target[stars] + check_path * mark_eased[:, None] + mark_swirl
+            mark_flare = (4 * mark_eased * (1 - mark_eased)) ** 2 * 0.22 * self.magnitude[stars]
+            light[stars] = light[stars] * (1 - mark_eased) + check_light * mark_eased + mark_flare
         # The deep field: distant stars, nearly still, shifting against the head.
         ambient = self.ambient_stars
         target[ambient] = self.anchor[ambient] + drift_of(cloud[ambient] - self.anchor[ambient], 0.08) - self.parallax * PARALLAX
@@ -870,10 +1108,10 @@ class Starlight:
         textures = []
         for light in lights:
             energy = (weights * light[lit, None, None])[inside]
-            linear = numpy.bincount(index, energy, minlength=width * height)
+            linear = numpy.bincount(index, energy, minlength=width * height).astype(numpy.float32)
             # A soft exposure shoulder retains highlight structure instead of
             # clipping overlapping grains into opaque white blobs.
-            pixels = numpy.rint(-numpy.expm1(-linear) * 255).astype(numpy.uint8)
+            pixels = shoulder(linear)
             textures.append(Gdk.MemoryTexture.new(width, height, Gdk.MemoryFormat.A8, GLib.Bytes.new(pixels.tobytes()), width))
         return textures, rect(left / scale, top / scale, width / scale, height / scale)
 
@@ -886,16 +1124,76 @@ class Starlight:
         colored.pop()
         return colored.to_node()
 
-    def _glowing(self, snapshot: Gtk.Snapshot, bounds: Graphene.Rect, grains: Gdk.Texture, glowing: Gdk.Texture, tint: tuple[float, float, float], glow: tuple[float, float, float]) -> None:
-        """Grains over a wide faint bloom and a tighter glow of their bright motes."""
-        halo = self._tinted(glowing, bounds, glow)
-        for radius, alpha in ((self.style["bloom"], self.style["bloom_alpha"]), (self.style["glow"], self.style["glow_alpha"])):
-            snapshot.push_opacity(alpha)
-            snapshot.push_blur(radius)
-            snapshot.append_node(halo)
-            snapshot.pop()
-            snapshot.pop()
+    def _glowing(self, snapshot: Gtk.Snapshot, bounds: Graphene.Rect, grains: Gdk.Texture, glowing: tuple[Gdk.Texture, Graphene.Rect] | None, tint: tuple[float, float, float], glow: tuple[float, float, float]) -> None:
+        """Grains over the glow of their bright motes (see ``glow``)."""
+        if glowing is not None:
+            snapshot.append_node(self._tinted(glowing[0], glowing[1], glow))
         snapshot.append_node(self._tinted(grains, bounds, tint))
+
+    def glow(self, light: numpy.ndarray, box: Graphene.Rect | None = None) -> tuple[Gdk.Texture, Graphene.Rect] | None:
+        """Bright motes' wide faint bloom and tighter glow, as one texture.
+
+        Blurred here, at one pixel a point, rather than as GPU blur nodes: two
+        full-scene blurs a frame cost the display more than all the dust.
+        Motes deposit bilinearly, so they glide across pixels rather than
+        stepping. ``box`` limits it to a region, in points.
+        """
+        pad = math.ceil(3 * self.style["bloom"] / 2) + 1
+        left, top = (0, 0) if box is None else (max(0, int(box.get_x()) - pad), max(0, int(box.get_y()) - pad))
+        right = self.width if box is None else min(self.width, math.ceil(box.get_x() + box.get_width()) + pad)
+        bottom = self.height if box is None else min(self.height, math.ceil(box.get_y() + box.get_height()) + pad)
+        width, height = right - left, bottom - top
+        lit = numpy.flatnonzero(light > 0.004)
+        if not len(lit) or width <= 0 or height <= 0:
+            return None
+        x = self.position[lit, 0] - 0.5 - left
+        y = self.position[lit, 1] - 0.5 - top
+        x0, y0 = numpy.floor(x).astype(numpy.int64), numpy.floor(y).astype(numpy.int64)
+        fx, fy = (x - x0).astype(numpy.float32), (y - y0).astype(numpy.float32)
+        energy = light[lit].astype(numpy.float32) * self.style["core"]
+        linear = numpy.zeros(width * height, numpy.float32)
+        for dx, dy, share in ((0, 0, (1 - fx) * (1 - fy)), (1, 0, fx * (1 - fy)), (0, 1, (1 - fx) * fy), (1, 1, fx * fy)):
+            columns, rows = x0 + dx, y0 + dy
+            inside = (columns >= 0) & (columns < width) & (rows >= 0) & (rows < height)
+            linear += numpy.bincount(rows[inside] * width + columns[inside], (energy * share)[inside], minlength=width * height).astype(numpy.float32)
+        base = -numpy.expm1(-linear.reshape(height, width))
+        # GSK blurs take a radius; their Gaussian's sigma is half of it.
+        halo = self.style["bloom_alpha"] * gaussian_blur(base, self.style["bloom"] / 2)
+        halo += self.style["glow_alpha"] * gaussian_blur(base, self.style["glow"] / 2)
+        pixels = numpy.rint(numpy.clip(halo, 0, 1) * 255).astype(numpy.uint8)
+        texture = Gdk.MemoryTexture.new(width, height, Gdk.MemoryFormat.A8, GLib.Bytes.new(pixels.tobytes()), width)
+        return texture, rect(left, top, width, height)
+
+    def _hairlines(self, snapshot: Gtk.Snapshot, lines: list[tuple[numpy.ndarray, numpy.ndarray]], color: tuple[float, float, float], opacity: float) -> None:
+        """Polylines as a round stroke, one path per step of opacity."""
+        if opacity <= 0.01:
+            return
+        drawn = Gtk.Snapshot()
+        steps: dict[int, Gsk.PathBuilder] = {}
+        for points, alphas in lines:
+            for index in range(len(points) - 1):
+                step = round(float(alphas[index] + alphas[index + 1]) / 2 * 12)
+                if step <= 0:
+                    continue
+                builder = steps.setdefault(step, Gsk.PathBuilder.new())
+                builder.move_to(float(points[index][0]), float(points[index][1]))
+                builder.line_to(float(points[index + 1][0]), float(points[index + 1][1]))
+        stroke = Gsk.Stroke.new(1.0)
+        stroke.set_line_cap(Gsk.LineCap.ROUND)
+        stroke.set_line_join(Gsk.LineJoin.ROUND)
+        for step, builder in steps.items():
+            drawn.append_stroke(builder.to_path(), stroke, Gdk.RGBA(red=color[0], green=color[1], blue=color[2], alpha=min(1.0, step / 12)))
+        node = drawn.to_node()
+        if node is None:
+            return
+        snapshot.push_opacity(opacity)
+        snapshot.push_opacity(0.8)
+        snapshot.push_blur(2.0)
+        snapshot.append_node(node)
+        snapshot.pop()
+        snapshot.pop()
+        snapshot.append_node(node)
+        snapshot.pop()
 
     def _disc(self, snapshot: Gtk.Snapshot, x: float, y: float, width: float, height: float, alpha: float, color: tuple[float, float, float]) -> None:
         if alpha <= 0.002:
@@ -904,21 +1202,66 @@ class Starlight:
         snapshot.append_node(self._tinted(self.disc, rect(x - width / 2, y - height / 2, width, height), color))
         snapshot.pop()
 
+    def _source_centre(self) -> tuple[float, float]:
+        """The source sits behind the head, a little above its centre.
+
+        Drawn first, so the face occludes the core and light leaks around the
+        crown rather than through the features.
+        """
+        if self.vertices is not None:
+            low, high = self.vertices[:468, :2].min(axis=0), self.vertices[:468, :2].max(axis=0)
+            centre = (low + high) / 2
+            height = float(high[1] - low[1])
+            return (
+                float(centre[0]) - float(self.parallax[0]) * PARALLAX * 0.5,
+                float(centre[1]) - 0.22 * height - float(self.parallax[1]) * PARALLAX * 0.35,
+            )
+        return (
+            self.width / 2 - float(self.parallax[0]) * PARALLAX * 0.5,
+            self.height / 2 - 10,
+        )
+
+    def _source_scale(self) -> float:
+        """Corona size follows the face so it wraps this head, not a fixed oval."""
+        if self.vertices is None:
+            return 1.0
+        height = float(numpy.ptp(self.vertices[:468, 1]))
+        return max(0.55, min(1.35, height / (self.height / Framing.ZOOM)))
+
+    def _source(self, snapshot: Gtk.Snapshot, look: Look, presence: float, breath: float) -> None:
+        """The concentrated glow behind the head: core, corona, wash."""
+        x, y = self._source_centre()
+        scale = self._source_scale()
+        amount = (0.40 + 0.60 * self.scene) * (0.88 + 0.12 * breath) * presence
+        for width, height, alpha in SOURCE:
+            self._disc(snapshot, x, y, width * scale, height * scale, alpha * amount, look.glow)
+
     def _haze(self, device_scale: float) -> Gdk.Texture:
-        """The haze motes orbiting the head, splatted for blurring."""
+        """The haze motes orbiting the source, splatted at half scale and blurred out of focus."""
         angle = self.haze_angle + self.haze_speed * self.clock
         breathe = 1 + 0.04 * math.sin(self.clock * math.tau / BREATH_SECONDS)
-        centre = numpy.array([self.width / 2, self.height / 2 - 6]) - self.parallax * PARALLAX * 0.5
+        centre = numpy.array(self._source_centre(), numpy.float32)
         positions = centre + numpy.stack([numpy.cos(angle) * 78, numpy.sin(angle) * 96], axis=1) * (self.haze_radius * breathe)[:, None]
+        # Brighter near the core, still present at the edge of the corona.
+        dist = numpy.hypot(positions[:, 0] - centre[0], positions[:, 1] - centre[1])
+        falloff = 0.40 + 0.60 * numpy.clip(1 - dist / 130.0, 0, 1) ** 1.4
         saved = self.position
         self.position = positions.astype(numpy.float32)
         try:
-            return self.splat(0.5, self.haze_light, minimum_scale=0.5)[0]
+            scale = 0.5
+            width, height = math.ceil(self.width * scale), math.ceil(self.height * scale)
+            x = numpy.clip((self.position[:, 0] * scale).astype(numpy.int64), 0, width - 1)
+            y = numpy.clip((self.position[:, 1] * scale).astype(numpy.int64), 0, height - 1)
+            linear = numpy.bincount(y * width + x, self.haze_light * falloff * self.style["core"], minlength=width * height).astype(numpy.float32)
+            # A 2.5 pt blur radius: sigma 1.25 pt, at half scale.
+            blurred = gaussian_blur(linear.reshape(height, width), 1.25 * scale * 2)
+            pixels = shoulder(numpy.ascontiguousarray(blurred).ravel())
+            return Gdk.MemoryTexture.new(width, height, Gdk.MemoryFormat.A8, GLib.Bytes.new(pixels.tobytes()), width)
         finally:
             self.position = saved
 
     def stars(self, device_scale: float, look: Look) -> Gsk.RenderNode | None:
-        """The scene, back to front: back light, haze, dust, guide, bokeh."""
+        """The scene, back to front: source, haze, dust, guide, bokeh."""
         if not self.visible:
             return None
         width, height = self.width, self.height
@@ -927,18 +1270,20 @@ class Starlight:
         snapshot = Gtk.Snapshot()
         breath = 0.5 + 0.5 * math.sin(self.clock * math.tau / BREATH_SECONDS)
 
-        # The back light: a soft glow behind the head that separates it from the dark.
-        halo_width, halo_height, halo_alpha = HALO
-        self._disc(
-            snapshot, width / 2 - self.parallax[0] * PARALLAX * 0.5, height / 2 - 10,
-            halo_width, halo_height, halo_alpha * (0.35 + 0.65 * self.scene) * (0.85 + 0.15 * breath) * presence, look.glow,
-        )
+        # The source: a glow behind the head that the star dust is lit by.
+        self._source(snapshot, look, presence, breath)
         # Haze lit by it: motes softened out of focus.
         snapshot.push_opacity(0.38 * (0.4 + 0.6 * self.scene) * presence)
-        snapshot.push_blur(2.5)
         snapshot.append_node(self._tinted(self._haze(device_scale), bounds, look.glow))
         snapshot.pop()
-        snapshot.pop()
+
+        mark_amount = min(1.0, self.marked / 0.16) * presence
+        if mark_amount > 0.02:
+            ring = self._mark_ring_line()
+            cx, cy = float(ring[:, 0].mean()), float(ring[:, 1].mean())
+            rx = float(numpy.ptp(ring[:, 0])) * 0.72
+            ry = float(numpy.ptp(ring[:, 1])) * 0.72
+            self._disc(snapshot, cx, cy, rx, ry, 0.10 * mark_amount, look.glow)
 
         # The dust: bright motes spread into a wide faint bloom and a tighter
         # glow, under every grain itself. Only bright motes glow, so faint dust
@@ -952,47 +1297,42 @@ class Starlight:
             guide[self.arrow_stars] = True
             dust = numpy.where(guide, 0, self.light)
             led = numpy.where(guide, self.light, 0)
-            # Two splats: the guide's pass only touches its own few hundred motes.
-            grains, glowing = self.splat(device_scale, dust, dust * self.glow_share)
-            guided = self.splat_cropped(device_scale, led, led * self.glow_share)
+            # The guide's pass only touches its own few hundred motes.
+            (grains,) = self.splat(device_scale, dust)
+            glowing = self.glow(dust * self.glow_share)
+            guided = self.splat_cropped(device_scale, led)
+            if guided is not None:
+                (guide_grains,), guide_bounds = guided
+                guide_glowing = self.glow(led * self.glow_share, guide_bounds)
             guide_glow = tuple(mix(look.glow[index], look.guide[index], self.arrow_amount) for index in range(3))
             guide_tint = tuple(mix(look.tint[index], mix(look.guide[index], 1.0, GUIDE_LIFT), self.arrow_amount) for index in range(3))
         else:
-            grains, glowing = self.splat(device_scale, self.light, self.light * self.glow_share)
+            (grains,) = self.splat(device_scale, self.light)
+            glowing = self.glow(self.light * self.glow_share)
         self._glowing(snapshot, bounds, grains, glowing, look.tint, look.glow)
+
+        # The seal's hairlines: the ring first, then the check as it writes.
+        if mark_amount > 0.02:
+            ring = self._mark_ring_line()
+            self._hairlines(snapshot, [(ring, numpy.full(len(ring), 0.22, numpy.float32))], look.tint, mark_amount * 0.35)
+            check_amount = min(1.0, max(0.0, (self.marked - 0.10) / 0.16)) * presence
+            if check_amount > 0.04:
+                start, corner, end = self._mark_points()
+                self._hairlines(
+                    snapshot,
+                    [
+                        (numpy.stack([start, corner]), numpy.full(2, 0.28, numpy.float32)),
+                        (numpy.stack([corner, end]), numpy.full(2, 0.36, numpy.float32)),
+                    ],
+                    look.tint,
+                    check_amount,
+                )
 
         # The guide's hairlines: precise geometry under its dust, the chevron
         # the brightest point of the scene.
         if amount > 0.01 and self.guide_lines:
-            lines = Gtk.Snapshot()
-            # Segments share one path per step of opacity: a fading line in a
-            # handful of strokes rather than one per segment.
-            steps: dict[int, Gsk.PathBuilder] = {}
-            for points, alphas in self.guide_lines:
-                for index in range(len(points) - 1):
-                    step = round(float(alphas[index] + alphas[index + 1]) / 2 * 12)
-                    if step <= 0:
-                        continue
-                    builder = steps.setdefault(step, Gsk.PathBuilder.new())
-                    builder.move_to(float(points[index][0]), float(points[index][1]))
-                    builder.line_to(float(points[index + 1][0]), float(points[index + 1][1]))
-            stroke = Gsk.Stroke.new(1.0)
-            stroke.set_line_cap(Gsk.LineCap.ROUND)
-            stroke.set_line_join(Gsk.LineJoin.ROUND)
-            for step, builder in steps.items():
-                lines.append_stroke(builder.to_path(), stroke, Gdk.RGBA(red=guide_tint[0], green=guide_tint[1], blue=guide_tint[2], alpha=min(1.0, step / 12)))
-            node = lines.to_node()
-            if node is not None:
-                snapshot.push_opacity(amount)
-                snapshot.push_opacity(0.8)
-                snapshot.push_blur(2.0)
-                snapshot.append_node(node)
-                snapshot.pop()
-                snapshot.pop()
-                snapshot.append_node(node)
-                snapshot.pop()
+            self._hairlines(snapshot, self.guide_lines, guide_tint, amount)
         if amount > 0.01 and guided is not None:
-            (guide_grains, guide_glowing), guide_bounds = guided
             self._glowing(snapshot, guide_bounds, guide_grains, guide_glowing, guide_tint, guide_glow)
 
         # Bokeh: a few large motes out of focus, drifting past the lens.
@@ -1009,3 +1349,88 @@ class Starlight:
         stars = self.stars(device_scale, look)
         if stars is not None:
             snapshot.append_node(stars)
+
+
+class StarField:
+    """A ``Starlight`` simulated and drawn on its own thread.
+
+    Stepping 8,000 motes and splatting them costs several milliseconds a
+    frame, more than a 165 Hz display's whole frame, so on the GTK thread it
+    held the island to about 20 frames a second. Here the GTK thread only
+    queues what changed and appends the newest finished scene; the worker
+    steps the dust on its own clock and records the next one meanwhile.
+    numpy releases the interpreter lock for its large operations, so the two
+    run side by side. The scene shown is at most one step old.
+
+    Only the worker touches the ``Starlight``. Everything the GTK thread says
+    is queued and applied in order before the next step.
+    """
+
+    def __init__(self, field: Starlight) -> None:
+        self.field = field
+        self.commands: deque[tuple[str, tuple]] = deque()
+        self.wake = threading.Event()
+        self.lock = threading.Lock()
+        self.node: Gsk.RenderNode | None = None
+        self.view: tuple[float, Look] = (1.0, Look())
+        self.thread: threading.Thread | None = None
+        self.last: float | None = None
+
+    # The GTK thread ------------------------------------------------------------
+
+    def submit(self, pixels: bytes, face: bool = True) -> None:
+        self.commands.append(("submit", (pixels, face)))
+
+    def submit_mesh(self, points: numpy.ndarray, mark: bool = False, axis: str = "") -> None:
+        self.commands.append(("submit_mesh", (points, mark, axis)))
+
+    def set_arrow(self, name: str) -> None:
+        self.commands.append(("set_arrow", (name,)))
+
+    def fade_out(self) -> None:
+        self.commands.append(("fade_out", ()))
+
+    def reset(self) -> None:
+        self.commands.clear()
+        self.commands.append(("reset", ()))
+        with self.lock:
+            self.node = None
+        self.last = None
+
+    def advance(self, _elapsed: float) -> None:
+        """Ask for the next scene; the worker keeps its own clock."""
+        if self.thread is None:
+            self.thread = threading.Thread(target=self._run, name="facegate-starlight", daemon=True)
+            self.thread.start()
+        self.wake.set()
+
+    def snapshot(self, snapshot: Gtk.Snapshot, device_scale: float, look: Look) -> None:
+        self.view = (device_scale, replace(look))
+        with self.lock:
+            node = self.node
+        if node is not None:
+            snapshot.append_node(node)
+
+    def _disc(self, *args, **kwargs) -> None:
+        # Reads only the disc texture, which never changes.
+        self.field._disc(*args, **kwargs)
+
+    # The worker -----------------------------------------------------------------
+
+    def _run(self) -> None:
+        field = self.field
+        while True:
+            self.wake.wait()
+            self.wake.clear()
+            while self.commands:
+                name, args = self.commands.popleft()
+                getattr(field, name)(*args)
+            now = time.monotonic()
+            if self.last is None:
+                self.last = now
+            elapsed, self.last = now - self.last, now
+            field.advance(elapsed)
+            scale, look = self.view
+            node = field.stars(scale, look)
+            with self.lock:
+                self.node = node

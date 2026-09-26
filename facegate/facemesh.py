@@ -155,11 +155,11 @@ class Framing:
 
     The zoom is fixed for each camera so that the face's size in the preview is
     its size as Gaze measures it (its box's share of the frame's short side):
-    a face at the distance Gaze likes best fills 1 / ZOOM of the preview's
-    height, too far is small and too close spills over. Coming closer or
-    moving back grows or shrinks the face as in a mirror, and "Move a little
-    closer" only ever shows over a face that looks small. Only the centre
-    follows the face.
+    a face just close enough fills 1 / ZOOM of the preview's height, exactly
+    the "closer" guide's destination outline, so coming closer fills the
+    outline as the instruction ends. Further away is smaller, too close spills
+    over. Coming closer or moving back grows or shrinks the face as in a
+    mirror. Only the centre follows the face.
 
     Gaze switches between its colour and IR cameras at every pose, and they
     differ in resolution and field of view, so the same face lands on other
@@ -168,13 +168,14 @@ class Framing:
     then eases to the new camera's own zoom.
     """
 
-    # At Gaze's ideal distance the preview shows the face this many times
-    # over, so the brow and jaw clear the rounded corners.
+    # Just close enough, the preview shows the face this many times over, so
+    # the brow and jaw clear the rounded corners.
     ZOOM = 1.35
-    # The ideal: the middle of the band FaceGate coaches within (guidance.py).
-    IDEAL_SHARE = math.sqrt(FACE_SIZE[0] * SIZE_MARGIN[0] * FACE_SIZE[1] * SIZE_MARGIN[1])
+    # Just close enough: a little past where FaceGate stops asking to come
+    # closer (guidance.py), so the face settles inside Gaze's limits.
+    TARGET_SHARE = FACE_SIZE[0] * SIZE_MARGIN[0] * 1.1
     # Preview height filled per share of the camera's short side.
-    GAIN = 1 / (ZOOM * IDEAL_SHARE)
+    GAIN = 1 / (ZOOM * TARGET_SHARE)
     # How much of the preview's height the face may fill, from far to near.
     # Past these the zoom gives way, so the face neither vanishes nor is lost.
     FILL = (0.25, 1.15)

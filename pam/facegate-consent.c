@@ -44,7 +44,11 @@
 #define FACEGATE_SOCKET "facegate.sock"
 #define FACEGATE_MAX_MESSAGE 4096
 #define FACEGATE_CONSENT_SECONDS 12
+#define FACEGATE_PASSWORD_SECONDS 60
 #define FACEGATE_PASSWORD_ONLY_DATA "facegate.password-only"
+#ifndef PAM_MAX_RESP_SIZE
+#define PAM_MAX_RESP_SIZE 512
+#endif
 
 static char password_only_marker;
 
@@ -257,6 +261,85 @@ static void notify_scanning(uid_t uid, const char *service)
     close(fd);
 }
 
+static bool extract_json_string(const char *json, const char *key, char *out, size_t size)
+{
+    char needle[40];
+    const char *cursor;
+    size_t used = 0;
+
+    if (snprintf(needle, sizeof(needle), "\"%s\":\"", key) >= (int)sizeof(needle))
+        return false;
+    cursor = strstr(json, needle);
+    if (cursor == NULL)
+        return false;
+    cursor += strlen(needle);
+    while (*cursor != '\0' && used + 1 < size) {
+        if (*cursor == '\\' && cursor[1] != '\0') {
+            cursor++;
+            if (*cursor == 'n')
+                out[used++] = '\n';
+            else if (*cursor == 't')
+                out[used++] = '\t';
+            else
+                out[used++] = *cursor;
+            cursor++;
+            continue;
+        }
+        if (*cursor == '"') {
+            out[used] = '\0';
+            return true;
+        }
+        out[used++] = *cursor++;
+    }
+    return false;
+}
+
+static bool password_from_hud(uid_t uid, const char *service, const char *username,
+                              char *password, size_t size)
+{
+    char id[64] = {0};
+    char service_token[64] = {0};
+    char username_token[64] = {0};
+    char message[512];
+    char response[FACEGATE_MAX_MESSAGE + 1];
+    char expected_id[96];
+    ssize_t received;
+    int length;
+    int fd;
+
+    request_id(id, sizeof(id));
+    safe_token(service, service_token, sizeof(service_token));
+    safe_token(username, username_token, sizeof(username_token));
+    length = snprintf(message, sizeof(message),
+                      "{\"id\":\"%s\",\"phase\":\"password\","
+                      "\"service\":\"%s\",\"username\":\"%s\","
+                      "\"timeout_ms\":%d,\"pid\":%ld}\n",
+                      id, service_token, username_token,
+                      FACEGATE_PASSWORD_SECONDS * 1000, (long)getpid());
+    if (length <= 0 || length >= (int)sizeof(message))
+        return false;
+    fd = connect_hud(uid, FACEGATE_PASSWORD_SECONDS + 2);
+    if (fd < 0)
+        return false;
+    if (!send_all(fd, message, (size_t)length)) {
+        close(fd);
+        return false;
+    }
+    received = recv(fd, response, FACEGATE_MAX_MESSAGE, 0);
+    close(fd);
+    if (received <= 0)
+        return false;
+    response[received] = '\0';
+    if (snprintf(expected_id, sizeof(expected_id), "\"id\":\"%s\"", id) >=
+        (int)sizeof(expected_id))
+        return false;
+    if (strstr(response, expected_id) == NULL)
+        return false;
+    if (strstr(response, "\"password\":null") != NULL)
+        return false;
+    return extract_json_string(response, "password", password, size);
+}
+
 static void notify_hud(uid_t uid, const char *phase, const char *result)
 {
     char message[192];
@@ -317,10 +400,19 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc,
     const uid_t hud = hud_uid(argc, argv, uid);
 
     if (strcmp(mode, "notify-failure") == 0) {
+        char password[PAM_MAX_RESP_SIZE];
+
         if (pam_get_data(pamh, FACEGATE_PASSWORD_ONLY_DATA,
                          &password_only_data) != PAM_SUCCESS ||
             password_only_data != &password_only_marker)
             notify_hud(hud, "result", "failure");
+        /* Polkit collects the password through its agent session and the
+         * greeter through its own field. sudo has nowhere else to type, so
+         * the island takes it and pam_unix (try_first_pass) checks it. */
+        if (strcmp(service, "sudo") == 0 && hud == uid &&
+            password_from_hud(uid, service, username, password, sizeof(password)))
+            (void)pam_set_item(pamh, PAM_AUTHTOK, password);
+        explicit_bzero(password, sizeof(password));
         return PAM_IGNORE;
     }
     if (strcmp(mode, "notify-success") == 0) {

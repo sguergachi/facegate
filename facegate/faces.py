@@ -119,7 +119,10 @@ def summarize(
             "rgb": bool(rgb),
             "ir": bool(ir),
         }
-        for name, samples, rgb, ir in sorted(records, key=lambda record: record[0].casefold())
+        for name, samples, rgb, ir in sorted(
+            records,
+            key=lambda record: (-int(added.get(record[0], 0)), record[0].casefold()),
+        )
     ]
 
 
@@ -201,6 +204,16 @@ def _decode_rgb(jpeg: bytes, width: int | None = None, height: int | None = None
     return rows[:, : columns * channels].reshape(rows_count, columns, channels)[:, :, :3]
 
 
+def is_colour_preview(rgb: numpy.ndarray) -> bool:
+    """Whether a decoded preview is a colour frame, not a grey IR JPEG.
+
+    Gaze sends IR as greyscale JPEG (channels agree up to rounding) and colour
+    as real RGB. Colour is the live preview camera; IR is a burst between poses.
+    """
+    spread = numpy.abs(rgb[:, :, 0] - rgb[:, :, 1]).mean() + numpy.abs(rgb[:, :, 1] - rgb[:, :, 2]).mean()
+    return float(spread) > COLOUR_SPREAD
+
+
 def _jpeg_to_greyscale(jpeg: bytes, width: int, height: int) -> bytes:
     """Decode Gaze's preview into the island's luma, the way IR sees a face.
 
@@ -215,9 +228,8 @@ def _jpeg_to_greyscale(jpeg: bytes, width: int, height: int) -> bytes:
     live camera.
     """
     rgb = _decode_rgb(jpeg, width, height).astype(numpy.int32)
-    colour = numpy.abs(rgb[:, :, 0] - rgb[:, :, 1]).mean() + numpy.abs(rgb[:, :, 1] - rgb[:, :, 2]).mean()
     luma = (77 * rgb[:, :, 0] + 150 * rgb[:, :, 1] + 29 * rgb[:, :, 2]) >> 8
-    if colour > COLOUR_SPREAD:
+    if is_colour_preview(rgb):
         luma = (255 - luma) * _spotlight(width, height)
     return luma.astype(numpy.uint8).tobytes()
 
@@ -411,6 +423,10 @@ class GazeClient:
         guide = Guide() if mesh is not None else None
         face_seen = time.monotonic()
         face_shown = False
+        # Colour is the live camera the dust condenses on. Until a colour
+        # frame appears, IR is the main camera (IR-only setups). After that,
+        # IR bursts between poses release the dust; it gathers again on colour.
+        seen_colour = False
         pose_hint = ""
         shown_hint = ""
 
@@ -455,16 +471,22 @@ class GazeClient:
                 drain_main_context(context)
                 preview, latest_preview[0] = latest_preview[0], None
                 if preview is not None and mesh is not None:
+                    main = True
                     try:
                         jpeg = preview.get_child_value(0).get_data_as_bytes().get_data()
                         image = _decode_rgb(jpeg)
                         source = (image.shape[1], image.shape[0])
                         points = mesh.find(image)
+                        if is_colour_preview(image):
+                            seen_colour = True
+                            main = True
+                        else:
+                            main = not seen_colour
                     except Exception:  # noqa: BLE001 - one bad frame must not end enrollment
                         points, source = None, None
                     guide.pose(points, source)
                     now = time.monotonic()
-                    if points is not None:
+                    if points is not None and main:
                         face_seen, face_shown = now, True
                         placed = framing.place(points, source)
                         yield {
@@ -474,10 +496,15 @@ class GazeClient:
                             "h": height,
                             "points": base64.b64encode(placed.tobytes()).decode("ascii"),
                         }
-                    elif face_shown and now - face_seen > MESH_HOLD_SECONDS:
+                    elif face_shown and (not main or now - face_seen > MESH_HOLD_SECONDS):
+                        # IR after colour: the dust writes a check for the pose
+                        # just captured. A missing face on the main camera still
+                        # waits, so one bad frame does not.
                         face_shown = False
-                        framing.reset()
-                        yield {"event": "mesh", "w": width, "h": height, "points": ""}
+                        if main:
+                            framing.reset()
+                        axis = guide.mark_pose() if not main and guide is not None else ""
+                        yield {"event": "mesh", "w": width, "h": height, "points": "", "mark": not main, "axis": axis}
                 elif preview is not None:
                     try:
                         jpeg = preview.get_child_value(0).get_data_as_bytes().get_data()

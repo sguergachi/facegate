@@ -38,6 +38,14 @@ class FaceRecordTests(unittest.TestCase):
         )
         self.assertNotIn("embedding", json.dumps(result))
 
+    def test_faces_are_newest_first(self):
+        records = [("Alpha", 1, True, True), ("Zulu", 1, True, True), ("Mid", 1, True, True)]
+        result = faces.summarize(records, {"Alpha": 100, "Zulu": 300, "Mid": 200})
+        self.assertEqual([face["id"] for face in result], ["Zulu", "Mid", "Alpha"])
+        # Missing times sit at the bottom; equal times keep a stable name order.
+        result = faces.summarize(records, {"Zulu": 50})
+        self.assertEqual([face["id"] for face in result], ["Zulu", "Alpha", "Mid"])
+
     def test_display_timestamps_are_private_and_atomic(self):
         faces.save_metadata({"Face": 1_700_000_000}, self.metadata)
         self.assertEqual(faces.load_metadata(self.metadata), {"Face": 1_700_000_000})
@@ -161,6 +169,14 @@ class HelperTests(unittest.TestCase):
         self.helper.handle({"cmd": "enroll", "width": 4000, "height": 4000})
         self.assertEqual(self.events()[0]["event"], "error")
 
+    def test_serve_keeps_the_process_for_later_commands(self):
+        commands = iter([{"cmd": "list"}, {"cmd": "list"}, None])
+        self.helper.commands.read = lambda timeout: next(commands, None)
+        self.client.records = [("Face", 5, True, True)]
+        self.assertEqual(self.helper.run([]), 0)
+        listed = [event for event in self.events() if event.get("event") == "faces"]
+        self.assertEqual(len(listed), 2)
+
     def test_command_line_runs_one_operation(self):
         self.client.records = [("Face", 5, True, True)]
         self.assertEqual(self.helper.run(["list"]), 0)
@@ -210,6 +226,12 @@ class PreviewTests(unittest.TestCase):
         pixbuf = GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB, False, 8, width, height)
         pixbuf.fill(rgba)
         return bytes(pixbuf.save_to_bufferv("jpeg", [], [])[1])
+
+    def test_grey_jpegs_are_infrared_and_rgb_jpegs_are_colour(self):
+        colour = faces._decode_rgb(self.jpeg())
+        grey = faces._decode_rgb(self.jpeg(rgba=0x303030FF))
+        self.assertTrue(faces.is_colour_preview(colour))
+        self.assertFalse(faces.is_colour_preview(grey))
 
     def test_an_ir_preview_keeps_its_brightness(self):
         grey = faces._jpeg_to_greyscale(self.jpeg(rgba=0x303030FF), PREVIEW_WIDTH, PREVIEW_HEIGHT)
@@ -378,6 +400,7 @@ class GuidanceTests(unittest.TestCase):
         guide = self.guide()
         guide.prompt("look-straight")
         guide.pose(self.face(yaw=0.3))
+        self.assertEqual(guide.pose_name, "straight")
         self.assertEqual(guide.hint(), "Turn a little to the left, to face the camera.")
         guide.pose(self.face())
         self.assertIsNone(guide.hint())  # waits to be sure
@@ -385,9 +408,14 @@ class GuidanceTests(unittest.TestCase):
         self.assertEqual(guide.hint(), "Hold still…")
         guide.prompt("captured")
         self.assertEqual(guide.hint(), "Got it.")
+        self.assertEqual(guide.completed_pose, "straight")
         self.assertEqual(guide.baseline, (0.0, 0.5))
         self.now += 1
         guide.prompt("look-left")
+        self.assertEqual(guide.completed_pose, "straight")
+        self.assertEqual(guide.mark_pose(), "straight")
+        self.now += 3
+        self.assertEqual(guide.mark_pose(), "left")
         guide.pose(None)
         guide.hint()
         self.now += 0.5
@@ -466,6 +494,79 @@ class MeshPreviewTests(unittest.TestCase):
         self.assertLess(points[0, 2], points[2, 2])
         self.assertAlmostEqual(float(points[1, 2]), scale, places=5)
         self.assertEqual(meshes[0]["space"], "xyz")
+
+    def test_ir_bursts_release_the_dust_and_colour_gathers_it_again(self):
+        import numpy
+
+        mesh = numpy.array([[100, 100, 0.0], [200, 300, 1.0], [150, 200, 0.5]], numpy.float32)
+        colour = PreviewTests.jpeg()
+        infrared = PreviewTests.jpeg(rgba=0x303030FF)
+        frames = [colour, infrared, colour]
+
+        class SwitchBus(ScriptedBus):
+            def __init__(self):
+                super().__init__([])
+                self.preview = None
+
+            def signal_subscribe(self, sender, interface, member, path, arg0, flags, callback):
+                handle = super().signal_subscribe(sender, interface, member, path, arg0, flags, callback)
+                if member == "PreviewFrame":
+                    self.preview = callback
+                return handle
+
+            def push(self):
+                if not frames:
+                    return
+                jpeg = frames.pop(0)
+                self.preview(None, "", "", "", "PreviewFrame", GLib.Variant("(ay)", (jpeg,)))
+                if not frames:
+                    self.handlers["EnrollStatus"](
+                        None, "", "", "", "EnrollStatus", enroll_status("completed", done=True)[1]
+                    )
+
+            def call_sync(self, _service, _path, _interface, method, *_rest):
+                if method == "EnrollStart":
+                    self.push()
+                return GLib.Variant("()", ())
+
+        bus = SwitchBus()
+        sleeps = []
+
+        def sleep(_seconds):
+            sleeps.append(_seconds)
+            bus.push()
+
+        original = faces.time.sleep
+        faces.time.sleep = sleep
+        try:
+            events = list(
+                faces.GazeClient(bus=bus).enroll(
+                    "someone", "Face", lambda: False, mesh=self.FakeMesh([mesh, mesh, mesh])
+                )
+            )
+        finally:
+            faces.time.sleep = original
+        meshes = [event for event in events if event["event"] == "mesh"]
+        self.assertEqual(len(meshes), 3)
+        self.assertTrue(meshes[0]["points"])
+        self.assertEqual(meshes[1]["points"], "")
+        self.assertTrue(meshes[1].get("mark"))
+        self.assertTrue(meshes[2]["points"])
+        self.assertFalse(meshes[2].get("mark"))
+
+    def test_infrared_only_enrollment_keeps_the_face_as_dust(self):
+        import numpy
+
+        mesh = numpy.array([[100, 100, 0.0], [200, 300, 1.0], [150, 200, 0.5]], numpy.float32)
+        infrared = PreviewTests.jpeg(rgba=0x303030FF)
+        bus = ScriptedBus([
+            ("PreviewFrame", GLib.Variant("(ay)", (infrared,))),
+            enroll_status("completed", done=True),
+        ])
+        events = list(faces.GazeClient(bus=bus).enroll("someone", "Face", lambda: False, mesh=self.FakeMesh([mesh])))
+        meshes = [event for event in events if event["event"] == "mesh"]
+        self.assertEqual(len(meshes), 1)
+        self.assertTrue(meshes[0]["points"])
 
     def test_a_mirrored_eye_pair_is_not_a_face_upside_down(self):
         import math
@@ -595,17 +696,18 @@ class CoachingArrowTests(unittest.TestCase):
             # A face whose box spans ``share`` of a 640 × 480 frame's short side.
             return numpy.array([[320, 240 - 240 * share, 0.5], [340, 240, 1.0], [300, 240 + 240 * share, 0.2]], numpy.float32)
 
-        # At Gaze's ideal distance, the face fills 1 / ZOOM of the height.
-        self.assertAlmostEqual(height(framing.place(face(Framing.IDEAL_SHARE), (640, 480))), PREVIEW_HEIGHT / Framing.ZOOM, delta=0.5)
+        # Just close enough, the face fills 1 / ZOOM of the height: the
+        # "closer" guide's destination outline.
+        self.assertAlmostEqual(height(framing.place(face(Framing.TARGET_SHARE), (640, 480))), PREVIEW_HEIGHT / Framing.ZOOM, delta=0.5)
         # Coming closer or moving back grows or shrinks it, as in a mirror.
-        for share in (0.3, 0.55, 0.3):
+        for share in (0.2, 0.4, 0.2):
             for _ in range(20):
                 placed = framing.place(face(share), (640, 480))
             self.assertAlmostEqual(height(placed), PREVIEW_HEIGHT * Framing.GAIN * share, delta=0.5)
-        # Where "Move a little closer" begins, the face looks small.
+        # Where "Move a little closer" ends, the face all but fills that outline.
         from facegate.guidance import FACE_SIZE, SIZE_MARGIN
 
-        self.assertLess(Framing.GAIN * FACE_SIZE[0] * SIZE_MARGIN[0], 0.5)
+        self.assertAlmostEqual(Framing.GAIN * FACE_SIZE[0] * SIZE_MARGIN[0] * Framing.ZOOM, 1 / 1.1)
         # Far past the limits, the zoom gives way rather than lose the face.
         for _ in range(40):
             huge = framing.place(face(1.5), (640, 480))

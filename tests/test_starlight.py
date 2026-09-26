@@ -4,7 +4,7 @@ import unittest
 import numpy as np
 
 from facegate.edge_hud import STAR_STYLE
-from facegate.starlight import Starlight, load_triangles, DISTANCE_SECONDS
+from facegate.starlight import Starlight, load_triangles, DISTANCE_SECONDS, SOURCE
 
 
 class StarlightMotionTests(unittest.TestCase):
@@ -31,6 +31,130 @@ class StarlightMotionTests(unittest.TestCase):
             stars.advance(1 / 60)
         self.assertIsNone(stars.vertices)
         self.assertTrue(np.isfinite(stars.position).all())
+
+    def test_a_released_face_condenses_again_when_the_mesh_returns(self):
+        stars = Starlight(312, 208, STAR_STYLE)
+        points = np.concatenate([
+            np.linspace([120, 70, 2], [190, 150, 8], 468),
+            np.tile([156, 104, 4], (10, 1)),
+        ]).astype(np.float32)
+        stars.submit_mesh(points)
+        for _ in range(180):
+            stars.advance(1 / 60)
+        stars.submit_mesh(np.empty((0, 3)))
+        for _ in range(30):
+            stars.advance(1 / 60)
+        self.assertFalse(stars.face)
+        self.assertGreater(stars.formed, 0.0)
+        stars.submit_mesh(points)
+        self.assertTrue(stars.face)
+        before = stars.formed
+        for _ in range(30):
+            stars.advance(1 / 60)
+        self.assertGreater(stars.formed, before)
+
+    def test_phase_dust_writes_a_checkmark_then_the_face_returns(self):
+        from facegate.starlight import MARK_RING, MARK_FILL, load_surface
+
+        stars = Starlight(312, 208, STAR_STYLE)
+        points = load_surface()
+        points = points * 8
+        points[:, :2] += [156, 104]
+        points = np.concatenate([points, np.tile(points[1], (10, 1))])
+        stars.submit_mesh(points)
+        for _ in range(180):
+            stars.advance(1 / 60)
+        stars.submit_mesh(np.empty((0, 3)), mark=True)
+        self.assertTrue(stars.mark)
+        self.assertFalse(stars.face)
+        for _ in range(90):
+            stars.advance(1 / 60)
+        rest, _ = stars._mark_dust()
+        pos = stars.position[stars.face_stars]
+        self.assertLess(float(np.median(np.linalg.norm(pos - rest, axis=1))), 6)
+        on_ring = stars.mark_along < MARK_RING
+        on_check = stars.mark_along >= MARK_RING + MARK_FILL
+        centre = rest.mean(axis=0)
+        ring_r = np.linalg.norm(rest[on_ring] - centre, axis=1)
+        check_r = np.linalg.norm(rest[on_check] - centre, axis=1)
+        self.assertGreater(float(ring_r.mean()), float(check_r.mean()) * 1.25)
+        ring_w = float(np.ptp(rest[on_ring, 0]))
+        ring_h = float(np.ptp(rest[on_ring, 1]))
+        self.assertGreater(ring_w, 80)
+        self.assertGreater(ring_h, 80)
+        self.assertLess(abs(ring_w - ring_h) / max(ring_w, ring_h), 0.12)
+        start, corner, end = stars._mark_points()
+        self.assertGreater(float(end[0] - start[0]), 20)
+        self.assertLess(float(end[1]), float(corner[1]))
+        stars.submit_mesh(points)
+        self.assertFalse(stars.mark)
+        self.assertTrue(stars.face)
+        for _ in range(180):
+            stars.advance(1 / 60)
+        face = stars.dust[0]
+        self.assertLess(float(np.max(np.abs(stars.position[stars.face_stars] - face))), 3)
+
+    def test_seal_keeps_tilting_until_the_camera_returns(self):
+        from facegate.starlight import MARK_TURN_SECONDS, load_surface
+
+        stars = Starlight(312, 208, STAR_STYLE)
+        points = load_surface()
+        points = points * 8
+        points[:, :2] += [156, 104]
+        points = np.concatenate([points, np.tile(points[1], (10, 1))])
+        stars.submit_mesh(points)
+        for _ in range(60):
+            stars.advance(1 / 60)
+        stars.submit_mesh(np.empty((0, 3)), mark=True, axis="down")
+        stars.advance(1 / 60)
+        start_tilt = stars._mark_basis()[1]
+        self.assertGreater(start_tilt, 0.2)
+        for _ in range(int(MARK_TURN_SECONDS * 60)):
+            stars.advance(1 / 60)
+        mid_tilt = stars._mark_basis()[1]
+        self.assertLess(mid_tilt, start_tilt - 0.15)
+        for _ in range(24):
+            stars.advance(1 / 60)
+        later_tilt = stars._mark_basis()[1]
+        self.assertLess(later_tilt, mid_tilt - 0.02)
+        stars.submit_mesh(points)
+        for _ in range(12):
+            stars.advance(1 / 60)
+        self.assertLess(stars._mark_basis()[1], later_tilt)
+        self.assertGreater(stars.formed, 0.0)
+
+    def test_seal_turns_on_the_axis_of_the_pose_just_captured(self):
+        from facegate.starlight import MARK_TURN_SECONDS, load_surface
+
+        def formed():
+            stars = Starlight(312, 208, STAR_STYLE)
+            points = load_surface()
+            points = points * 8
+            points[:, :2] += [156, 104]
+            points = np.concatenate([points, np.tile(points[1], (10, 1))])
+            stars.submit_mesh(points)
+            for _ in range(30):
+                stars.advance(1 / 60)
+            return stars
+
+        left = formed()
+        left.submit_mesh(np.empty((0, 3)), mark=True, axis="left")
+        left.advance(1 / 60)
+        yaw, tilt = left._mark_basis()
+        self.assertGreater(abs(yaw), abs(tilt) * 4)
+        self.assertGreater(yaw, 0)
+        left.advance(MARK_TURN_SECONDS)
+        later_yaw, _ = left._mark_basis()
+        self.assertLess(later_yaw, yaw)
+        up = formed()
+        up.submit_mesh(np.empty((0, 3)), mark=True, axis="up")
+        up.advance(1 / 60)
+        yaw, tilt = up._mark_basis()
+        self.assertGreater(abs(tilt), abs(yaw) * 4)
+        self.assertLess(tilt, 0)
+        up.advance(MARK_TURN_SECONDS)
+        _, later_tilt = up._mark_basis()
+        self.assertGreater(later_tilt, tilt)
 
     def test_arrow_reversal_dissolves_before_switch_and_can_cancel(self):
         stars = Starlight(312, 208, STAR_STYLE)
@@ -62,7 +186,7 @@ class StarlightMotionTests(unittest.TestCase):
         splat = stars._splat
         stars._splat = lambda scale, lights, *rest, **kw: calls.append(lights) or splat(scale, lights, *rest, **kw)
         stars.stars(1.0, Look(guide=(0.39, 0.82, 1.0)))
-        (face, _), (guide, _) = calls[-2:]
+        (face,), (guide,) = calls[-2:]
         # The guide's few hundred motes are splatted into their own box only.
         (texture,), box = stars.splat_cropped(1.0, guide)
         self.assertLess(box.get_width() * box.get_height(), 0.5 * 312 * 208)
@@ -238,3 +362,56 @@ class StarlightShadingTests(unittest.TestCase):
             np.testing.assert_allclose(stars.dust[1], expected_light, atol=1e-6)
             # Only the intentional subpixel dust drift can offset the surface.
             self.assertLess(float(np.max(np.abs(stars.position[stars.face_stars] - rest))), 0.15)
+
+    def test_source_sits_behind_the_head_and_scales_with_it(self):
+        stars = Starlight(312, 208, STAR_STYLE)
+        points = self.canonical()
+        stars.submit_mesh(points)
+        x, y = stars._source_centre()
+        low, high = points[:468, :2].min(axis=0), points[:468, :2].max(axis=0)
+        centre = (low + high) / 2
+        height = float(high[1] - low[1])
+        self.assertAlmostEqual(x, float(centre[0]), delta=0.5)
+        # Above the face centre so the core leaks around the crown.
+        self.assertLess(y, float(centre[1]) - 0.1 * height)
+        self.assertGreater(y, float(low[1]))
+        # Core smaller than the face, corona wrapping it, wash filling the scene.
+        core, corona, wash = SOURCE
+        scale = stars._source_scale()
+        self.assertLess(core[1] * scale, height)
+        self.assertGreater(corona[1] * scale, height * 0.85)
+        self.assertGreater(wash[0] * scale, corona[0] * scale)
+        # A closer face gets a larger corona, still wrapping that head.
+        closer = points.copy()
+        closer[:, :2] = (closer[:, :2] - [156, 104]) * 1.3 + [156, 104]
+        stars.vertices = closer
+        self.assertGreater(stars._source_scale(), scale)
+
+    def test_source_follows_the_face_and_haze_is_brighter_near_it(self):
+        stars = Starlight(312, 208, STAR_STYLE)
+        points = self.canonical()
+        stars.submit_mesh(points)
+        first = stars._source_centre()
+        shifted = points.copy()
+        shifted[:, 0] += 24
+        stars.vertices = shifted
+        second = stars._source_centre()
+        self.assertAlmostEqual(second[0] - first[0], 24, delta=0.5)
+        self.assertAlmostEqual(second[1], first[1], delta=0.5)
+        # Haze motes nearer the core carry more light than those at the edge.
+        stars.scene = 1.0
+        stars.haze_angle[:] = 0
+        stars.haze_radius[:] = np.linspace(0.05, 1.25, len(stars.haze_radius))
+        stars.haze_light[:] = 0.5
+        stars.haze_speed[:] = 0
+        stars._haze(1.0)
+        centre = np.array(stars._source_centre())
+        angle = stars.haze_angle
+        positions = centre + np.stack(
+            [np.cos(angle) * 78, np.sin(angle) * 96], axis=1
+        ) * stars.haze_radius[:, None]
+        dist = np.hypot(positions[:, 0] - centre[0], positions[:, 1] - centre[1])
+        near, far = dist < 40, dist > 90
+        self.assertTrue(near.any() and far.any())
+        falloff = 0.40 + 0.60 * np.clip(1 - dist / 130.0, 0, 1) ** 1.4
+        self.assertGreater(float(falloff[near].mean()), float(falloff[far].mean()) * 1.4)

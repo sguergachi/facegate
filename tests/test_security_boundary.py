@@ -63,6 +63,10 @@ class SecurityBoundaryTests(unittest.TestCase):
         source = (ROOT / "pam/facegate-consent.c").read_text()
         self.assertIn('"facegate.password-only"', source)
         self.assertIn('"\\\"reason\\\":\\\"password-only\\\""', source)
+        self.assertIn("password_from_hud", source)
+        self.assertIn("pam_set_item", source)
+        # Only sudo takes its password from the island; polkit and the greeter have their own.
+        self.assertIn('strcmp(service, "sudo") == 0 && hud == uid', source)
 
     def test_settings_never_launches_its_client_through_pkexec(self):
         settings = (ROOT / "facegate/settings_app.py").read_text()

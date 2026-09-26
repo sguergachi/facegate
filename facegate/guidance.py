@@ -155,6 +155,7 @@ class Guide:
     def __init__(self, clock=time.monotonic) -> None:
         self.clock = clock
         self.pose_name: str | None = None
+        self.completed_pose: str | None = None
         self.problem: str | None = None
         self.captured_at = -1.0
         self.baseline: tuple[float, float] | None = None
@@ -176,6 +177,7 @@ class Guide:
     def prompt(self, key: str) -> None:
         """An EnrollStatus prompt from Gaze."""
         if key in CAPTURED:
+            self.completed_pose = self.pose_name
             if self.pose_name == "straight" and self.baseline is None:
                 recent = [(yaw, pitch) for when, yaw, pitch in self.poses if when >= self.clock() - BASELINE_SECONDS]
                 # Gaze captured a straight pose, so poses that weren't are stale.
@@ -188,6 +190,17 @@ class Guide:
             self.holding_since = None
         elif key in PROMPTS:
             self.pose_name = PROMPTS[key]
+
+    def mark_pose(self) -> str:
+        """The pose the between-pose seal should turn with.
+
+        IR often arrives before Gaze says "captured", so the pose being held
+        is the one. Once a capture lands, that pose wins for a moment even if
+        Gaze has already asked for the next.
+        """
+        if self.completed_pose and self.clock() - self.captured_at < 2.0:
+            return self.completed_pose
+        return self.pose_name or self.completed_pose or ""
 
     def status(self, key: str) -> None:
         """A FaceStatus from Gaze."""

@@ -307,14 +307,14 @@ class SudoPasswordTests(unittest.TestCase):
         self.hud.handle_request({"phase": "password", "requester": {"app": "Konsole"}}, self.hud_side)
         on_password = self.hud.present_password.call_args[0][1]
         on_password("hunter2")
-        self.assertEqual(self.pam_side.recv(4096), b'{"password":"hunter2"}\n')
+        self.assertEqual(self.pam_side.recv(4096), b'{"id":"","password":"hunter2"}\n')
         self.assertIsNone(self.hud.sudo_password)
         self.edge_hud.GLib.source_remove(self.hud.dismiss_timeout)
 
     def test_escape_hands_sudo_back_to_its_own_prompt(self):
         self.hud.handle_request({"phase": "password"}, self.hud_side)
         self.edge_hud.EdgeHud.cancel(self.hud)
-        self.assertEqual(self.pam_side.recv(4096), b'{"password":null}\n')
+        self.assertEqual(self.pam_side.recv(4096), b'{"id":"","password":null}\n')
         self.hud.dismiss.assert_called_once()
 
     def test_a_locked_sudo_says_when_instead_of_taking_a_password(self):
