@@ -17,5 +17,6 @@ gate after Gaze upgrades.
 
 ## Website
 
-`site/` is a static page. Enable it via GitHub Pages (Settings → Pages), or copy
+`docs/` is the static page, styled after [DESIGN.md](../DESIGN.md). Enable it
+via GitHub Pages (Settings → Pages → Deploy from a branch → `/docs`), or copy
 `aur/pages.yml.example` to `.github/workflows/pages.yml` to deploy it on push.

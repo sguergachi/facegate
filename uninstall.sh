@@ -82,8 +82,10 @@ if [[ -n ${target_user} && ${target_user} != root ]]; then
     systemctl --user)
   "${user_systemctl[@]}" disable --now facegate.service 2>/dev/null || true
   "${user_systemctl[@]}" disable --now facegate-tray.service 2>/dev/null || true
-  "${user_systemctl[@]}" unmask plasma-polkit-agent.service 2>/dev/null || true
-  "${user_systemctl[@]}" start plasma-polkit-agent.service 2>/dev/null || true
+  for svc in plasma-polkit-agent.service hyprpolkitagent.service polkit-gnome-authentication-agent-1.service; do
+    "${user_systemctl[@]}" unmask "${svc}" 2>/dev/null || true
+    "${user_systemctl[@]}" start "${svc}" 2>/dev/null || true
+  done
 fi
 
 rm -f \

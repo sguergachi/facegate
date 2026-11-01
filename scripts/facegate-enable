@@ -5,16 +5,28 @@ if [[ ${EUID} -eq 0 ]]; then
   echo "Run facegate-enable as your normal user, not root." >&2
   exit 1
 fi
+# Desktop polkit agents shipped as user units. Agents that autostart some other
+# way (GNOME's autostart entry, distro scripts) keep running and may prompt
+# alongside the island; run with --disable to go back to stock behavior.
+agents=(
+  plasma-polkit-agent.service
+  hyprpolkitagent.service
+  polkit-gnome-authentication-agent-1.service
+)
 if [[ ${1:-} == --disable ]]; then
   systemctl --user disable --now facegate.service facegate-tray.service 2>/dev/null || true
-  systemctl --user unmask plasma-polkit-agent.service 2>/dev/null || true
-  systemctl --user start plasma-polkit-agent.service 2>/dev/null || true
-  echo "FaceGate disabled for this user; Plasma's polkit agent restored."
+  for agent in "${agents[@]}"; do
+    systemctl --user unmask "${agent}" 2>/dev/null || true
+    systemctl --user start "${agent}" 2>/dev/null || true
+  done
+  echo "FaceGate disabled for this user; the desktop polkit agent is restored."
   exit 0
 fi
 systemctl --user daemon-reload
-systemctl --user stop plasma-polkit-agent.service 2>/dev/null || true
-systemctl --user mask plasma-polkit-agent.service >/dev/null 2>&1 || true
+for agent in "${agents[@]}"; do
+  systemctl --user stop "${agent}" 2>/dev/null || true
+  systemctl --user mask "${agent}" >/dev/null 2>&1 || true
+done
 systemctl --user enable --now facegate.service
 systemctl --user restart facegate.service
 echo "FaceGate is active. Test with: sudo -k; sudo -v"

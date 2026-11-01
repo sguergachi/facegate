@@ -3,6 +3,9 @@
 set -euo pipefail
 source_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 out=${1:-${source_dir}/build}
+# Where the installed facegate Python package lives; the AUR build overrides
+# this to /usr/lib/facegate so the launcher finds its modules under /usr.
+libdir=${FACEGATE_LIBDIR:-/usr/local/lib/facegate}
 mkdir -p "${out}"
 # plasma-wayland-protocols ships CMake files, not a .pc file.
 protocol=/usr/share/plasma-wayland-protocols/kde-lockscreen-overlay-v1.xml
@@ -11,6 +14,7 @@ wayland-scanner private-code "${protocol}" "${out}/kde-lockscreen-overlay-v1-pro
 # -rdynamic exports facegate_allow_over_lock_screen to the island's ctypes.
 # shellcheck disable=SC2046
 cc -std=c11 -O2 -Wall -Wextra -Werror -rdynamic -Wl,-z,relro,-z,now \
+  "-DFACEGATE_LIBDIR=\"${libdir}\"" \
   -I"${out}" -o "${out}/facegate-hud" \
   "${source_dir}/facegate-hud.c" "${out}/kde-lockscreen-overlay-v1-protocol.c" \
   $(pkg-config --cflags --libs python3-embed gtk4-wayland wayland-client)
