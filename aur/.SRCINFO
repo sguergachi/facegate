@@ -27,6 +27,6 @@ pkgbase = facegate
 	optdepends = plasma-login-manager: face sign-in at the login screen
 	optdepends = python-opencv: optional live-camera enrollment demo
 	source = facegate-0.1.0.tar.gz::https://github.com/sguergachi/facegate/archive/refs/tags/v0.1.0.tar.gz
-	sha256sums = SKIP
+	sha256sums = c59c613e0ce4fb130dbf06ce6ee6334d59e795819a0afe6be781babfc1a3c580
 
 pkgname = facegate
