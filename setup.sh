@@ -21,15 +21,21 @@ printf '%sExplicit face approval for sudo and admin prompts, secured by Gaze.%s\
 
 step "Checking this computer"
 command -v pacman >/dev/null || fail "FaceGate currently supports Arch-based systems (pacman) only."
-[[ ${XDG_CURRENT_DESKTOP:-} == *KDE* ]] || fail "FaceGate supports KDE Plasma only."
-[[ ${XDG_SESSION_TYPE:-} == wayland ]] || fail "Run this from a Plasma Wayland session."
+# KDE Plasma is strongly recommended (polkit agent, layer-shell integration,
+# active output tracking) but any Wayland session is supported.
+if [[ ${XDG_CURRENT_DESKTOP:-} != *KDE* ]]; then
+  info "Note: KDE Plasma is not the current desktop (${XDG_CURRENT_DESKTOP:-unknown})."
+  info "      FaceGate installs best on KDE Plasma Wayland; on other Wayland"
+  info "      desktops, the HUD will fall back to the compositor's active output."
+fi
+[[ ${XDG_SESSION_TYPE:-} == wayland ]] || fail "FaceGate requires a Wayland session."
 sudo -v || fail "sudo is needed to install packages and configure PAM."
 # Keep the sudo ticket fresh through an AUR package installation.
 while true; do sudo -n true 2>/dev/null; sleep 50; kill -0 "$$" 2>/dev/null || exit; done &
 keepalive=$!
 cleanup() { kill "${keepalive}" 2>/dev/null || true; }
 trap cleanup EXIT
-done_ "Arch-based KDE Plasma Wayland session"
+done_ "Arch-based Wayland session"
 
 step "Installing FaceGate's dependencies"
 sudo pacman -S --needed --noconfirm \

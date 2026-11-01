@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FaceGate — Face verification for sudo and polkit</title>
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
+<link rel="alternate icon" type="image/png" href="media/favicon-32x32.png">
+<link rel="apple-touch-icon" href="media/favicon-144x144.png">
+<style>
+  :root {
+    --bg: #000000;
+    --fill: #1c1c1e;
+    --fill-hover: #2c2c2e;
+    --fill-pressed: #3a3a3c;
+    --label: #f5f5f7;
+    --secondary: #98989d;
+    --tertiary: #8e8e93;
+    --quaternary: #6e6e73;
+    --hairline: rgba(255,255,255,0.08);
+    --cyan: #64d2ff;
+    --green: #30d158;
+    --red: #ff453a;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--label);
+    font-family: Inter, "SF Pro Text", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-size: 15px;
+    line-height: 20px;
+    letter-spacing: 0;
+    min-height: 100vh;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  a { color: var(--label); text-decoration: none; border-bottom: 1px solid var(--hairline); }
+  a:hover { color: var(--cyan); border-bottom-color: var(--cyan); }
+
+  h1, h2, h3, h4 { margin: 0; font-weight: 600; letter-spacing: -0.02em; }
+  h1 { font-size: 28px; line-height: 32px; letter-spacing: -0.5px; margin-bottom: 8px; }
+  h2 { font-size: 17px; line-height: 20px; letter-spacing: -0.2px; margin: 24px 0 8px; }
+  h3 { font-size: 15px; line-height: 20px; font-weight: 600; color: var(--secondary); margin: 20px 0 8px; }
+  p { margin: 0 0 20px; }
+
+  code {
+    font-family: "JetBrains Mono", "SF Mono", Menlo, Monaco, Consolas, monospace;
+    font-size: 12px;
+    background: var(--fill);
+    color: var(--label);
+    padding: 2px 6px;
+    border-radius: 8px;
+    border: 1px solid var(--hairline);
+  }
+
+  pre {
+    margin: 24px 0;
+    padding: 16px 24px;
+    background: var(--fill);
+    border-radius: 16px;
+    border: 1px solid var(--hairline);
+    overflow-x: auto;
+  }
+  pre code {
+    background: transparent;
+    border: none;
+    padding: 0;
+    font-size: 12px;
+    color: var(--secondary);
+  }
+
+  .container {
+    max-width: 920px;
+    margin: 0 auto;
+    padding: 32px 24px;
+  }
+
+  header {
+    margin-bottom: 48px;
+    text-align: center;
+  }
+
+  header .mark {
+    width: 144px;
+    height: 144px;
+    margin: 0 auto 24px;
+    border-radius: 48px;
+    background: var(--bg);
+    position: relative;
+    overflow: hidden;
+  }
+  header .mark svg {
+    display: block;
+    width: 100%;
+    height: 100%;
+    animation: breathe 3.4s ease-in-out infinite;
+  }
+  header .mark::before {
+    content: "";
+    position: absolute;
+    inset: -6px;
+    border-radius: 54px;
+    border: 1px solid var(--hairline);
+    pointer-events: none;
+  }
+
+  @keyframes breathe {
+    0%, 100% { transform: scale(1); }
+    50% { transform: scale(1.02); }
+  }
+
+  .subtitle {
+    font-size: 14px;
+    color: var(--secondary);
+    line-height: 22px;
+    max-width: 600px;
+    margin: 0 auto 28px;
+    text-align: center;
+  }
+
+  .hero-recording {
+    margin: 28px auto 0;
+    max-width: 860px;
+    width: 100%;
+  }
+
+  .recording-frame {
+    position: relative;
+    border-radius: 20px;
+    overflow: hidden;
+    background: #000000;
+    border: 1px solid var(--hairline);
+    box-shadow: 0 24px 64px rgba(0, 0, 0, 0.8), 0 0 0 1px rgba(255, 255, 255, 0.05);
+    line-height: 0;
+  }
+
+  .recording-frame video,
+  .recording-frame img {
+    display: block;
+    width: 100%;
+    height: auto;
+    border-radius: 20px;
+  }
+
+  .recording-caption {
+    margin-top: 14px;
+    font-size: 13px;
+    line-height: 18px;
+    color: var(--secondary);
+    text-align: center;
+  }
+
+  .section {
+    margin: 48px 0;
+  }
+
+  .section h2 {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 17px;
+    margin-bottom: 16px;
+  }
+
+  .section h2::before {
+    content: "";
+    width: 6px;
+    height: 20px;
+    background: var(--cyan);
+    border-radius: 3px;
+  }
+
+  .install-card {
+    background: var(--fill);
+    border: 1px solid var(--hairline);
+    border-radius: 16px;
+    padding: 24px;
+    margin: 16px 0;
+  }
+
+  .install-card h3 {
+    color: var(--label);
+    font-size: 15px;
+    letter-spacing: -0.2px;
+    margin-bottom: 12px;
+  }
+
+  .install-card p {
+    color: var(--secondary);
+    font-size: 13px;
+    line-height: 20px;
+    margin-bottom: 16px;
+  }
+
+  .button-row {
+    display: flex;
+    gap: 8px;
+    justify-content: center;
+    margin-top: 12px;
+  }
+
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 44px;
+    min-width: 184px;
+    padding: 0 24px;
+    border-radius: 22px;
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: 0;
+    cursor: pointer;
+    border: none;
+    transition: transform 160ms cubic-bezier(0.23, 1, 0.32, 1), background-color 180ms ease, color 180ms ease;
+    outline: none;
+  }
+  .btn:active { transform: scale(0.97); }
+
+  .btn-primary {
+    background: var(--label);
+    color: #000000;
+  }
+  .btn-primary:hover { background: #ffffff; }
+
+  .btn-secondary {
+    background: var(--fill);
+    color: var(--label);
+    border: 1px solid var(--hairline);
+  }
+  .btn-secondary:hover { background: var(--fill-hover); color: var(--label); }
+
+  .flex-columns {
+    display: flex;
+    gap: 24px;
+    margin-top: 24px;
+    flex-wrap: wrap;
+  }
+
+  .card {
+    flex: 1;
+    min-width: 280px;
+    background: var(--fill);
+    border: 1px solid var(--hairline);
+    border-radius: 16px;
+    padding: 24px;
+  }
+  .card h3 { font-size: 15px; color: var(--label); margin-bottom: 12px; letter-spacing: -0.2px; }
+  .card p { color: var(--secondary); font-size: 13px; line-height: 20px; margin-bottom: 12px; }
+  .card ul { margin: 0; padding-left: 16px; color: var(--secondary); }
+  .card ul li { margin-bottom: 8px; line-height: 20px; }
+
+  .footer {
+    margin: 48px 0 0;
+    padding-top: 24px;
+    border-top: 1px solid var(--hairline);
+    color: var(--tertiary);
+    font-size: 12px;
+    line-height: 16px;
+    text-align: center;
+  }
+
+  @media (max-width: 640px) {
+    .container { padding: 24px 16px; }
+    .flex-columns { flex-direction: column; }
+    .btn { min-width: auto; width: 100%; }
+  }
+</style>
+</head>
+<body>
+<div class="container">
+
+<header>
+  <div class="mark" aria-label="FaceGate presence mark" role="img">
+    <svg viewBox="0 0 144 144" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <!-- Lens ring -->
+      <circle cx="72" cy="72" r="52" fill="none" stroke="#f5f5f7" stroke-width="3" stroke-opacity="0.22"/>
+      <!-- Eyes -->
+      <circle cx="59" cy="64" r="5.2" fill="#f5f5f7"/>
+      <circle cx="85" cy="64" r="5.2" fill="#f5f5f7"/>
+      <!-- Smile -->
+      <path d="M 58 84 C 65 89.5, 79 89.5, 86 84" fill="none" stroke="#f5f5f7" stroke-width="4" stroke-linecap="round"/>
+    </svg>
+  </div>
+  <h1>FaceGate</h1>
+  <p class="subtitle">Face ID-style consent interface for Gaze. Approve sudo and polkit elevation with a glance. Your password always works too.</p>
+
+  <div class="hero-recording">
+    <div class="recording-frame">
+      <video autoplay muted loop playsinline preload="metadata" poster="media/facegate-demo-poster.png" width="960" height="540">
+        <source src="media/facegate-demo.mp4" type="video/mp4">
+        <source src="media/facegate-demo.webp" type="image/webp">
+        <img src="media/facegate-demo.gif" alt="FaceGate screen recording on KDE Plasma desktop: sudo approved by face, then fallback to password" width="960" height="540">
+      </video>
+    </div>
+    <p class="recording-caption">FaceGate in action on KDE Plasma &mdash; sudo approved by face glance, with automatic password fallback inside the island.</p>
+  </div>
+</header>
+
+<section class="section">
+  <h2>Install</h2>
+  <p>Requirements: an Arch-based system with Wayland, Gaze 0.2.7 or newer, and a webcam (an IR camera is strongly recommended). KDE Plasma is strongly recommended for the best experience.</p>
+
+  <div class="install-card">
+    <h3>AUR (recommended)</h3>
+    <pre><code>paru -S facegate
+# or
+yay -S facegate</code></pre>
+    <p>The AUR package installs FaceGate, its dependencies (including <code>gaze-bin</code>), and configures PAM and polkit automatically.</p>
+    <div class="button-row">
+      <button class="btn btn-primary">Install from AUR</button>
+      <button class="btn btn-secondary">View source</button>
+    </div>
+  </div>
+
+  <div class="install-card">
+    <h3>Manual install from source</h3>
+    <pre><code>git clone https://github.com/sguergachi/facegate.git
+cd facegate
+./setup.sh</code></pre>
+    <p>Run setup as your normal user. It installs dependencies, configures PAM/polkit, and opens FaceGate to add your first face.</p>
+    <div class="button-row">
+      <button class="btn btn-secondary">View README</button>
+    </div>
+  </div>
+</section>
+
+<section class="section">
+  <h2>What FaceGate does</h2>
+  <div class="flex-columns">
+    <div class="card">
+      <h3>One thing at a time</h3>
+      <p>Every screen has one job and one primary action. No title bars, borders, toolbars, or visible chrome that isn't doing work.</p>
+    </div>
+    <div class="card">
+      <h3>Consent before camera</h3>
+      <p>The camera never starts without an explicit Approve. Changes need admin approval every time. The password is always a way through.</p>
+    </div>
+    <div class="card">
+      <h3>Physical, not flat</h3>
+      <p>Surfaces behave like objects. Every change is continuous from what's on screen. Nothing jumps. Colour carries meaning, never decoration.</p>
+    </div>
+  </div>
+</section>
+
+<section class="section">
+  <h2>Design system</h2>
+  <p>FaceGate's interface follows Apple's Human Interface Guidelines adapted to KDE Plasma — clarity, deference, depth. Dark-only palette, physical surfaces, and honest security copy. Full specification in <code>DESIGN.md</code>.</p>
+</section>
+
+<footer class="footer">
+  FaceGate &middot; Independent consent/UI layer for Gaze by Gundu Labs <br>
+  &copy; 2026 FaceGate contributors
+</footer>
+
+</div>
+</body>
+</html>

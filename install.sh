@@ -124,8 +124,18 @@ user_systemctl=(runuser -u "${target_user}" -- env
 "${user_systemctl[@]}" daemon-reload
 # Preserve the current FaceGate password-in-island experience by keeping its
 # polkit agent as the only session agent. polkitd/PAM still validate passwords.
-"${user_systemctl[@]}" stop plasma-polkit-agent.service 2>/dev/null || true
-"${user_systemctl[@]}" mask plasma-polkit-agent.service >/dev/null 2>&1 || true
+# On non-KDE desktops, we mask any polkit agent and let FaceGate manage permissions
+# through its own socket with proper polkit integration.
+if [[ -n ${XDG_CURRENT_DESKTOP:-} && ${XDG_CURRENT_DESKTOP} == *KDE* ]]; then
+  "${user_systemctl[@]}" stop plasma-polkit-agent.service 2>/dev/null || true
+  "${user_systemctl[@]}" mask plasma-polkit-agent.service >/dev/null 2>&1 || true
+else
+  info "Non-KDE desktop detected. Ensuring polkit agent doesn't conflict."
+  for svc in polkit-agent.service polkit.service; do
+    "${user_systemctl[@]}" stop "${svc}" 2>/dev/null || true
+    "${user_systemctl[@]}" mask "${svc}" >/dev/null 2>&1 || true
+  done
+fi
 "${user_systemctl[@]}" enable --now facegate.service
 "${user_systemctl[@]}" restart facegate.service
 

@@ -15,9 +15,12 @@ The island is a layer-shell surface anchored to the monitor's physical top edge.
 Its UI runs in the logged-in desktop session; no Python code participates in the
 biometric decision or reads Gaze's templates.
 
-> **KDE Plasma on Wayland only.** FaceGate replaces Plasma's polkit agent and
-> asks KWin which monitor is active. GNOME, Hyprland, Sway, X11, and other
-> desktops are not currently supported.
+> **Arch-based systems with Wayland only.** FaceGate replaces your desktop's
+> polkit agent and asks the compositor which monitor is active. KDE Plasma is
+> strongly recommended (layer-shell integration, active output tracking, and the
+> password-in-island experience); other Wayland desktops work but fall back to
+> the compositor's output choice. GNOME, Sway, X11, and other desktops are not
+> currently supported.
 
 ## Security boundary
 
@@ -96,8 +99,22 @@ tools.
 
 ## Install
 
-Requirements: an Arch-based system, KDE Plasma on Wayland, Gaze 0.2.7 or newer,
-and a webcam (an IR camera is strongly recommended).
+Requirements: an Arch-based system with Wayland, Gaze 0.2.7 or newer,
+and a webcam (an IR camera is strongly recommended). KDE Plasma is strongly
+recommended for the best experience.
+
+### Quick install (AUR)
+
+```bash
+paru -S facegate
+# or
+yay -S facegate
+```
+
+The AUR package installs FaceGate, its dependencies (including `gaze-bin`), and
+configures PAM/polkit automatically.
+
+### Manual install from source
 
 ```bash
 git clone https://github.com/sguergachi/facegate.git
@@ -154,6 +171,18 @@ scripts/demo.sh enroll
 
 The optional live-camera demo needs Arch's `python-opencv` package; production
 enrollment does not, because Gaze owns that pipeline.
+
+## AUR upload
+
+To upload FaceGate to the Arch User Repository (AUR):
+
+1. Create a package repository on AUR (or use your personal AUR account)
+2. Place the PKGBUILD and source files in the repository
+3. Add a post-install hook so users can run `sudo /usr/share/facegate/install.sh` after installing `facegate` from AUR
+4. The AUR package depends on `gaze-bin` for the biometric backend and PAM module
+
+See the included `PKGBUILD` for the complete package recipe, or contribute to the
+official FaceGate AUR maintenance.
 
 ## Development checks
 
