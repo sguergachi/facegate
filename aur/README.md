@@ -14,3 +14,8 @@ The AUR needs a maintainer account with an SSH key, so the final push must be
 done by the maintainer. The PKGBUILD installs under `/usr` (rewriting the
 `/usr/local` paths used by `install.sh`) and `facegate.hook` re-applies the PAM
 gate after Gaze upgrades.
+
+## Website
+
+`site/` is a static page. Enable it via GitHub Pages (Settings → Pages), or copy
+`aur/pages.yml.example` to `.github/workflows/pages.yml` to deploy it on push.
