@@ -19,6 +19,19 @@ biometric decision or reads Gaze's templates.
 > asks KWin which monitor is active. GNOME, Hyprland, Sway, X11, and other
 > desktops are not currently supported.
 
+## Install (Arch-based, Wayland)
+
+```bash
+yay -S facegate        # from the AUR; pulls in Gaze and wires PAM
+facegate-enable        # once per user, from your Wayland session
+facegate-settings      # add your face
+```
+
+Website: <https://sguergachi.github.io/facegate/> · Remove with
+`pacman -R facegate` (Gaze and templates stay). Maintainers: see
+[aur/README.md](aur/README.md). The source-tree `setup.sh`/`install.sh` remain
+available for development.
+
 ## Security boundary
 
 ```text

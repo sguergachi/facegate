@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Per-user activation: make FaceGate the session's polkit agent and start it.
+set -euo pipefail
+if [[ ${EUID} -eq 0 ]]; then
+  echo "Run facegate-enable as your normal user, not root." >&2
+  exit 1
+fi
+if [[ ${1:-} == --disable ]]; then
+  systemctl --user disable --now facegate.service facegate-tray.service 2>/dev/null || true
+  systemctl --user unmask plasma-polkit-agent.service 2>/dev/null || true
+  systemctl --user start plasma-polkit-agent.service 2>/dev/null || true
+  echo "FaceGate disabled for this user; Plasma's polkit agent restored."
+  exit 0
+fi
+systemctl --user daemon-reload
+systemctl --user stop plasma-polkit-agent.service 2>/dev/null || true
+systemctl --user mask plasma-polkit-agent.service >/dev/null 2>&1 || true
+systemctl --user enable --now facegate.service
+systemctl --user restart facegate.service
+echo "FaceGate is active. Test with: sudo -k; sudo -v"
+echo "Manage faces from the FaceGate app, or run: facegate-settings"
