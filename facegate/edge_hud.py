@@ -1097,8 +1097,13 @@ def monitor_by_connector(connector: str) -> Gdk.Monitor | None:
     return None
 
 
-# KDE's own polkit agent, which takes the session back while FaceGate is off.
-DESKTOP_POLKIT_AGENT = "plasma-polkit-agent.service"
+# Desktop polkit agents shipped as user units; these take the session back while
+# FaceGate is off. Keep in sync with scripts/facegate-enable.
+DESKTOP_POLKIT_AGENTS = (
+    "plasma-polkit-agent.service",
+    "hyprpolkitagent.service",
+    "polkit-gnome-authentication-agent-1.service",
+)
 # While off, PAM hears these instead, and falls through to its usual prompt.
 DISABLED_REPLIES = {"approval": {"approved": False}, "password": {"password": None}, "scanning": {"ok": True}, "result": {"ok": True}}
 
@@ -1817,15 +1822,16 @@ class EdgeHud:
 
     def apply_polkit_owner(self) -> None:
         """Only one polkit agent can hold the session: FaceGate's island while
-        on, KDE's own dialog while off."""
+        on, the desktop's own dialog while off."""
         if not self.polkit:
             return
+        agents = " ".join(DESKTOP_POLKIT_AGENTS)
         if self.enabled:
-            run_quietly("systemctl --user stop %s; systemctl --user mask %s" % (DESKTOP_POLKIT_AGENT, DESKTOP_POLKIT_AGENT))
+            run_quietly("systemctl --user stop %s; systemctl --user mask %s" % (agents, agents))
             self.polkit.start()
         else:
             self.polkit.release()
-            run_quietly("systemctl --user unmask %s && systemctl --user start %s" % (DESKTOP_POLKIT_AGENT, DESKTOP_POLKIT_AGENT))
+            run_quietly("systemctl --user unmask %s; systemctl --user start %s" % (agents, agents))
 
     # Configuration ---------------------------------------------------------
 

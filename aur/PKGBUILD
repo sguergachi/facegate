@@ -7,10 +7,11 @@ arch=('x86_64' 'aarch64')
 url='https://github.com/sguergachi/facegate'
 license=('MIT')
 depends=('gaze-bin' 'pam' 'polkit' 'python' 'python-gobject' 'python-cairo'
-         'python-numpy' 'python-onnxruntime' 'gtk4' 'gtk4-layer-shell'
-         'libappindicator-gtk3' 'systemd')
-makedepends=('gcc')
+         'python-numpy' 'python-onnxruntime-cpu' 'gtk4' 'gtk4-layer-shell'
+         'libappindicator' 'systemd')
+makedepends=('gcc' 'pkgconf' 'wayland' 'plasma-wayland-protocols')
 optdepends=('plasma-desktop: KWin multi-monitor placement and Plasma integration'
+            'plasma-login-manager: face sign-in at the login screen'
             'python-opencv: optional live-camera enrollment demo')
 install=facegate.install
 source=("${pkgname}-${pkgver}.tar.gz::${url}/archive/refs/tags/v${pkgver}.tar.gz")
@@ -20,6 +21,9 @@ build() {
   cd "${pkgname}-${pkgver}"
   cc -std=c11 -fPIC -shared -O2 -Wall -Wextra -Werror \
     -Wl,-z,relro,-z,now -o consent.so pam/facegate-consent.c -lpam
+  # Native island launcher (lock-screen overlay grant); needs the
+  # plasma-wayland-protocols XML at build time on every desktop.
+  FACEGATE_LIBDIR=/usr/lib/facegate ./native/build.sh "${srcdir}/native-build"
 }
 
 package() {
@@ -32,7 +36,7 @@ package() {
   find "${pkgdir}/usr/lib/facegate" -type d -exec chmod 755 {} +
   find "${pkgdir}/usr/lib/facegate" -type f -exec chmod 644 {} +
 
-  install -Dm755 bin/facegate-hud      "${pkgdir}/usr/bin/facegate-hud"
+  install -Dm755 "${srcdir}/native-build/facegate-hud" "${pkgdir}/usr/bin/facegate-hud"
   install -Dm755 bin/facegate-settings "${pkgdir}/usr/bin/facegate-settings"
   install -Dm755 bin/facegate-tray     "${pkgdir}/usr/bin/facegate-tray"
   install -Dm755 scripts/facegate-enable "${pkgdir}/usr/bin/facegate-enable"
@@ -43,7 +47,9 @@ package() {
 
   install -Dm644 packaging/facegate.service "${pkgdir}/usr/lib/systemd/user/facegate.service"
   install -Dm644 packaging/facegate-tray.service "${pkgdir}/usr/lib/systemd/user/facegate-tray.service"
+  install -Dm644 packaging/facegate-greeter.service "${pkgdir}/usr/lib/systemd/user/facegate-greeter.service"
   install -Dm644 packaging/org.facegate.Settings.desktop "${pkgdir}/usr/share/applications/org.facegate.Settings.desktop"
+  install -Dm644 packaging/org.facegate.Island.desktop "${pkgdir}/usr/share/applications/org.facegate.Island.desktop"
   install -Dm644 packaging/facegate-symbolic.svg "${pkgdir}/usr/share/icons/hicolor/scalable/apps/facegate-symbolic.svg"
   install -Dm644 aur/facegate.hook "${pkgdir}/usr/share/libalpm/hooks/facegate.hook"
   install -Dm644 aur/facegate-remove.hook "${pkgdir}/usr/share/libalpm/hooks/facegate-remove.hook"

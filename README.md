@@ -15,14 +15,17 @@ The island is a layer-shell surface anchored to the monitor's physical top edge.
 Its UI runs in the logged-in desktop session; no Python code participates in the
 biometric decision or reads Gaze's templates.
 
-> **Arch-based systems with Wayland only.** FaceGate replaces your desktop's
-> polkit agent and asks the compositor which monitor is active. KDE Plasma is
-> strongly recommended (layer-shell integration, active output tracking, and the
-> password-in-island experience); other Wayland desktops work but fall back to
-> the compositor's output choice. GNOME, Sway, X11, and other desktops are not
-> currently supported.
+> **Arch-based systems with Wayland only.** KDE Plasma is strongly
+> recommended: KWin places the island on the active monitor and the lock/login
+> integrations target Plasma's greeter and locker. Other Wayland compositors
+> with layer-shell support (Sway, Hyprland, and similar) install and run, with
+> the island centered on whichever output the compositor chose. X11 sessions
+> are not supported; the installer refuses them.
 
-## Install (Arch-based, Wayland)
+## Install
+
+Requirements: an Arch-based system with Wayland, Gaze 0.2.7 or newer,
+and a webcam (an IR camera is strongly recommended).
 
 ```bash
 yay -S facegate        # from the AUR; pulls in Gaze and wires PAM
@@ -30,10 +33,10 @@ facegate-enable        # once per user, from your Wayland session
 facegate-settings      # add your face
 ```
 
-Website: <https://sguergachi.github.io/facegate/> · Remove with
-`pacman -R facegate` (Gaze and templates stay). Maintainers: see
-[aur/README.md](aur/README.md). The source-tree `setup.sh`/`install.sh` remain
-available for development.
+`paru -S facegate` works too. Website:
+<https://sguergachi.github.io/facegate/> · Remove with
+`pacman -R facegate` (Gaze and templates stay). To install from source
+instead, see [Manual install](#manual-install).
 
 ## Security boundary
 
@@ -153,24 +156,9 @@ To turn face sign-in off, run `sudo rm /etc/facegate/greeter`, then restore
 `/etc/pam.d/plasmalogin`
 and `/etc/pam.d/kde-fingerprint` from their backups in `/etc/facegate/`.
 
-## Install
+## Manual install
 
-Requirements: an Arch-based system with Wayland, Gaze 0.2.7 or newer,
-and a webcam (an IR camera is strongly recommended). KDE Plasma is strongly
-recommended for the best experience.
-
-### Quick install (AUR)
-
-```bash
-paru -S facegate
-# or
-yay -S facegate
-```
-
-The AUR package installs FaceGate, its dependencies (including `gaze-bin`), and
-configures PAM/polkit automatically.
-
-### Manual install from source
+From a Wayland session, as your normal user:
 
 ```bash
 git clone https://github.com/sguergachi/facegate.git
@@ -207,7 +195,7 @@ sudo ./uninstall.sh
 ```
 
 The uninstaller replaces FaceGate's managed block with Gaze's ordinary upstream
-PAM rule and restores Plasma's stock polkit agent. A pacman post-transaction
+PAM rule and restores the desktop's stock polkit agent. A pacman post-transaction
 hook reapplies the managed block after `gaze`/`gaze-bin` upgrades so upstream
 package scripts cannot accidentally leave a standalone Gaze rule ahead of the
 consent step.
@@ -230,17 +218,12 @@ scripts/demo.sh enroll
 The optional live-camera demo needs Arch's `python-opencv` package; production
 enrollment does not, because Gaze owns that pipeline.
 
-## AUR upload
+## Maintaining the AUR package
 
-To upload FaceGate to the Arch User Repository (AUR):
-
-1. Create a package repository on AUR (or use your personal AUR account)
-2. Place the PKGBUILD and source files in the repository
-3. Add a post-install hook so users can run `sudo /usr/share/facegate/install.sh` after installing `facegate` from AUR
-4. The AUR package depends on `gaze-bin` for the biometric backend and PAM module
-
-See the included `PKGBUILD` for the complete package recipe, or contribute to the
-official FaceGate AUR maintenance.
+The AUR recipe lives in [aur/](aur/README.md): `PKGBUILD`, the install hooks,
+and the publish steps (tag, checksums, `.SRCINFO`, push to
+`aur.archlinux.org/facegate.git`). The final push needs the maintainer's AUR
+SSH key.
 
 ## Development checks
 

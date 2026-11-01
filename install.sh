@@ -134,18 +134,10 @@ user_systemctl=(runuser -u "${target_user}" -- env
 runuser -u "${target_user}" -- env "XDG_RUNTIME_DIR=/run/user/${target_uid}" kbuildsycoca6 >/dev/null 2>&1 || true
 # Preserve the current FaceGate password-in-island experience by keeping its
 # polkit agent as the only session agent. polkitd/PAM still validate passwords.
-# On non-KDE desktops, we mask any polkit agent and let FaceGate manage permissions
-# through its own socket with proper polkit integration.
-if [[ -n ${XDG_CURRENT_DESKTOP:-} && ${XDG_CURRENT_DESKTOP} == *KDE* ]]; then
-  "${user_systemctl[@]}" stop plasma-polkit-agent.service 2>/dev/null || true
-  "${user_systemctl[@]}" mask plasma-polkit-agent.service >/dev/null 2>&1 || true
-else
-  echo "Non-KDE desktop detected. Ensuring polkit agent doesn't conflict."
-  for svc in polkit-agent.service polkit.service; do
-    "${user_systemctl[@]}" stop "${svc}" 2>/dev/null || true
-    "${user_systemctl[@]}" mask "${svc}" >/dev/null 2>&1 || true
-  done
-fi
+for svc in plasma-polkit-agent.service hyprpolkitagent.service polkit-gnome-authentication-agent-1.service; do
+  "${user_systemctl[@]}" stop "${svc}" 2>/dev/null || true
+  "${user_systemctl[@]}" mask "${svc}" >/dev/null 2>&1 || true
+done
 # reenable moves an older install's default.target link to plasma-workspace.target.
 "${user_systemctl[@]}" reenable facegate.service
 "${user_systemctl[@]}" restart facegate.service

@@ -93,9 +93,13 @@ __attribute__((visibility("default"))) int facegate_allow_over_lock_screen(GdkSu
     return 1;
 }
 
+#ifndef FACEGATE_LIBDIR
+#define FACEGATE_LIBDIR "/usr/local/lib/facegate"
+#endif
+
 static const char island[] =
     "import sys\n"
-    "sys.path.insert(0, '/usr/local/lib/facegate')\n"
+    "sys.path.insert(0, '" FACEGATE_LIBDIR "')\n"
     "from facegate.edge_hud import main\n"
     "raise SystemExit(main())\n";
 

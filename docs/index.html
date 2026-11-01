@@ -307,13 +307,13 @@
 
   <div class="install-card">
     <h3>AUR (recommended)</h3>
-    <pre><code>paru -S facegate
-# or
-yay -S facegate</code></pre>
+    <pre><code>yay -S facegate        # or: paru -S facegate
+facegate-enable        # once per user, from your Wayland session
+facegate-settings      # add your face</code></pre>
     <p>The AUR package installs FaceGate, its dependencies (including <code>gaze-bin</code>), and configures PAM and polkit automatically.</p>
     <div class="button-row">
-      <button class="btn btn-primary">Install from AUR</button>
-      <button class="btn btn-secondary">View source</button>
+      <a class="btn btn-primary" href="https://aur.archlinux.org/packages/facegate">Install from AUR</a>
+      <a class="btn btn-secondary" href="https://github.com/sguergachi/facegate">View source</a>
     </div>
   </div>
 
@@ -324,7 +324,7 @@ cd facegate
 ./setup.sh</code></pre>
     <p>Run setup as your normal user. It installs dependencies, configures PAM/polkit, and opens FaceGate to add your first face.</p>
     <div class="button-row">
-      <button class="btn btn-secondary">View README</button>
+      <a class="btn btn-secondary" href="https://github.com/sguergachi/facegate#manual-install">View README</a>
     </div>
   </div>
 </section>

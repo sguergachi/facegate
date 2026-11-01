@@ -21,4 +21,7 @@ Restart=on-failure
 RestartSec=2
 
 [Install]
-WantedBy=plasma-workspace.target
+# On Plasma the workspace target starts the island with the desktop. Everywhere
+# else the generic graphical session does; there is no earlier DE hook to use,
+# and After= above keeps a too-early start ordered behind the session.
+WantedBy=plasma-workspace.target graphical-session.target
