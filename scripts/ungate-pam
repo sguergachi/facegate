@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Replace FaceGate's managed PAM block with Gaze's normal upstream rule.
+# Used by the package removal hook; leaves Gaze installed.
+set -euo pipefail
+
+[[ ${EUID} -eq 0 ]] || { echo "facegate ungate-pam must run as root" >&2; exit 1; }
+
+pam_begin='# FaceGate Gaze consent gate - BEGIN'
+pam_end='# FaceGate Gaze consent gate - END'
+upstream_rule=
+for candidate in /usr/lib/security/pam_gaze.so /usr/lib64/security/pam_gaze.so /lib/security/pam_gaze.so /lib/*/security/pam_gaze.so; do
+  [[ -f ${candidate} ]] && { upstream_rule='auth        sufficient    pam_gaze.so'; break; }
+done
+work_dir=$(mktemp -d)
+trap 'rm -rf -- "${work_dir}"' EXIT
+
+ungate() {
+  local target=$1 label=$2 temporary staged
+  [[ -f ${target} ]] || return 0
+  grep -Fxq "${pam_begin}" "${target}" || return 0
+  temporary="${work_dir}/${label}.pam"
+  awk -v begin="${pam_begin}" -v end="${pam_end}" -v replacement="${upstream_rule}" '
+    $0 == begin { if (replacement != "") print replacement; managed = 1; found = 1; next }
+    $0 == end   { managed = 0; next }
+    managed { next }
+    { print }
+    END { if (!found || managed) exit 42 }
+  ' "${target}" > "${temporary}" || { echo "Refusing to alter malformed FaceGate block in ${target}." >&2; return 1; }
+  staged=$(mktemp "${target}.facegate.XXXXXX")
+  install -o root -g root -m 0644 "${temporary}" "${staged}"
+  mv -f -- "${staged}" "${target}"
+  echo "Removed FaceGate's gate from ${target}."
+}
+
+ungate /etc/pam.d/sudo sudo
+ungate /etc/pam.d/polkit-1 polkit-1

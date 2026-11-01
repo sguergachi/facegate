@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FaceGate — Face ID-style approval for sudo on Wayland</title>
+<meta name="description" content="FaceGate adds an explicit Approve step and a Dynamic Island-style prompt to Gaze face authentication for sudo and polkit on Arch Linux. Install from the AUR.">
+<meta name="theme-color" content="#000000">
+<meta property="og:title" content="FaceGate">
+<meta property="og:description" content="Face ID-style consent for sudo and polkit on Wayland. Install: yay -S facegate">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="island" aria-hidden="true"><i></i><span></span></div>
+<div class="wrap">
+<nav><b>FaceGate</b><div><a href="#install">Install</a><a href="#how">How it works</a><a href="#security">Security</a><a href="https://github.com/sguergachi/facegate">GitHub</a></div></nav>
+<header>
+<div class="eyebrow">Wayland · Arch · Gaze</div>
+<h1>Your face,<br><em>your sudo.</em></h1>
+<p class="lead">An explicit Approve step and a Face ID-style island for <code>sudo</code> and admin prompts. The camera stays off until you say so; your password is always the fallback.</p>
+<a class="btn p" href="#install">Install from the AUR</a>
+<a class="btn s" href="https://github.com/sguergachi/facegate">View source</a>
+</header>
+<div class="demo"><img src="facegate-demo.gif" alt="FaceGate island approving sudo by face, then falling back to a password" width="960"></div>
+
+<section id="features">
+<div class="eyebrow">Experience</div><h2>Four states. Zero surprises.</h2>
+<div class="grid">
+<div class="card"><span class="dot" style="background:#f5f5f7"></span><h3>Wants sudo</h3><p>Names the app and command. Camera is off until you approve.</p></div>
+<div class="card"><span class="dot" style="background:var(--scan)"></span><h3>Looking for you</h3><p>Gaze runs liveness and recognition while the island scans.</p></div>
+<div class="card"><span class="dot" style="background:var(--ok)"></span><h3>Verified</h3><p>The arc closes into a green ring, then authentication continues.</p></div>
+<div class="card"><span class="dot" style="background:var(--bad)"></span><h3>Not recognized</h3><p>Shakes red, then drops to the normal password prompt.</p></div>
+</div>
+</section>
+
+<section id="install">
+<div class="eyebrow">Install</div><h2>Three commands.</h2>
+<div class="step"><b>1</b><div><p>Install from the AUR with any helper. This pulls in Gaze and wires the PAM gate automatically.</p>
+<pre><span class="c"># yay, paru, or any AUR helper</span>
+yay -S facegate</pre>
+<p style="margin-top:12px">Prefer to build by hand?</p>
+<pre>git clone https://aur.archlinux.org/facegate.git
+cd facegate &amp;&amp; makepkg -si</pre></div></div>
+<div class="step"><b>2</b><div><p>From your Wayland session, activate FaceGate for your user.</p>
+<pre>facegate-enable</pre></div></div>
+<div class="step"><b>3</b><div><p>Add your face, then test.</p>
+<pre>facegate-settings
+sudo -k; sudo -v</pre></div></div>
+<p class="note">Requires a Wayland compositor with layer-shell support. KWin on KDE Plasma gives the best multi-monitor placement. Undo any time with <code>facegate-enable --disable</code> or <code>pacman -R facegate</code> — Gaze and your templates stay intact.</p>
+</section>
+
+<section id="how">
+<div class="eyebrow">How it works</div><h2>Consent, then Gaze decides.</h2>
+<pre class="flow"><span>sudo / polkit</span>
+   │
+   ▼
+<span>FaceGate consent module</span> ── denied / unavailable ──► <span class="r">password</span>
+   │ approved (permission to start the camera, not authentication)
+   ▼
+<span>pam_gaze.so</span> ─► gazed ─► liveness + match
+   │
+   ├─ failure ──► <span class="r">password</span>
+   └─ success ──► <span class="g">authenticated</span></pre>
+</section>
+
+<section id="security">
+<div class="eyebrow">Security</div><h2>Fails closed. Falls back to password.</h2>
+<div class="grid">
+<div class="card"><h3>Gaze owns the verdict</h3><p>Camera, templates and matching live in Gaze's root daemon. FaceGate never reads them.</p></div>
+<div class="card"><h3>Root-owned gate</h3><p>A small compiled PAM module can only skip the scan or start it. Approval is never authentication.</p></div>
+<div class="card"><h3>Every failure → password</h3><p>Missing modules, timeouts, malformed replies and denials all return to the stock stack.</p></div>
+</div>
+<p style="color:var(--dim);margin-top:22px">Gaze is young and not independently audited; treat face unlock as a convenience factor. Read the full <a href="https://github.com/sguergachi/facegate/blob/main/SECURITY.md">threat model</a>.</p>
+</section>
+</div>
+<footer>FaceGate is an independent UI layer for <a href="https://github.com/GunduLabs/gaze">Gaze</a> by Gundu Labs · MIT · <a href="https://aur.archlinux.org/packages/facegate">AUR</a> · <a href="https://github.com/sguergachi/facegate">GitHub</a></footer>
+</body>
+</html>

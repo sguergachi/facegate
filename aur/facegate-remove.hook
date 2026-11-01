@@ -1,0 +1,9 @@
+[Trigger]
+Operation = Remove
+Type = Package
+Target = facegate
+
+[Action]
+Description = Removing FaceGate from the PAM stacks...
+When = PreTransaction
+Exec = /usr/lib/facegate/ungate-pam

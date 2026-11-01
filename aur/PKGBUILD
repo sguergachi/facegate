@@ -1,0 +1,57 @@
+# Maintainer: Sami Guergachi <sguergachi@users.noreply.github.com>
+pkgname=facegate
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Face ID-style approval island for sudo and polkit on Wayland, backed by Gaze'
+arch=('x86_64' 'aarch64')
+url='https://github.com/sguergachi/facegate'
+license=('MIT')
+depends=('gaze-bin' 'pam' 'polkit' 'python' 'python-gobject' 'python-cairo'
+         'python-numpy' 'python-onnxruntime' 'gtk4' 'gtk4-layer-shell'
+         'libappindicator-gtk3' 'systemd')
+makedepends=('gcc')
+optdepends=('plasma-desktop: KWin multi-monitor placement and Plasma integration'
+            'python-opencv: optional live-camera enrollment demo')
+install=facegate.install
+source=("${pkgname}-${pkgver}.tar.gz::${url}/archive/refs/tags/v${pkgver}.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+  cd "${pkgname}-${pkgver}"
+  cc -std=c11 -fPIC -shared -O2 -Wall -Wextra -Werror \
+    -Wl,-z,relro,-z,now -o consent.so pam/facegate-consent.c -lpam
+}
+
+package() {
+  cd "${pkgname}-${pkgver}"
+
+  # Everything on the authentication path ends up root-owned under /usr.
+  install -d "${pkgdir}/usr/lib/facegate"
+  cp -r --no-preserve=mode,ownership facegate "${pkgdir}/usr/lib/facegate/"
+  find "${pkgdir}/usr/lib/facegate" -name __pycache__ -prune -exec rm -rf {} +
+  find "${pkgdir}/usr/lib/facegate" -type d -exec chmod 755 {} +
+  find "${pkgdir}/usr/lib/facegate" -type f -exec chmod 644 {} +
+
+  install -Dm755 bin/facegate-hud      "${pkgdir}/usr/bin/facegate-hud"
+  install -Dm755 bin/facegate-settings "${pkgdir}/usr/bin/facegate-settings"
+  install -Dm755 bin/facegate-tray     "${pkgdir}/usr/bin/facegate-tray"
+  install -Dm755 scripts/facegate-enable "${pkgdir}/usr/bin/facegate-enable"
+  install -Dm755 bin/facegate-faces    "${pkgdir}/usr/lib/facegate/facegate-faces"
+  install -Dm755 scripts/refresh-pam   "${pkgdir}/usr/lib/facegate/refresh-pam"
+  install -Dm755 scripts/ungate-pam    "${pkgdir}/usr/lib/facegate/ungate-pam"
+  install -Dm755 consent.so "${pkgdir}/usr/lib/security/facegate/consent.so"
+
+  install -Dm644 packaging/facegate.service "${pkgdir}/usr/lib/systemd/user/facegate.service"
+  install -Dm644 packaging/facegate-tray.service "${pkgdir}/usr/lib/systemd/user/facegate-tray.service"
+  install -Dm644 packaging/org.facegate.Settings.desktop "${pkgdir}/usr/share/applications/org.facegate.Settings.desktop"
+  install -Dm644 packaging/facegate-symbolic.svg "${pkgdir}/usr/share/icons/hicolor/scalable/apps/facegate-symbolic.svg"
+  install -Dm644 aur/facegate.hook "${pkgdir}/usr/share/libalpm/hooks/facegate.hook"
+  install -Dm644 aur/facegate-remove.hook "${pkgdir}/usr/share/libalpm/hooks/facegate-remove.hook"
+  install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+  install -Dm644 facegate/models/NOTICE "${pkgdir}/usr/share/licenses/${pkgname}/NOTICE-models"
+  install -Dm644 README.md "${pkgdir}/usr/share/doc/${pkgname}/README.md"
+  install -Dm644 SECURITY.md "${pkgdir}/usr/share/doc/${pkgname}/SECURITY.md"
+
+  # Re-root the /usr/local paths used by the source-tree installer.
+  grep -rlI '/usr/local' "${pkgdir}" | xargs -r sed -i 's|/usr/local|/usr|g'
+}

@@ -1,0 +1,22 @@
+post_install() {
+  systemctl enable --now gazed.service >/dev/null 2>&1 || true
+  systemctl try-restart polkit.service >/dev/null 2>&1 || true
+  python3 -I -c 'import sys; sys.path.insert(0, "/usr/lib/facegate"); from facegate.cameras import main; raise SystemExit(main())' >/dev/null 2>&1 || true
+  cat <<'MSG'
+
+==> FaceGate is installed and sudo/polkit now ask for face approval.
+==> Each user must run once, from their Wayland session:  facegate-enable
+==> Then add a face with:  facegate-settings
+==> Passwords always remain the fallback. Undo with: facegate-enable --disable
+MSG
+}
+
+post_upgrade() {
+  post_install
+}
+
+post_remove() {
+  systemctl try-restart polkit.service >/dev/null 2>&1 || true
+  echo "==> FaceGate removed. Gaze and its face templates were left intact."
+  echo "==> Each user can run: systemctl --user unmask plasma-polkit-agent.service"
+}
