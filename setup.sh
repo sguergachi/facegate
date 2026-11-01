@@ -40,12 +40,35 @@ done_ "Arch-based Wayland session"
 step "Installing FaceGate's dependencies"
 sudo pacman -S --needed --noconfirm \
   base-devel git pam python python-gobject python-cairo python-numpy \
-  gtk4 gtk4-layer-shell libappindicator polkit
+  gtk4 gtk4-layer-shell libappindicator polkit wayland plasma-wayland-protocols
 # The enrollment preview's face mesh; any system ONNX Runtime will do.
 if ! python3 -I -c 'import onnxruntime' 2>/dev/null; then
   sudo pacman -S --needed --noconfirm python-onnxruntime-cpu
 fi
 done_ "Packages from the official repositories"
+
+aur_helper=
+find_aur_helper() {
+  [[ -n ${aur_helper} ]] && return
+  for helper in paru yay; do
+    command -v "${helper}" >/dev/null && { aur_helper=${helper}; return; }
+  done
+  info "Gaze is distributed through the AUR, and no AUR helper was found."
+  ask "Install paru now?" || fail "Install paru or yay, then run ./setup.sh again."
+  helper_dir=$(mktemp -d)
+  git clone --depth 1 https://aur.archlinux.org/paru-bin.git "${helper_dir}/paru-bin"
+  # AUR packages are user-submitted: show what will run before building it,
+  # and let pacman confirm the install itself.
+  info "paru-bin's build script (PKGBUILD), from the AUR:"
+  sed 's/^/     /' "${helper_dir}/paru-bin/PKGBUILD"
+  ask "Build and install paru-bin from this PKGBUILD?" || {
+    rm -rf -- "${helper_dir}"
+    fail "Install paru or yay, then run ./setup.sh again."
+  }
+  (cd "${helper_dir}/paru-bin" && makepkg -si)
+  rm -rf -- "${helper_dir}"
+  aur_helper=paru
+}
 
 step "Installing Gaze (biometric security backend)"
 gaze_pam=
@@ -55,19 +78,7 @@ done
 if command -v gazed >/dev/null && command -v gaze >/dev/null && [[ -n ${gaze_pam} ]]; then
   done_ "Gaze's daemon, CLI, and PAM module are already installed"
 else
-  aur_helper=
-  for helper in paru yay; do
-    command -v "${helper}" >/dev/null && { aur_helper=${helper}; break; }
-  done
-  if [[ -z ${aur_helper} ]]; then
-    info "Gaze is distributed through the AUR, and no AUR helper was found."
-    ask "Install paru now?" || fail "Install paru or yay, then run ./setup.sh again."
-    helper_dir=$(mktemp -d)
-    git clone --depth 1 https://aur.archlinux.org/paru-bin.git "${helper_dir}/paru-bin"
-    (cd "${helper_dir}/paru-bin" && makepkg -si --noconfirm)
-    rm -rf -- "${helper_dir}"
-    aur_helper=paru
-  fi
+  find_aur_helper
   info "Installing Gaze's prebuilt daemon, CLI, and official PAM module with ${aur_helper}."
   "${aur_helper}" -S --needed gaze-bin
   pacman -Q gaze-bin >/dev/null 2>&1 || fail "Gaze did not install."
@@ -93,6 +104,20 @@ fi
 step "Connecting the existing FaceGate experience to Gaze"
 sudo "${project_dir}/install.sh"
 done_ "FaceGate is active; only Gaze can return biometric success"
+
+step "Face unlock at the lock screen and login (optional)"
+info "The lock screen starts looking for you as soon as it locks, with the"
+info "island over it. At the login screen, press Enter on an empty password"
+info "field and the island looks for you; a typed password signs in as usual."
+info "There is no Approve step on either: you asked by sitting down. KWallet"
+info "asks for its password once after a face login."
+if ask "Use your face at the lock screen and login?"; then
+  sudo touch /etc/facegate/greeter
+  sudo /usr/local/lib/facegate/refresh-pam
+  done_ "Face unlock is on at the lock screen and login"
+else
+  info "Skipped. Run ./setup.sh again to add it later."
+fi
 
 step "Meeting FaceGate"
 info "FaceGate opens to show how it works and add your face."

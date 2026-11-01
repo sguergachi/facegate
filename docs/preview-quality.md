@@ -64,7 +64,7 @@ release. Portrait artifacts remain local in `/tmp/facegate-review`.
 | Progress rim | Heavy cyan tube competes with the portrait; searching comet persists after capture begins. | 1.25 pt core with blurred halo; comet fades out at the first sample. |
 | Face grains | Uniform optical footprints give the surface a mechanical stipple. | Stable magnitude-based widths (~0.27–0.34 pt) and a wider radiance hierarchy; no animated surface sparkle. |
 | Capture feedback | Each sample brightens the entire face by up to 14 percentage points of tint multiplier. | Confine capture pulse to the rim. Regression verifies constant facial exposure across pulse strengths. |
-| Haze / back light | Annular placement suggests a second head outline. | Spread haze through a filled elliptical volume and reduce its opacity from .55 to .38. Keep back light. |
+| Haze / back light | Annular placement suggests a second head outline. | Spread haze through a filled elliptical volume and reduce its opacity from .55 to .38. Replace the even wash with a concentrated source behind the head (core, corona, wash) so the dust has an origin. |
 | Distance guide | Bright contour competes with facial silhouette. | Reduce moving/target contour opacity from .52/.16 to .36/.11; preserve directional chevrons. |
 | Turn / tilt guides | Slim curves and clear tips read without covering features. | Retain. |
 | Selective bloom | Soft light separates grains without filling facial openings. | Retain. |

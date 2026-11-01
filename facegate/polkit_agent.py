@@ -198,7 +198,24 @@ class FaceGatePolkitAgent:
 
     # D-Bus ------------------------------------------------------------------
 
-    def _on_call(self, _connection: Any, _sender: str, _path: str, _interface: str, method: str, params: GLib.Variant, invocation: Gio.DBusMethodInvocation) -> None:
+    def _from_polkitd(self, sender: str) -> bool:
+        """Anyone on the system bus can call this object; only polkitd may."""
+        try:
+            (owner,) = self.bus.call_sync(
+                "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus",
+                "GetNameOwner", GLib.Variant("(s)", (AUTHORITY[0],)), GLib.VariantType.new("(s)"),
+                Gio.DBusCallFlags.NONE, 2_000, None,
+            ).unpack()
+        except GLib.Error:
+            return False
+        return sender == owner
+
+    def _on_call(self, _connection: Any, sender: str, _path: str, _interface: str, method: str, params: GLib.Variant, invocation: Gio.DBusMethodInvocation) -> None:
+        if not self._from_polkitd(sender):
+            # Otherwise any local program could put its own words in the island.
+            log("refused %s from %s: not polkitd" % (method, sender))
+            invocation.return_dbus_error("org.freedesktop.DBus.Error.AccessDenied", "Only polkit may call the authentication agent")
+            return
         if method == "BeginAuthentication":
             action_id, message, _icon, details, cookie, identities = params.unpack()
             identity = choose_identity(identities)
@@ -242,7 +259,6 @@ class FaceGatePolkitAgent:
                 self.hud.present_password(
                     auth.requester,
                     lambda password: self._respond(auth, password),
-                    lambda: self._cancel(auth),
                     error,
                     auth.pam_message,
                 )

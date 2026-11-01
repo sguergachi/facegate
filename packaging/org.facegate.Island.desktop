@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=FaceGate Island
+Comment=Shows FaceGate's face scans, including over the lock screen
+Exec=/usr/local/bin/facegate-hud
+Icon=facegate-symbolic
+NoDisplay=true
+# KWin lets only this executable mark its surface as visible over the lock
+# screen, the same grant plasmashell has.
+X-KDE-Wayland-Interfaces=kde_lockscreen_overlay_v1
