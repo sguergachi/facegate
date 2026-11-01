@@ -56,12 +56,15 @@ is the material; content is light on it.
 | Failure (red) | `#ff453a` | Not recognized, errors, destructive buttons |
 
 Rules:
-- Colour carries meaning, never decoration. Cyan means looking, green means
-  done, red means failed or destructive. Nothing else is coloured.
+- Colour carries meaning, never decoration. Cyan means looking, and what the
+  camera is asking of you; green means done, red means failed or
+  destructive. Nothing else is coloured.
 - Primary buttons are white with black text. Secondary buttons are `#1c1c1e`
   with white text. There is no blue accent button.
-- The enrollment starlight is the only imagery. It is tinted cool
-  (`#d6f0ff`), and takes on the result colour only at a result.
+- The enrollment starlight is the only imagery. The face is tinted cool
+  (`#d6f0ff`), and takes on the result colour only at a result. The coaching
+  guide is cyan: it is an instruction, not part of your reflection, so it
+  must never look like dust shed by the face.
 
 ### Typography
 
@@ -350,9 +353,10 @@ friendly and sensing, and never a literal or mask-like face.
 
 - **Consent before camera.** The camera never starts without an explicit
   Approve, or an admin approval in the enrollment flow.
-- **Changes need admin, every time.** Listing faces needs no prompt. Adding or
-  removing one always asks for admin approval in the island (polkit
-  `auth_admin`, never kept).
+- **Changes need admin.** Listing faces needs no prompt. Adding or removing
+  one asks for admin approval in the island. Gaze keeps that grant on the
+  helper process (`auth_admin_keep`), so a later change in the same session
+  does not ask again.
 - **Destructive actions take two steps** and revert themselves if not confirmed.
 - **Escape always backs out**: it declines an approval, cancels a scan, or
   closes the window.
@@ -404,8 +408,8 @@ its height follows the state rather than leaving dead space.
 
 Text blocks are 280 wide (32 from each edge) so copy never runs to the rim.
 Only two button levels exist: a white primary (**Approve**, right) and a dark
-secondary (**Deny**, left; declining the scan leaves sudo at its password
-prompt). Scanning and result states show no button, because Gaze cannot be
+secondary (**Deny**, left; declining the scan turns the island into the
+password field). Scanning and result states show no button, because Gaze cannot be
 interrupted once it is running.
 
 #### Motion
@@ -482,13 +486,15 @@ Principles, in order:
 1. **Hierarchy.** Subject (the face), then call to action (the guide), then
    atmosphere. When the guide speaks, the face steps back and ambient
    effects pause. The chevron is the single brightest point.
-2. **Depth in layers.** Deep field (240 faint stars) → back light (a soft
-   220 × 260 glow at 10%, breathing over 7 s) → haze (90 motes orbiting the
-   head, blurred) → the dust face → guide hairlines → bokeh (five discs
-   under 7% opacity). Parallax ties them to the head's turn: the deep field
-   shifts 7 pt against it, the bokeh with it.
-3. **One motivated light.** The key light that models the face also back-lights
-   the haze; nothing is lit from nowhere.
+2. **Depth in layers.** Deep field (240 faint stars) → source behind the
+   head (a small core, a corona wrapping the silhouette, a faint wash,
+   breathing over 7 s) → haze (90 motes orbiting the source, brighter near
+   the core) → the dust face → guide hairlines → bokeh (five discs under 7%
+   opacity). Parallax ties them to the head's turn: the deep field shifts 7
+   pt against it, the source lags behind it, the bokeh with it.
+3. **One motivated light.** A concentrated source sits behind the head; it
+   wraps the silhouette, lights the haze, and is the origin the star dust
+   seems to come from. Nothing is lit from nowhere.
 4. **Futurism is precision meeting the organic.** Hairline geometry carries
    meaning; free dust carries life. The formed face keeps steady illumination;
    no periodic scan band or independent spark pulses cross its features.
@@ -516,16 +522,23 @@ and grows to fit (surface height 440).
     soft strokes along the upper lids, brows and mouth, including a five-mote
     glint in each iris. No scanline bands or first-camera-pose density bias.
   - *Lit like a sculpture:* a broad key from above-left, a quiet opposing fill,
-    and a restrained rim. A broad, low-intensity highlight models the nose and
+    a restrained rim, and a wrap from the source behind the head that catches
+    the silhouette. A broad, low-intensity highlight models the nose and
     cheek planes. Signed normals suppress back faces; every visible surface
     grain remains present in the shadows. A single display-rate XYZ pose drives both shading and attached particles;
     adaptive smoothing is 140 ms for noise and 50 ms for deliberate turns.
   - *Alive:* resting face motes drift only 0.08 pt with steady radiance; 240
     ambient motes stay drifting faintly around the face.
-  - *Framing:* the view follows the face, eased, with the mesh filling
-    1 / 1.35 of the height. Gaze switches between its colour and IR cameras
-    at every pose; the view is kept in face heights relative to the face and
-    carried across the switch, so the preview never jumps.
+  - *Framing:* the view follows the face's centre, eased. Its zoom is fixed
+    per camera so the face's size in the preview is its size as Gaze measures
+    it (box share of the frame's short side): just close enough (a little
+    past where "closer" ends) the mesh fills 1 / 1.35 of the height, the
+    "closer" guide's destination outline; further away is smaller, too close
+    spills over. Moving closer or back grows or shrinks the face as in a
+    mirror. Past 25–115% of the height the zoom gives way.
+    Gaze switches between its colour and IR cameras at every pose; the view
+    is carried across the switch in face heights, so it never jumps, then
+    eases to the new camera's zoom.
   - *Fallback:* where the mesh can't run, motes take a field over the frame
     and its brightness (colour frames inverted under a head-and-shoulders
     spotlight).
@@ -540,17 +553,19 @@ and grows to fit (surface height 440).
   Camera problems (too dark, clipped, off-centre, distance) outrank pose
   advice. A new instruction must hold 0.4 s before it replaces the one
   showing, so a wavering head doesn't make the words flicker.
-- **Coaching guide:** each directional instruction also draws a guide, in
+- **Coaching guide:** each directional instruction also draws a guide in
+  cyan (grains and hairlines lifted 30% toward white, glow pure cyan), in
   precise 1 pt hairlines that carry the reading, with 420 motes of its own
   dust streaming along them for life. The chevron is the brightest point of
   the scene, with a soft glow. A turn is an arc orbiting the head under the
   chin, from behind the head to just past its front, where the arc moves
   across the view; a tilt is that arc up beside the cheek; a move is a
   straight arrow beside the face. Arrowheads are slim 8 × 10 pt chevrons laid out flat on the screen,
-  so they read at any angle. "Move a little closer" uses a head-shaped contour expanding toward the
-  viewer with outward-pointing chevrons, while "farther away" contracts with
-  inward-pointing chevrons. A faint destination outline makes the change in
-  scale legible. Each 1.8 s cycle fades before resetting. The guide nudges its way every 1.6 s and fades over 300 ms; while it
+  so they read at any angle. "Move a little closer" uses a head-shaped contour that starts on the face's own
+  outline and expands with outward-pointing chevrons, while "farther away"
+  contracts with inward-pointing chevrons. A faint destination outline shows
+  the size the face has at Gaze's ideal distance (at least 15% from the face),
+  so the guide never contradicts the face's own size. Each 1.8 s cycle fades before resetting. The guide nudges its way every 1.6 s and fades over 300 ms; while it
   shows, the face keeps its light so the guide cannot cast an apparent shadow.
 - **Distance coaching:** Gaze needs the face box to span 25–78% of the
   frame's short side. FaceGate measures it on whichever camera is sending
@@ -561,11 +576,21 @@ and grows to fit (surface height 440).
 - **Fluidity:** IR emitters often light only every other frame, so unlit
   frames are skipped and each lit frame cross-fades into the next over 70 ms
   on the frame clock.
-- **Progress:** a trace on the preview's rim, clockwise from top center. A
-  short comet circles until the first sample. Each of the five samples springs
-  the 1.25 pt trace forward with a soft blurred glow. Capture pulses affect
-  only the rim, preserving steady face exposure. Success closes it green and tints the
-  image green. Failure turns it red with the mark's decaying shake.
+- **Progress:** the preview's rim is cut into five segments, one per Gaze
+  pose, clockwise from top center with 8 pt gaps, so what is done and what
+  is left can be counted at a glance. A pose not yet reached is a faint white
+  track (16%). The pose being asked for is a dim cyan track (26%) with a
+  shimmer running along it every 1.6 s, the guide's cycle. A finished pose
+  is solid cyan light (1.75 pt, blurred glow).
+- **Step complete:** the segment ignites. Its fill sweeps clockwise in
+  360 ms behind a bright bead, white-hot, flaring wider and brighter, then
+  cools to cyan over about half a second; 22 sparks shed inward as the sweep
+  passes and fade over 0.9 s. Poses landing together ignite one after the
+  other. All of it stays on the rim, preserving steady face exposure; the
+  hint says "Got it.". Reduced motion keeps the flare but drops the sweep,
+  shimmer and sparks. Success ignites what is left and closes the gaps into
+  one green ring, tinting the image green. Failure turns it red with the
+  mark's decaying shake.
 - **Copy:** "Adding your face", with the detail line as the scan's live hint.
   The hint cross-fades (100 ms out, 240 ms in) while the island eases to the
   new height. A single full-width **Cancel** replaces the Deny/Approve pair.
@@ -689,6 +714,10 @@ remove the forehead crown, and wrong edges bridge anatomical openings.
   monitor scales. Accumulate light before a soft exponential highlight
   shoulder. Bloom remains selective, and atmosphere uses a cheaper half-size
   texture because it is intentionally out of focus.
+- Budget: an effect costs what it draws, not the canvas. The guide's few
+  hundred motes splat into a texture cropped to their box; settled progress
+  segments share one stroke and one blur (only an igniting segment gets its
+  own); sparks are a few filled paths, one per step of age, never a node each.
 - These are monocular inferred landmarks, not measured depth or a full head
   scan. Hair, pores, ears, and hidden surfaces are not supplied by the model.
   Higher particle counts cannot recover details absent from that source.

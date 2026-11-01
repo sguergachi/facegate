@@ -18,6 +18,8 @@ from pathlib import Path
 
 import numpy
 
+from .guidance import FACE_SIZE, SIZE_MARGIN
+
 MODELS = Path(__file__).resolve().parent / "models"
 DETECTOR_SIZE = 128
 LANDMARKS_SIZE = 256
@@ -149,19 +151,37 @@ class FaceMesh:
 
 
 class Framing:
-    """Where the preview looks: the face, eased, filling the frame's height.
+    """Where the preview looks: centred on the face, at a zoom that tells distance.
+
+    The zoom is fixed for each camera so that the face's size in the preview is
+    its size as Gaze measures it (its box's share of the frame's short side):
+    a face just close enough fills 1 / ZOOM of the preview's height, exactly
+    the "closer" guide's destination outline, so coming closer fills the
+    outline as the instruction ends. Further away is smaller, too close spills
+    over. Coming closer or moving back grows or shrinks the face as in a
+    mirror. Only the centre follows the face.
 
     Gaze switches between its colour and IR cameras at every pose, and they
     differ in resolution and field of view, so the same face lands on other
-    pixels. The view is therefore kept relative to the face (its offset and
-    zoom in face heights) and carried across a camera switch in those terms,
-    so the preview never jumps.
+    pixels. The view is therefore carried across a camera switch relative to
+    the face (its offset and zoom in face heights), so the preview never jumps,
+    then eases to the new camera's own zoom.
     """
 
-    # The face mesh spans forehead to chin; the preview shows it this many
-    # times over, so the brow and jaw clear the rounded corners.
+    # Just close enough, the preview shows the face this many times over, so
+    # the brow and jaw clear the rounded corners.
     ZOOM = 1.35
+    # Just close enough: a little past where FaceGate stops asking to come
+    # closer (guidance.py), so the face settles inside Gaze's limits.
+    TARGET_SHARE = FACE_SIZE[0] * SIZE_MARGIN[0] * 1.1
+    # Preview height filled per share of the camera's short side.
+    GAIN = 1 / (ZOOM * TARGET_SHARE)
+    # How much of the preview's height the face may fill, from far to near.
+    # Past these the zoom gives way, so the face neither vanishes nor is lost.
+    FILL = (0.25, 1.15)
     EASE = 0.35
+    # After a camera switch, the zoom settles to the new camera's this fast.
+    SETTLE = 0.15
 
     def __init__(self, width: int, height: int) -> None:
         self.width, self.height = width, height
@@ -176,18 +196,22 @@ class Framing:
     def place(self, mesh: numpy.ndarray, source: tuple[int, int] | None = None) -> numpy.ndarray:
         """The mesh in preview pixels: x, y, z, all in preview pixels.
 
-        ``source`` is the camera frame's size, telling cameras apart.
+        ``source`` is the camera frame's size, telling cameras apart and
+        setting the zoom; without it the face's first size sets the zoom.
         """
         low, high = mesh[:, :2].min(axis=0), mesh[:, :2].max(axis=0)
         centre = (low + high) / 2
         face = max(float(high[1] - low[1]), 1.0)
-        target = numpy.array([*centre, face * self.ZOOM], numpy.float32)
+        # The span of camera pixels the preview's height shows.
+        goal = min(source) / self.GAIN if source else None
         if self.view is None or self.relative is None:
-            self.view = target
+            self.view = numpy.array([*centre, goal or face * self.ZOOM], numpy.float32)
         elif source != self.source:
             self.view = numpy.array([*(centre + self.relative[:2] * face), self.relative[2] * face], numpy.float32)
         else:
-            self.view += (target - self.view) * self.EASE
+            self.view[:2] += (centre - self.view[:2]) * self.EASE
+            span = float(numpy.clip(goal or self.view[2], face / self.FILL[1], face / self.FILL[0]))
+            self.view[2] += (span - self.view[2]) * self.SETTLE
         self.source = source
         self.relative = numpy.array([*(self.view[:2] - centre) / face, self.view[2] / face], numpy.float32)
         cx, cy, span = self.view

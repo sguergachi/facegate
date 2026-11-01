@@ -80,6 +80,8 @@ class Helper:
 
     def run(self, args: list[str]) -> int:
         try:
+            if not args:
+                return self.serve()
             if args == ["list"]:
                 self.handle({"cmd": "list"})
             elif args[:1] == ["remove"] and len(args) == 2:
@@ -95,6 +97,23 @@ class Helper:
             self.send({"event": "error", "message": str(error)})
             return 1
         return 0
+
+    def serve(self) -> int:
+        """Stay up so Gaze's auth_admin_keep applies to later face changes.
+
+        Polkit caches an active-session grant on this process's D-Bus name.
+        Exiting after each add or remove would throw that grant away.
+        """
+        while True:
+            command = self.commands.read(None)
+            if command is None:
+                return 0
+            if not command:
+                continue
+            try:
+                self.handle(command)
+            except faces.GazeError as error:
+                self.send({"event": "error", "message": str(error)})
 
     def handle(self, command: dict[str, Any]) -> None:
         name = command.get("cmd")

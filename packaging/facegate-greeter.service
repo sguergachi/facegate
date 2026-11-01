@@ -1,0 +1,19 @@
+[Unit]
+Description=FaceGate face-scan island on the login screen
+# Runs inside Plasma Login Manager's greeter session, as its greeter user.
+ConditionUser=plasmalogin
+PartOf=plasma-login-wayland.target
+After=plasma-login-kwin_wayland.service
+
+[Service]
+Type=simple
+Environment=GDK_BACKEND=wayland
+# gtk4-layer-shell must be present before GTK opens its Wayland connection.
+Environment=LD_PRELOAD=/usr/lib/libgtk4-layer-shell.so.0
+ExecStart=/usr/local/bin/facegate-hud --greeter
+Restart=on-failure
+RestartSec=2
+Slice=session.slice
+
+[Install]
+WantedBy=plasma-login-wayland.target

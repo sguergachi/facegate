@@ -38,7 +38,7 @@ gi.require_version("Gtk4LayerShell", "1.0")
 gi.require_version("Pango", "1.0")
 from gi.repository import Gdk, Gio, GLib, Graphene, Gsk, Gtk, Gtk4LayerShell, Pango  # noqa: E402
 
-from . import preferences
+from . import lockscreen, preferences
 from . import requester as requesters
 from .faces import GazeClient, GazeError
 from .protocol import MAX_MESSAGE_BYTES, MAX_STREAM_BYTES, PREVIEW_HEIGHT, PREVIEW_WIDTH, decode, default_socket_path, encode
@@ -492,6 +492,31 @@ MESH_POINTS = 1_024
 # A result holds the finished face this long before its stars wink out.
 STARS_HOLD_SECONDS = 0.45
 PREVIEW_COLORS = {"scanning": MARK_PROFILES["scanning"][:3], "success": MARK_PROFILES["success"][:3], "failure": MARK_PROFILES["failure"][:3]}
+# The guide asks something of you, as the camera's cyan: your face stays
+# starlight white, so an instruction never reads as part of the reflection.
+GUIDE_COLOR = PREVIEW_COLORS["scanning"]
+# Gaze captures five poses; the rim is cut into one segment for each, so what
+# is done and what is left can be counted at a glance.
+ENROLL_STEPS = 5
+# Along the rim between segments; the round caps take 1.25 of it.
+SEGMENT_GAP = 8.0
+# A step not yet done is a faint white track. The step being asked for is a
+# dim cyan track with a shimmer running along it, over the guide's own cycle,
+# so it reads as under way rather than done. Done steps are solid cyan light.
+TRACK_ALPHA = 0.16
+CURRENT_ALPHA = 0.26
+SHIMMER = (0.3, 0.6)
+CURRENT_SECONDS = 1.6
+DONE_WIDTH = 1.75
+# A finished step ignites: its fill sweeps clockwise, white-hot, and flares,
+# then cools to cyan, shedding sparks inward as the sweep passes.
+IGNITE_SECONDS = 0.36
+FLARE_SECONDS = 0.5
+SPARKS_PER_STEP = 22
+SPARK_SECONDS = 0.9
+SPARK_TRAVEL = (14.0, 36.0)
+SPARK_SIZE = (1.6, 2.8)
+SPARK_STEPS = 8
 
 
 def rounded_rect_path(context: Any, x: float, y: float, width: float, height: float, radius: float) -> float:
@@ -530,12 +555,50 @@ def rim_path(x: float, y: float, width: float, height: float, radius: float) -> 
     return builder.to_path()
 
 
+def rim_point(x: float, y: float, width: float, height: float, radius: float, distance: float) -> tuple[float, float, float, float]:
+    """A point along ``rim_path``'s rounded rectangle, and its inward normal.
+
+    ``distance`` runs clockwise from top centre, as on the path itself.
+    """
+    radius = max(0.0, min(radius, width / 2, height / 2))
+    right, bottom = x + width, y + height
+    straight_x, straight_y, quarter = width - 2 * radius, height - 2 * radius, math.pi * radius / 2
+    pieces = (
+        ("line", straight_x / 2, (x + width / 2, y), (1, 0)),
+        ("arc", quarter, (right - radius, y + radius), -math.pi / 2),
+        ("line", straight_y, (right, y + radius), (0, 1)),
+        ("arc", quarter, (right - radius, bottom - radius), 0.0),
+        ("line", straight_x, (right - radius, bottom), (-1, 0)),
+        ("arc", quarter, (x + radius, bottom - radius), math.pi / 2),
+        ("line", straight_y, (x, bottom - radius), (0, -1)),
+        ("arc", quarter, (x + radius, y + radius), math.pi),
+        ("line", straight_x / 2, (x + radius, y), (1, 0)),
+    )
+    total = sum(piece[1] for piece in pieces)
+    distance %= total
+    for kind, length, origin, direction in pieces:
+        if distance <= length:
+            break
+        distance -= length
+    else:
+        distance = length
+    if kind == "line":
+        dx, dy = direction
+        return origin[0] + dx * distance, origin[1] + dy * distance, -dy, dx
+    angle = direction + (distance / radius if radius else 0.0)
+    cx, cy = origin
+    return cx + math.cos(angle) * radius, cy + math.sin(angle) * radius, -math.cos(angle), -math.sin(angle)
+
+
 @dataclass
 class PreviewModel:
     """One frame of the enrollment preview."""
 
     state: str = "scanning"
     progress: float = 0.0
+    # Poses captured, and when each one's segment ignited (model.elapsed).
+    steps: int = 0
+    ignited: tuple[float, ...] = ()
     # 0 while scanning, rising to 1 as the result colour takes over.
     result: float = 0.0
     # A brief brightening each time a sample is captured.
@@ -566,18 +629,22 @@ class PreviewArea(Gtk.Widget):
 
     def __init__(self) -> None:
         super().__init__()
-        from .starlight import Look, Starlight
+        from .starlight import Look, StarField, Starlight
 
         self.set_size_request(PREVIEW_WIDTH + 2 * PREVIEW_BLEED, PREVIEW_HEIGHT + 2 * PREVIEW_BLEED)
         self.model = PreviewModel()
-        self.progress = Spring(0.0)
-        self.progress.configure(0.45, 0.9)
+        # Sparks shed by igniting segments: (born, x, y, dx, dy, size), in rim points.
+        self.sparks = numpy.zeros((0, 6), numpy.float32)
+        self.random = numpy.random.default_rng()
         # Written by the socket thread or the panel, picked up on the frame clock:
         # the newest frame, and whether the camera found a face in it.
         self.latest: tuple[bytes, bool] | None = None
         self.latest_mesh: numpy.ndarray | None = None
-        self.stars = Starlight(PREVIEW_WIDTH, PREVIEW_HEIGHT, STAR_STYLE)
-        self.look = Look()
+        self.latest_mark = False
+        self.latest_axis = ""
+        # Simulated and drawn off the GTK thread; see StarField.
+        self.stars = StarField(Starlight(PREVIEW_WIDTH, PREVIEW_HEIGHT, STAR_STYLE))
+        self.look = Look(guide=GUIDE_COLOR)
         self.rim = rim_path(TRACE_INSET, TRACE_INSET, PREVIEW_WIDTH - 2 * TRACE_INSET, PREVIEW_HEIGHT - 2 * TRACE_INSET, PREVIEW_RADIUS - TRACE_INSET)
         self.rim_length = Gsk.PathMeasure.new(self.rim).get_length()
 
@@ -609,29 +676,67 @@ class PreviewArea(Gtk.Widget):
                 # Compatibility with a helper from before physical z transport.
                 points[:, 2] *= max(float(numpy.ptp(points[:468, 1])), 1.0) * 0.32
             self.latest_mesh = numpy.clip(points, (-PREVIEW_WIDTH, -PREVIEW_HEIGHT, -PREVIEW_HEIGHT), (2 * PREVIEW_WIDTH, 2 * PREVIEW_HEIGHT, PREVIEW_HEIGHT))
+            self.latest_mark = bool(message.get("mark")) and len(points) == 0
+            self.latest_axis = str(message.get("axis") or "") if self.latest_mark else ""
             self.latest = None
         except (KeyError, TypeError, ValueError):
             pass
 
     def reset(self) -> None:
         self.model = PreviewModel()
-        self.progress.value = self.progress.target = self.progress.velocity = 0.0
+        self.sparks = self.sparks[:0]
         self.latest = self.latest_mesh = None
+        self.latest_mark = False
+        self.latest_axis = ""
         self.stars.reset()
 
     def set_progress(self, value: float) -> None:
+        """Gaze's progress, a share of its poses: each new one ignites its segment."""
         value = clamp(value)
-        if value > self.progress.target:
-            self.model.pulse = 1.0
-        self.progress.target = value
+        self.model.progress = max(self.model.progress, value)
+        self._complete(round(value * ENROLL_STEPS))
+
+    def _complete(self, steps: int) -> None:
+        model = self.model
+        steps = min(ENROLL_STEPS, steps)
+        ignited = list(model.ignited)
+        for index in range(model.steps, steps):
+            # Steps landing together ignite one after another, not as one.
+            born = max(model.elapsed, ignited[-1] + IGNITE_SECONDS * 0.6 if ignited else 0.0)
+            ignited.append(born)
+            self._shed(index, born)
+            model.pulse = 1.0
+        model.steps = max(model.steps, steps)
+        model.ignited = tuple(ignited)
+
+    def _segment(self, index: int, gap: float = SEGMENT_GAP) -> tuple[float, float]:
+        """Where step ``index``'s segment starts along the rim, and its length."""
+        share = self.rim_length / ENROLL_STEPS
+        return index * share + gap / 2, share - gap
+
+    def _shed(self, index: int, born: float) -> None:
+        """Sparks along a segment, each loosed as the sweep passes it."""
+        if reduced_motion():
+            return
+        start, length = self._segment(index)
+        random = self.random
+        along = random.uniform(0, 1, SPARKS_PER_STEP)
+        rows = []
+        for share in along:
+            x, y, nx, ny = rim_point(TRACE_INSET, TRACE_INSET, PREVIEW_WIDTH - 2 * TRACE_INSET, PREVIEW_HEIGHT - 2 * TRACE_INSET, PREVIEW_RADIUS - TRACE_INSET, start + share * length)
+            travel = random.uniform(*SPARK_TRAVEL)
+            # Mostly inward, a little along the rim.
+            aside = random.normal(0, 0.35)
+            rows.append((born + EASE_OUT(share) * IGNITE_SECONDS, x, y, (nx - ny * aside) * travel, (ny + nx * aside) * travel, random.uniform(*SPARK_SIZE)))
+        self.sparks = numpy.concatenate([self.sparks, numpy.array(rows, numpy.float32)])
 
     def set_state(self, state: str) -> None:
         if state != self.model.state:
             self.model.state = state
             self.model.state_elapsed = 0.0
             if state == "success":
-                self.progress.target = 1.0
-                self.model.pulse = 1.0
+                self.model.progress = 1.0
+                self._complete(ENROLL_STEPS)
 
     def advance(self, elapsed: float) -> None:
         model = self.model
@@ -639,12 +744,20 @@ class PreviewArea(Gtk.Widget):
         if latest is not None:
             self.stars.submit(*latest)
         mesh, self.latest_mesh = self.latest_mesh, None
+        mark, self.latest_mark = self.latest_mark, False
+        axis, self.latest_axis = self.latest_axis, ""
+        if mark and not axis:
+            stars = getattr(self.stars, "field", self.stars)
+            axis = {"turn-left": "left", "turn-right": "right", "tilt-up": "up", "tilt-down": "down"}.get(
+                getattr(stars, "arrow", "") or getattr(stars, "pending_arrow", ""),
+                "",
+            )
         if mesh is not None:
-            self.stars.submit_mesh(mesh)
+            self.stars.submit_mesh(mesh, mark, axis)
         model.elapsed += elapsed
         model.state_elapsed += elapsed
-        self.progress.step(elapsed)
-        model.progress = clamp(self.progress.value)
+        if len(self.sparks):
+            self.sparks = self.sparks[model.elapsed - self.sparks[:, 0] < SPARK_SECONDS]
         model.pulse = max(0.0, model.pulse - elapsed / 0.45)
         target = 0.0 if model.state == "scanning" else 1.0
         model.result += (target - model.result) * (1 - math.exp(-elapsed * 8))
@@ -655,6 +768,26 @@ class PreviewArea(Gtk.Widget):
         look.tint, look.glow, look.shake = preview_look(model)
         self.queue_draw()
 
+    def _segment_stroke(self, snapshot: Gtk.Snapshot, index: int, fill: float, width: float, color: tuple[float, float, float], alpha: float, gap: float, begin: float = 0.0) -> None:
+        """Step ``index``'s segment from ``begin`` to ``fill``, as shares of it."""
+        start, length = self._segment(index, gap)
+        on = length * (fill - begin)
+        if on < 0.5 or alpha <= 0.002:
+            return
+        # A dash from the segment's start; the pattern outruns the rim.
+        period = on + 2 * self.rim_length
+        self._stroke(snapshot, width, color, alpha, [on, 2 * self.rim_length], period - start - length * begin)
+
+    def _segments_stroke(self, snapshot: Gtk.Snapshot, indices: list[int], width: float, color: tuple[float, float, float], alpha: float, gap: float) -> None:
+        """Whole segments as one dashed stroke, so they share one draw and one blur."""
+        if not indices or alpha <= 0.002:
+            return
+        spans = [self._segment(index, gap) for index in sorted(indices)]
+        dash: list[float] = []
+        for (start, length), following in zip(spans, spans[1:] + [None]):
+            dash += [length, following[0] - start - length if following else 2 * self.rim_length]
+        self._stroke(snapshot, width, color, alpha, dash, sum(dash) - spans[0][0])
+
     def _stroke(self, snapshot: Gtk.Snapshot, width: float, color: tuple[float, float, float], alpha: float, dash: list[float] | None = None, offset: float = 0.0) -> None:
         stroke = Gsk.Stroke.new(width)
         stroke.set_line_cap(Gsk.LineCap.ROUND)
@@ -664,7 +797,7 @@ class PreviewArea(Gtk.Widget):
         snapshot.append_stroke(self.rim, stroke, Gdk.RGBA(red=color[0], green=color[1], blue=color[2], alpha=alpha))
 
     def do_snapshot(self, snapshot: Gtk.Snapshot) -> None:
-        model, look, length = self.model, self.look, self.rim_length
+        model, look = self.model, self.look
         native = self.get_native()
         surface = native.get_surface() if native else None
         scale = surface.get_scale() if surface else float(self.get_scale_factor())
@@ -672,22 +805,77 @@ class PreviewArea(Gtk.Widget):
         snapshot.translate(Graphene.Point().init(PREVIEW_BLEED + look.shake, PREVIEW_BLEED))
         self.stars.snapshot(snapshot, scale, look)
         color = PREVIEW_COLORS.get(model.state, PREVIEW_COLORS["scanning"])
-        searching = max(0.0, 1 - model.progress / 0.04) * (1 - model.result)
-        if searching > 0.01:
-            # A short comet circles until the first sample lands.
-            phase = (model.elapsed * 0.4) % 1.0
-            self._stroke(snapshot, 1.25, color, 0.48 * searching, [length * 0.12, length * 0.88], (1 - phase) * length)
-        progress = max(model.progress, model.result if model.state == "success" else 0.0)
-        if progress > 0.002:
-            # Captured samples fill the rim clockwise from the top.
-            dash = None if progress >= 0.999 else [length * progress, length * 2]
+        # A result fuses the segments into one closed ring.
+        gap = SEGMENT_GAP * (1 - model.result) if model.state == "success" else SEGMENT_GAP
+        instant = reduced_motion()
+        # Tracks and settled segments are each one stroke; only a segment
+        # still igniting gets strokes (and a blur) of its own.
+        tracks, settled, igniting = [], [], []
+        for index in range(ENROLL_STEPS):
+            if index < len(model.ignited) and model.elapsed >= model.ignited[index]:
+                age = model.elapsed - model.ignited[index]
+                fill = 1.0 if instant else EASE_OUT(clamp(age / IGNITE_SECONDS))
+                flare = clamp(age / 0.08) * math.exp(-max(0.0, age - IGNITE_SECONDS * 0.5) / FLARE_SECONDS * 2.5)
+                if fill >= 1.0 and flare < 0.01:
+                    settled.append(index)
+                    continue
+                igniting.append((index, fill, flare))
+                if fill >= 1.0:
+                    continue
+            # Not done, or the unlit rest of a segment under its sweep.
+            tracks.append(index)
+        self._segments_stroke(snapshot, tracks, 1.25, WHITE, TRACK_ALPHA * (1 - model.result), gap)
+        if model.state == "scanning" and model.steps < ENROLL_STEPS and model.steps not in {index for index, _, _ in igniting}:
+            current = model.steps
+            self._segment_stroke(snapshot, current, 1.0, 1.25, GUIDE_COLOR, CURRENT_ALPHA, gap)
+            if not instant:
+                head = (model.elapsed / CURRENT_SECONDS) % 1.0 * (1 + SHIMMER[0])
+                fade = math.sin(math.pi * clamp(head / (1 + SHIMMER[0])))
+                self._segment_stroke(snapshot, current, min(1.0, head), 1.25, GUIDE_COLOR, SHIMMER[1] * fade, gap, max(0.0, head - SHIMMER[0]))
+        if settled:
             # A thin luminous trace, not a second solid border. Blur the halo
             # itself so progress reads as light rather than a thick neon tube.
             snapshot.push_blur(2.0)
-            self._stroke(snapshot, 2.5, color, 0.18 + 0.18 * model.pulse, dash)
+            self._segments_stroke(snapshot, settled, 2.5, color, 0.2, gap)
             snapshot.pop()
-            self._stroke(snapshot, 1.25, color, 0.72 + 0.14 * model.pulse, dash)
+            self._segments_stroke(snapshot, settled, DONE_WIDTH, color, 0.9, gap)
+        for index, fill, flare in igniting:
+            # White-hot as it ignites, cooling to the state's colour.
+            hot = tuple(mix(color[channel], 1.0, 0.7 * flare) for channel in range(3))
+            snapshot.push_blur(2.0 + 2.0 * flare)
+            self._segment_stroke(snapshot, index, fill, 2.5 + 2.5 * flare, hot, 0.2 + 0.55 * flare, gap)
+            snapshot.pop()
+            self._segment_stroke(snapshot, index, fill, DONE_WIDTH + 0.75 * flare, hot, 0.9 + 0.1 * flare, gap)
+            if fill < 1.0:
+                # The sweep's head: a bright bead running clockwise.
+                start, span = self._segment(index, gap)
+                x, y, _, _ = rim_point(TRACE_INSET, TRACE_INSET, PREVIEW_WIDTH - 2 * TRACE_INSET, PREVIEW_HEIGHT - 2 * TRACE_INSET, PREVIEW_RADIUS - TRACE_INSET, start + span * fill)
+                self.stars._disc(snapshot, x, y, 9.0, 9.0, 0.55 * (1 - fill), GUIDE_COLOR)
+                self.stars._disc(snapshot, x, y, 3.2, 3.2, 0.95, WHITE)
+        self._sparks(snapshot)
         snapshot.restore()
+
+    def _sparks(self, snapshot: Gtk.Snapshot) -> None:
+        """Every live spark as a dot, one filled path per step of age, not a node each."""
+        if not len(self.sparks):
+            return
+        age = (self.model.elapsed - self.sparks[:, 0]) / SPARK_SECONDS
+        live = (age >= 0) & (age < 1)
+        if not live.any():
+            return
+        sparks, age = self.sparks[live], age[live]
+        travel = numpy.array([EASE_OUT(float(value)) for value in age], numpy.float32)
+        x = sparks[:, 1] + sparks[:, 3] * travel
+        y = sparks[:, 2] + sparks[:, 4] * travel
+        # A spark cools from white to cyan as it fades; eight steps read as smooth.
+        steps = numpy.minimum((age * SPARK_STEPS).astype(int), SPARK_STEPS - 1)
+        for step in numpy.unique(steps):
+            builder = Gsk.PathBuilder.new()
+            for index in numpy.flatnonzero(steps == step):
+                builder.add_circle(Graphene.Point().init(float(x[index]), float(y[index])), float(sparks[index, 5]) / 2)
+            middle = (step + 0.5) / SPARK_STEPS
+            tint = tuple(mix(1.0, GUIDE_COLOR[channel], middle) for channel in range(3))
+            snapshot.append_fill(builder.to_path(), Gsk.FillRule.WINDING, Gdk.RGBA(red=tint[0], green=tint[1], blue=tint[2], alpha=0.9 * (1 - middle) ** 2))
 
 
 @dataclass(frozen=True)
@@ -772,6 +960,13 @@ VERIFIED_HOLD_MS = 600
 SCANNING = View("scanning", "Looking for you", "Hold still for a moment.", False)
 SUCCESS = View("success", "Verified", "Continuing securely.", False)
 FAILURE = View("failure", "Not recognized", "Use your password instead.", False)
+# The login and lock screens, where the island only ever reports the scan.
+GREETER_SUCCESS = View("success", "Welcome back", "Signing you in…", False)
+GREETER_FAILURE = View("failure", "Not recognized", "Type your password to sign in.", False)
+UNLOCK_SUCCESS = View("success", "Welcome back", "Unlocking…", False)
+UNLOCK_FAILURE = View("failure", "Not recognized", "Type your password to unlock.", False)
+# PAM services of KScreenLocker's biometric slots.
+LOCK_SCREEN_SERVICES = ("kde-fingerprint", "kde-smartcard")
 ENROLLING = View("scanning", "Adding your face", "Waiting for the camera…", True, primary="", secondary="Cancel", preview=True)
 ENROLLED = View("success", "Face added", "You can now approve with a glance.", False, preview=True)
 
@@ -787,22 +982,27 @@ class Enrollment:
     on_cancel: Callable[[], None] | None = None
 
 
-def peer_pid(connection: socket.socket) -> int:
-    """The pid the kernel attests for the other end of a Unix socket."""
+# Only PAM asks for consent or a password, and it always runs as root: inside
+# sudo, or in polkit's setuid helper. Anything else running as you is refused,
+# so it can't borrow the island to collect a password.
+PAM_PHASES = frozenset({"approval", "password"})
+
+
+def peer_credentials(connection: socket.socket) -> tuple[int, int]:
+    """The pid and uid the kernel attests for the other end of a Unix socket."""
     try:
-        pid, _uid, _gid = struct.unpack("3i", connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")))
+        pid, uid, _gid = struct.unpack("3i", connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")))
     except (OSError, struct.error):
-        return 0
-    return pid
+        return 0, -1
+    return pid, uid
 
 
-def sudo_requester(connection: socket.socket, service: object) -> dict[str, Any] | None:
+def sudo_requester(pid: int, service: object) -> dict[str, Any] | None:
     """Who is behind a sudo approval or password prompt, read from /proc for display only.
 
     The PAM module runs inside sudo itself, so the connecting process's argv is
     the command and its ancestors are the app that ran it.
     """
-    pid = peer_pid(connection)
     if pid <= 1:
         return None
     try:
@@ -904,7 +1104,13 @@ DISABLED_REPLIES = {"approval": {"approved": False}, "password": {"password": No
 
 
 class EdgeHud:
-    def __init__(self) -> None:
+    # On the login screen: no approvals, passwords or configuration.
+    greeter = False
+    # The current scan unlocks the lock screen.
+    unlocking = False
+
+    def __init__(self, greeter: bool = False) -> None:
+        self.greeter = greeter
         self.window = Gtk.Window()
         self.window.set_decorated(False)
         self.window.set_resizable(False)
@@ -916,15 +1122,18 @@ class EdgeHud:
         Gtk4LayerShell.set_keyboard_mode(self.window, Gtk4LayerShell.KeyboardMode.ON_DEMAND)
         self.positioned = False
         self.window.connect("map", self._position_on_mapped_monitor)
+        # Each map is a new layer surface; KWin needs the mark before its first buffer.
+        self.window.connect("map", lambda *_: lockscreen.allow(self.window))
 
         self.pending: PendingApproval | None = None
         # Off: prompts fall back to their usual password dialogs, unseen.
-        self.enabled = preferences.enabled(preferences.load())
+        self.enabled = greeter or preferences.enabled(preferences.load())
         # sudo waiting for a password typed in the island (no face enrolled).
         self.sudo_password: socket.socket | None = None
+        self.sudo_password_id = ""
+        self.sudo_lock_timer: int | None = None
         self.sudo_password_watch: int | None = None
         # While pam_faillock refuses every password, when to offer the field.
-        self.sudo_lock_timer: int | None = None
         self.enrollment: Enrollment | None = None
         # The panel's scan, announced before its admin approval so the island
         # can turn straight into the preview once approval is granted.
@@ -995,7 +1204,6 @@ class EdgeHud:
         self.entry.connect("activate", lambda *_: self._primary())
         # Set by the polkit agent while it shows the password view.
         self.on_password: Callable[[str], None] | None = None
-        self.on_password_cancel: Callable[[], None] | None = None
         self.polkit: Any = None
 
         self.preview = PreviewArea()
@@ -1262,13 +1470,11 @@ class EdgeHud:
         self.approve.set_sensitive(view.actions)
         self.deny.set_sensitive(view.actions)
         self.entry.set_sensitive(view.password)
+        self.entry.set_can_target(view.password)
+        self.entry.set_can_focus(view.password)
         if view.password and view != self.view:
             self.entry.set_text("")
-        # Typing a password needs the keyboard without a click first.
-        Gtk4LayerShell.set_keyboard_mode(
-            self.window,
-            Gtk4LayerShell.KeyboardMode.EXCLUSIVE if view.password else Gtk4LayerShell.KeyboardMode.ON_DEMAND,
-        )
+        self._want_keyboard(bool(view.password))
         if not self.visible:
             self._arrive(view)
             return
@@ -1311,7 +1517,7 @@ class EdgeHud:
             for index, item in enumerate(incoming):
                 item.alpha.to(1, now, 0.26, index * 0.04)
             if view.password:
-                self.entry.grab_focus()
+                self._focus_password()
 
         self._at(0.15, swap)
 
@@ -1358,7 +1564,7 @@ class EdgeHud:
         for index, item in enumerate(stagger):
             item.alpha.to(1, self.now, 0.3, 0.1 + index * 0.04)
         if view.password:
-            GLib.idle_add(lambda: (self.entry.grab_focus(), False)[1])
+            GLib.idle_add(self._focus_password)
         # Follow the pointer: choose the output afresh every time we appear.
         if not self.apply_monitor_placement():
             self.positioned = False
@@ -1377,7 +1583,7 @@ class EdgeHud:
         self.deny.set_sensitive(False)
         self.entry.set_sensitive(False)
         self.entry.set_text("")
-        self.on_password = self.on_password_cancel = None
+        self.on_password = None
         Gtk4LayerShell.set_keyboard_mode(self.window, Gtk4LayerShell.KeyboardMode.ON_DEMAND)
         for item in self.items:
             item.alpha.to(0, self.now, 0.16)
@@ -1507,15 +1713,40 @@ class EdgeHud:
             return
         self.resolve(False)
 
-    def present_password(self, requester: object, on_password: Callable[[str], None], on_cancel: Callable[[], None], error: bool = False, message: str = "") -> None:
+    def _want_keyboard(self, exclusive: bool) -> None:
+        """Exclusive keyboard on an already-mapped layer surface needs a kick.
+
+        Switching ON_DEMAND → EXCLUSIVE in place is ignored by KWin; drop to
+        NONE first, then take exclusive and present so typing works without a click.
+        """
+        Gtk4LayerShell.set_keyboard_mode(self.window, Gtk4LayerShell.KeyboardMode.NONE)
+        Gtk4LayerShell.set_keyboard_mode(
+            self.window,
+            Gtk4LayerShell.KeyboardMode.EXCLUSIVE if exclusive else Gtk4LayerShell.KeyboardMode.ON_DEMAND,
+        )
+        if exclusive and self.visible:
+            self.window.present()
+
+    def _focus_password(self) -> bool:
+        if not (self.view and self.view.password):
+            return False
+        self.entry.set_sensitive(True)
+        self.entry.set_editable(True)
+        self.entry.set_can_target(True)
+        self.entry.set_can_focus(True)
+        self.entry.grab_focus()
+        return False
+
+    def present_password(self, requester: object, on_password: Callable[[str], None], error: bool = False, message: str = "") -> None:
         """The password in the island: polkit's fallback, or sudo without a face."""
         self.silenced = False
-        self.on_password, self.on_password_cancel = on_password, on_cancel
+        self.on_password = on_password
         # Every request is a fresh attempt: never resubmit what was just rejected,
         # even when the view looks the same as the last one.
         self.entry.set_text("")
         self._present(password_view(requester, error, message))
         self.password_busy(False)
+        GLib.idle_add(self._focus_password)
         if error:
             # The lock shakes, then settles back to waiting for the password.
             self.mark.set_state("denied")
@@ -1529,11 +1760,11 @@ class EdgeHud:
         self.deny.set_sensitive(True)
         self.mark.set_state("checking" if busy else "password")
         if not busy:
-            self.entry.grab_focus()
+            self._focus_password()
 
     def cancel(self) -> None:
         """Close on the user's request: decline any pending approval and stay
-        hidden for the rest of this attempt, even if Howdy reports back later."""
+        hidden for the rest of this attempt, even if Gaze reports back later."""
         self.silenced = True
         if self.dismiss_timeout:
             GLib.source_remove(self.dismiss_timeout)
@@ -1673,7 +1904,7 @@ class EdgeHud:
         """Return from an auth/scan interlude to the panel underneath."""
         self.departing = False
         self.scheduled.clear()
-        self.on_password = self.on_password_cancel = None
+        self.on_password = None
         self.entry.set_text("")
         Gtk4LayerShell.set_keyboard_mode(self.window, Gtk4LayerShell.KeyboardMode.ON_DEMAND)
         for item in self.items:
@@ -1728,11 +1959,15 @@ class EdgeHud:
 
     def present_approval(self, requester: object = None) -> None:
         self.silenced = False
+        self.unlocking = False
         self._present(approval_view(requester))
 
     def present_scanning(self) -> None:
-        # Howdy cannot be interrupted once running, so no action is offered.
+        # A Gaze scan cannot be interrupted once running, so no action is offered.
         # If sudo is cancelled mid-scan no result ever arrives; never linger.
+        if self.greeter or self.unlocking:
+            # Each attempt is a fresh request; Escape silenced only the last.
+            self.silenced = False
         if self.silenced or self.enrolling:
             return
         self._present(SCANNING)
@@ -1743,14 +1978,31 @@ class EdgeHud:
         # replace the preview that has already taken over.
         if self.silenced or self.enrolling:
             return
-        view = SUCCESS if success else FAILURE
+        if self.greeter:
+            view = GREETER_SUCCESS if success else GREETER_FAILURE
+        elif self.unlocking:
+            view = UNLOCK_SUCCESS if success else UNLOCK_FAILURE
+        else:
+            view = SUCCESS if success else FAILURE
         if title or detail:
             view = View(view.state, title or view.title, detail or view.detail, False)
         if self.view and self.view.password:
             # A typed password resolves on the lock, never on the face.
             view = replace(view, state="unlocked" if success else "denied")
+            self._present(view)
+            self.dismiss_timeout = GLib.timeout_add(1100 if success else 1600, self.dismiss)
+            return
         self._present(view)
-        self.dismiss_timeout = GLib.timeout_add(1100 if success else 1600, self.dismiss)
+        if success:
+            self.dismiss_timeout = GLib.timeout_add(1100, self.dismiss)
+            return
+        if self.greeter or self.unlocking:
+            # The login and lock screens take the password in their own field.
+            self.dismiss_timeout = GLib.timeout_add(1600, self.dismiss)
+            return
+        # Face failed: PAM falls back to a password. Keep the island up so
+        # the field can replace this result instead of the island vanishing.
+        self.dismiss_timeout = GLib.timeout_add(20_000, self.dismiss)
 
     @staticmethod
     def reply(connection: socket.socket, payload: dict[str, Any]) -> None:
@@ -1912,18 +2164,19 @@ class EdgeHud:
     # sudo without a face: the password is typed here and handed back to PAM,
     # where pam_unix checks it. The island never judges it.
 
-    def ask_sudo_password(self, connection: socket.socket, requester: object, error: bool, locked_until: float = 0) -> None:
+    def ask_sudo_password(self, connection: socket.socket, requester: object, error: bool, locked_until: float = 0, request_id: str = "") -> None:
         if self.dismiss_timeout:
             # A retry after a wrong password replaces the checking state.
             GLib.source_remove(self.dismiss_timeout)
             self.dismiss_timeout = None
         self.sudo_password = connection
+        self.sudo_password_id = request_id
         # Ctrl+C in the terminal closes sudo's end; don't keep asking.
         self.sudo_password_watch = GLib.io_add_watch(connection.fileno(), GLib.PRIORITY_DEFAULT, GLib.IO_IN | GLib.IO_HUP | GLib.IO_ERR, self._sudo_hung_up)
         if locked_until and (locked_until < 0 or locked_until > time.time()):
             self._show_sudo_lock(requester, error, locked_until)
         else:
-            self.present_password(requester, self._submit_sudo_password, lambda: self._answer_sudo_password(None), error)
+            self.present_password(requester, self._submit_sudo_password, error)
 
     def _show_sudo_lock(self, requester: object, error: bool, until: float) -> None:
         """Say when sudo will accept a password, rather than take one it must refuse."""
@@ -1931,7 +2184,7 @@ class EdgeHud:
             message = "Too many failed attempts. An administrator needs to unlock sudo."
         else:
             message = "Too many failed attempts. Try again at %s." % time.strftime("%H:%M", time.localtime(until + 59))
-        self.present_password(requester, self._submit_sudo_password, lambda: self._answer_sudo_password(None), False, message)
+        self.present_password(requester, self._submit_sudo_password, False, message)
         self.entry.set_sensitive(False)
         self.approve.set_sensitive(False)
         self.mark.set_state("denied")
@@ -1942,20 +2195,20 @@ class EdgeHud:
             def unlocked() -> bool:
                 self.sudo_lock_timer = None
                 if self.sudo_password:
-                    self.present_password(requester, self._submit_sudo_password, lambda: self._answer_sudo_password(None), error)
+                    self.present_password(requester, self._submit_sudo_password, error)
                 return False
 
             self.sudo_lock_timer = GLib.timeout_add(max(0, int((until - time.time()) * 1000)) + 500, unlocked)
-
-    def _submit_sudo_password(self, password: str) -> None:
-        self._answer_sudo_password(password)
-        # The field keeps spinning until sudo reports success or asks again.
-        self.dismiss_timeout = GLib.timeout_add(SUDO_CHECK_MS, self.dismiss)
 
     def _clear_sudo_lock(self) -> None:
         if self.sudo_lock_timer:
             GLib.source_remove(self.sudo_lock_timer)
             self.sudo_lock_timer = None
+
+    def _submit_sudo_password(self, password: str) -> None:
+        self._answer_sudo_password(password)
+        # The field keeps spinning until sudo reports success or asks again.
+        self.dismiss_timeout = GLib.timeout_add(SUDO_CHECK_MS, self.dismiss)
 
     def _answer_sudo_password(self, password: str | None) -> None:
         self._clear_sudo_lock()
@@ -1964,7 +2217,7 @@ class EdgeHud:
             GLib.source_remove(self.sudo_password_watch)
             self.sudo_password_watch = None
         if connection:
-            self.reply(connection, {"password": password})
+            self.reply(connection, {"id": self.sudo_password_id, "password": password})
 
     def _sudo_hung_up(self, *_args: Any) -> bool:
         self.sudo_password_watch = None
@@ -1994,6 +2247,9 @@ class EdgeHud:
 
     def handle_request(self, message: dict[str, Any], connection: socket.socket) -> bool:
         phase = message.get("phase")
+        if self.greeter and phase not in ("scanning", "result"):
+            self.reply(connection, {**DISABLED_REPLIES.get(phase, {"ok": False}), "reason": "greeter"})
+            return False
         if not self.enabled and phase in DISABLED_REPLIES:
             # Turned off: never show; PAM falls through to the usual prompt.
             self.reply(connection, {**DISABLED_REPLIES[phase], "reason": "disabled"})
@@ -2003,13 +2259,28 @@ class EdgeHud:
             self.open_config(message.get("welcome") is True)
         elif phase == "password":
             if self.pending or self.enrolling or self.sudo_password or (self.polkit and self.polkit.active):
-                self.reply(connection, {"password": None, "reason": "busy"})
+                self.reply(connection, {"id": str(message.get("id", "")), "password": None, "reason": "busy"})
                 return False
             try:
                 locked_until = float(message.get("locked_until") or 0)
             except (TypeError, ValueError):
                 locked_until = 0
-            self.ask_sudo_password(connection, message.get("requester"), message.get("error") is True, locked_until)
+            requester = message.get("requester")
+            error = message.get("error") is True
+            request_id = str(message.get("id", ""))
+            delay = 900 if (self.view and self.view.state == "failure") else 0
+
+            def show() -> bool:
+                if self.silenced or self.enrolling or self.sudo_password or (self.polkit and self.polkit.active):
+                    self.reply(connection, {"id": request_id, "password": None, "reason": "busy"})
+                    return False
+                self.ask_sudo_password(connection, requester, error, locked_until, request_id)
+                return False
+
+            if delay:
+                GLib.timeout_add(delay, show)
+            else:
+                show()
         elif phase == "approval":
             if self.pending or self.enrolling or self.sudo_password:
                 self.reply(connection, {"approved": False, "reason": "busy"})
@@ -2036,6 +2307,7 @@ class EdgeHud:
                 self.approval_timeout = GLib.timeout_add(max(1_000, requested), self._approval_timed_out)
         elif phase == "scanning":
             self.reply(connection, {"ok": True})
+            self.unlocking = message.get("service") in LOCK_SCREEN_SERVICES
             self.present_scanning()
         elif phase == "result":
             self.reply(connection, {"ok": True})
@@ -2084,20 +2356,21 @@ class HudServer:
         if message.get("phase") == "enroll":
             self._stream(connection, rest)
             return
-        if message.get("phase") == "approval" and not face_scan_available(message.get("username")):
-            # With no enrolled face there is nothing useful to scan. False can
-            # only fall through to password; it can never authorize the caller.
-            self.hud.reply(
-                connection,
-                {
-                    "id": str(message.get("id", "")),
-                    "approved": False,
-                    "reason": "password-only",
-                },
-            )
-            return
-        if message.get("phase") in ("approval", "password") and message.get("service") != "polkit-1" and not message.get("requester"):
-            message["requester"] = sudo_requester(connection, message.get("service"))
+        phase = message.get("phase")
+        if phase in PAM_PHASES:
+            pid, uid = peer_credentials(connection)
+            if uid != 0:
+                print("[facegate] refused a %s request from pid %d (uid %d): not PAM" % (phase, pid, uid), flush=True)
+                self.hud.reply(connection, {"id": str(message.get("id", "")), **DISABLED_REPLIES[phase], "reason": "untrusted"})
+                return
+            if phase == "approval" and not face_scan_available(message.get("username")):
+                # With no enrolled face there is nothing useful to scan. False can
+                # only fall through to password; it can never authorize the caller.
+                self.hud.reply(connection, {"id": str(message.get("id", "")), "approved": False, "reason": "password-only"})
+                return
+            # polkit's agent names its own caller; sudo's is the connecting process.
+            if message.get("service") != "polkit-1":
+                message["requester"] = sudo_requester(pid, message.get("service"))
         GLib.idle_add(self.hud.handle_request, message, connection)
 
     @staticmethod
@@ -2144,7 +2417,7 @@ class HudServer:
 
 
 class Demo:
-    """Loops the real request flow without PAM, Howdy, or the camera.
+    """Loops the real request flow without PAM, Gaze, or the camera.
 
     Approve pretends to scan, then alternates success and failure. Use
     Deny or Escape decline. A new request follows each ending.
@@ -2210,6 +2483,7 @@ def main() -> int:
     parser.add_argument("--demo-enroll", action="store_true", help="loop the Add Face scan with the real camera, saving nothing")
     parser.add_argument("--camera", help="camera for --demo-enroll (default: the first infrared one)")
     parser.add_argument("--no-polkit-agent", action="store_true", help="leave polkit prompts to the desktop's own agent")
+    parser.add_argument("--greeter", action="store_true", help="run on the login screen: show face scans only")
     args = parser.parse_args()
     if args.demo_enroll:
         from .enroll_demo import main as enroll_demo
@@ -2224,11 +2498,11 @@ def main() -> int:
             return 0
     args.socket.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     args.socket.unlink(missing_ok=True)
-    hud = EdgeHud()
+    hud = EdgeHud(greeter=args.greeter)
     server = HudServer(args.socket, hud)
     server.start()
     agent = None
-    if not args.no_polkit_agent:
+    if not (args.no_polkit_agent or args.greeter):
         try:
             from .polkit_agent import FaceGatePolkitAgent
 

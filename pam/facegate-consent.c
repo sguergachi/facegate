@@ -6,13 +6,27 @@
  * PAM stack installed by FaceGate treats that result as "continue to Gaze",
  * never as authentication success.  The notification modes always return
  * PAM_IGNORE and are best-effort UI updates only.
+ *
+ * "greeter" mode serves the login screen, where submitting the form is the
+ * request.  It takes the password the greeter already holds: a typed one goes
+ * on to the normal password stack, an empty one starts the face scan.  Either
+ * way the result only picks the next step, never the verdict.
+ *
+ * "scanning" mode serves the lock screen's biometric slot, which KScreenLocker
+ * starts by itself: it only tells the island a scan is starting.
+ *
+ * "hud_user=NAME" sends HUD messages to NAME's island instead of the PAM
+ * user's; the login screen's island runs as the greeter's own user.
  */
 
 #define _GNU_SOURCE
 
+#include <ctype.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <pwd.h>
 #include <security/pam_appl.h>
+#include <security/pam_ext.h>
 #include <security/pam_modules.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -32,9 +46,33 @@
 #define FACEGATE_SOCKET "facegate.sock"
 #define FACEGATE_MAX_MESSAGE 4096
 #define FACEGATE_CONSENT_SECONDS 12
-#define FACEGATE_PASSWORD_ONLY_DATA "facegate.password-only"
+#define FACEGATE_PASSWORD_SECONDS 60
+#define FACEGATE_PASSWORD_MAX_SECONDS 3600
+#define FACEGATE_SCANNED_DATA "facegate.scanned"
+#define FACEGATE_FAILLOCK_CONF "/etc/security/faillock.conf"
+#define FACEGATE_FAILLOCK_VALID 0x1
+#define FACEGATE_PASSWORD_ASKED_DATA "facegate.password-asked"
+#ifndef PAM_MAX_RESP_SIZE
+#define PAM_MAX_RESP_SIZE 512
+#endif
 
-static char password_only_marker;
+static char scanned_marker;
+static char password_asked_marker;
+
+static bool has_marker(pam_handle_t *pamh, const char *name, const char *marker)
+{
+    const void *data = NULL;
+
+    return pam_get_data(pamh, name, &data) == PAM_SUCCESS && data == marker;
+}
+
+/* Whether this attempt handed a face scan to Gaze. Only then can a failure
+ * mean "Not recognized"; a declined, skipped or cancelled scan must not say so.
+ * sudo retries on the same handle, so every attempt sets it afresh. */
+static void set_scanned(pam_handle_t *pamh, bool scanned)
+{
+    (void)pam_set_data(pamh, FACEGATE_SCANNED_DATA, scanned ? &scanned_marker : NULL, NULL);
+}
 
 static void log_message(const char *message)
 {
@@ -46,6 +84,18 @@ static void log_message(const char *message)
 static const char *module_mode(int argc, const char **argv)
 {
     return argc > 0 && argv != NULL && argv[0] != NULL ? argv[0] : "consent";
+}
+
+/* The island to talk to: NAME from "hud_user=NAME", else the PAM user. */
+static uid_t hud_uid(int argc, const char **argv, uid_t user_uid)
+{
+    for (int index = 1; index < argc && argv != NULL; index++) {
+        if (argv[index] != NULL && strncmp(argv[index], "hud_user=", 9) == 0) {
+            const struct passwd *entry = getpwnam(argv[index] + 9);
+            return entry != NULL ? entry->pw_uid : (uid_t)-1;
+        }
+    }
+    return user_uid;
 }
 
 static bool local_request(pam_handle_t *pamh)
@@ -167,16 +217,134 @@ static bool send_all(int fd, const char *message, size_t length)
     return true;
 }
 
-static bool consent_from_hud(uid_t uid, const char *service, const char *username,
-                             bool *password_only)
+/* pam_faillock's policy: faillock.conf with its defaults. Options given on the
+ * pam_faillock line itself aren't seen; the result is only ever shown. */
+struct faillock_policy {
+    long long deny;
+    long long fail_interval;
+    long long unlock_time;
+    char dir[256];
+};
+
+/* pam_faillock's on-disk record (faillock.h). */
+struct faillock_record {
+    char source[52];
+    uint16_t reserved;
+    uint16_t status;
+    uint64_t time;
+};
+
+static char *trim(char *text)
+{
+    char *end;
+
+    while (isspace((unsigned char)*text))
+        text++;
+    end = text + strlen(text);
+    while (end > text && isspace((unsigned char)end[-1]))
+        *--end = '\0';
+    return text;
+}
+
+static void read_faillock_policy(struct faillock_policy *policy)
+{
+    char line[512];
+    FILE *conf;
+
+    policy->deny = 3;
+    policy->fail_interval = 900;
+    policy->unlock_time = 600;
+    (void)snprintf(policy->dir, sizeof(policy->dir), "%s", "/var/run/faillock");
+    conf = fopen(FACEGATE_FAILLOCK_CONF, "re");
+    if (conf == NULL)
+        return;
+    while (fgets(line, sizeof(line), conf) != NULL) {
+        char *key = line;
+        char *value;
+
+        line[strcspn(line, "#\n")] = '\0';
+        value = strchr(line, '=');
+        if (value == NULL)
+            continue;
+        *value++ = '\0';
+        key = trim(key);
+        value = trim(value);
+        if (strcmp(key, "dir") == 0)
+            (void)snprintf(policy->dir, sizeof(policy->dir), "%s", value);
+        else if (strcmp(key, "deny") == 0)
+            policy->deny = strtoll(value, NULL, 10);
+        else if (strcmp(key, "fail_interval") == 0)
+            policy->fail_interval = strtoll(value, NULL, 10);
+        else if (strcmp(key, "unlock_time") == 0)
+            policy->unlock_time = strcmp(value, "never") == 0 ? 0 : strtoll(value, NULL, 10);
+    }
+    fclose(conf);
+}
+
+/* When pam_faillock will accept a password again: 0 if it does now, -1 if
+ * only an administrator can unlock it. While locked it refuses every
+ * password, even the right one, so the island says so instead of asking. */
+static long long tally_locked_until(const struct faillock_policy *policy, const char *path,
+                                    long long now)
+{
+    struct faillock_record record;
+    struct stat metadata;
+    long long failures = 0;
+    long long latest = 0;
+    int fd;
+
+    if (policy->deny <= 0)
+        return 0;
+    fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0)
+        return 0;
+    if (fstat(fd, &metadata) != 0 || !S_ISREG(metadata.st_mode)) {
+        close(fd);
+        return 0;
+    }
+    while (read(fd, &record, sizeof(record)) == (ssize_t)sizeof(record)) {
+        const long long when = (long long)record.time;
+
+        if (!(record.status & FACEGATE_FAILLOCK_VALID))
+            continue;
+        if (when > latest)
+            latest = when;
+        if (now - when <= policy->fail_interval)
+            failures++;
+    }
+    close(fd);
+    if (failures < policy->deny)
+        return 0;
+    if (policy->unlock_time <= 0)
+        return -1;
+    return latest + policy->unlock_time > now ? latest + policy->unlock_time : 0;
+}
+
+static long long faillock_locked_until(const char *username, uid_t uid)
+{
+    struct faillock_policy policy;
+    char path[512];
+
+    read_faillock_policy(&policy);
+    /* pam_faillock never locks root unless configured to; don't guess. */
+    if (uid == 0 || strchr(username, '/') != NULL ||
+        snprintf(path, sizeof(path), "%s/%s", policy.dir, username) >= (int)sizeof(path))
+        return 0;
+    return tally_locked_until(&policy, path, (long long)time(NULL));
+}
+
+/* Send one request to the island and read its one-line answer to that same
+ * request into reply. The answer may hold a password: callers wipe it. */
+static bool ask_hud(uid_t uid, const char *phase, const char *service,
+                    const char *username, int seconds, bool retry,
+                    long long locked_until, char *reply, size_t size)
 {
     char id[64] = {0};
     char service_token[64] = {0};
     char username_token[64] = {0};
     char message[512];
-    char response[FACEGATE_MAX_MESSAGE + 1];
     char expected_id[96];
-    ssize_t received;
+    size_t received = 0;
     int length;
     int fd;
 
@@ -184,52 +352,234 @@ static bool consent_from_hud(uid_t uid, const char *service, const char *usernam
     safe_token(service, service_token, sizeof(service_token));
     safe_token(username, username_token, sizeof(username_token));
     length = snprintf(message, sizeof(message),
-                      "{\"id\":\"%s\",\"phase\":\"approval\","
+                      "{\"id\":\"%s\",\"phase\":\"%s\","
                       "\"service\":\"%s\",\"username\":\"%s\","
-                      "\"timeout_ms\":%d,\"pid\":%ld}\n",
-                      id, service_token, username_token, FACEGATE_CONSENT_SECONDS * 1000,
-                      (long)getpid());
-    if (length <= 0 || length >= (int)sizeof(message))
+                      "\"timeout_ms\":%d,\"error\":%s,\"locked_until\":%lld}\n",
+                      id, phase, service_token, username_token, seconds * 1000,
+                      retry ? "true" : "false", locked_until);
+    if (length <= 0 || length >= (int)sizeof(message) ||
+        snprintf(expected_id, sizeof(expected_id), "\"id\":\"%s\"", id) >=
+            (int)sizeof(expected_id))
         return false;
 
-    fd = connect_hud(uid, FACEGATE_CONSENT_SECONDS + 2);
+    fd = connect_hud(uid, seconds + 2);
     if (fd < 0)
         return false;
     if (!send_all(fd, message, (size_t)length)) {
         close(fd);
         return false;
     }
-    received = recv(fd, response, FACEGATE_MAX_MESSAGE, 0);
+    /* A stream socket may deliver the line in pieces. */
+    while (received + 1 < size && memchr(reply, '\n', received) == NULL) {
+        const ssize_t got = recv(fd, reply + received, size - 1 - received, 0);
+        if (got <= 0)
+            break;
+        received += (size_t)got;
+    }
     close(fd);
-    if (received <= 0)
+    reply[received] = '\0';
+    if (memchr(reply, '\n', received) == NULL || strstr(reply, expected_id) == NULL) {
+        explicit_bzero(reply, size);
         return false;
-    response[received] = '\0';
-    if (snprintf(expected_id, sizeof(expected_id), "\"id\":\"%s\"", id) >=
-        (int)sizeof(expected_id))
-        return false;
-    if (strstr(response, expected_id) == NULL)
-        return false;
-    *password_only = strstr(response, "\"reason\":\"password-only\"") != NULL;
-    return strstr(response, "\"approved\":true") != NULL;
+    }
+    return true;
 }
 
-static void notify_hud(uid_t uid, const char *phase, const char *result)
+static bool consent_from_hud(uid_t uid, const char *service, const char *username)
 {
-    char message[192];
-    int length;
-    int fd = connect_hud(uid, 1);
+    char reply[FACEGATE_MAX_MESSAGE + 1];
 
+    if (!ask_hud(uid, "approval", service, username, FACEGATE_CONSENT_SECONDS, false, 0,
+                 reply, sizeof(reply)))
+        return false;
+    return strstr(reply, "\"approved\":true") != NULL;
+}
+
+/* A scan is starting; the service tells the island which screen it is on. */
+static void notify_scanning(uid_t uid, const char *service)
+{
+    char service_token[64] = {0};
+    char message[128];
+    int length;
+    int fd;
+
+    safe_token(service, service_token, sizeof(service_token));
+    length = snprintf(message, sizeof(message),
+                      "{\"phase\":\"scanning\",\"service\":\"%s\"}\n", service_token);
+    if (length <= 0 || length >= (int)sizeof(message))
+        return;
+    fd = connect_hud(uid, 1);
     if (fd < 0)
         return;
-    if (result == NULL)
-        length = snprintf(message, sizeof(message), "{\"phase\":\"%s\"}\n", phase);
-    else
-        length = snprintf(message, sizeof(message),
-                          "{\"phase\":\"%s\",\"result\":\"%s\"}\n",
-                          phase, result);
-    if (length > 0 && length < (int)sizeof(message))
-        (void)send_all(fd, message, (size_t)length);
+    (void)send_all(fd, message, (size_t)length);
     close(fd);
+}
+
+static bool put_byte(char *out, size_t size, size_t *used, unsigned int byte)
+{
+    if (*used + 1 >= size)
+        return false;
+    out[(*used)++] = (char)byte;
+    return true;
+}
+
+static bool read_hex4(const char *text, unsigned int *value)
+{
+    *value = 0;
+    for (int index = 0; index < 4; index++) {
+        const char ch = text[index];
+        *value <<= 4;
+        if (ch >= '0' && ch <= '9')
+            *value |= (unsigned int)(ch - '0');
+        else if (ch >= 'a' && ch <= 'f')
+            *value |= (unsigned int)(ch - 'a' + 10);
+        else if (ch >= 'A' && ch <= 'F')
+            *value |= (unsigned int)(ch - 'A' + 10);
+        else
+            return false;
+    }
+    return true;
+}
+
+/* Decode the JSON string value of "key" as UTF-8, including \u escapes, so a
+ * password with any character reaches pam_unix exactly as it was typed.
+ * Anything malformed, or a NUL that would cut the password short, fails. */
+static bool json_string(const char *json, const char *key, char *out, size_t size)
+{
+    char needle[40];
+    const char *cursor;
+    size_t used = 0;
+    unsigned int code;
+
+    if (size == 0 ||
+        snprintf(needle, sizeof(needle), "\"%s\":\"", key) >= (int)sizeof(needle))
+        return false;
+    cursor = strstr(json, needle);
+    if (cursor == NULL)
+        return false;
+    cursor += strlen(needle);
+    while (*cursor != '"') {
+        if (*cursor == '\0')
+            return false;
+        if (*cursor != '\\') {
+            if (!put_byte(out, size, &used, (unsigned char)*cursor++))
+                return false;
+            continue;
+        }
+        cursor++;
+        switch (*cursor++) {
+        case '"': code = '"'; break;
+        case '\\': code = '\\'; break;
+        case '/': code = '/'; break;
+        case 'b': code = '\b'; break;
+        case 'f': code = '\f'; break;
+        case 'n': code = '\n'; break;
+        case 'r': code = '\r'; break;
+        case 't': code = '\t'; break;
+        case 'u':
+            if (!read_hex4(cursor, &code))
+                return false;
+            cursor += 4;
+            if (code >= 0xD800 && code <= 0xDBFF) {
+                unsigned int low;
+
+                if (cursor[0] != '\\' || cursor[1] != 'u' || !read_hex4(cursor + 2, &low) ||
+                    low < 0xDC00 || low > 0xDFFF)
+                    return false;
+                cursor += 6;
+                code = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00);
+            } else if (code >= 0xDC00 && code <= 0xDFFF) {
+                return false;
+            }
+            break;
+        default:
+            return false;
+        }
+        if (code == 0)
+            return false;
+        if (code < 0x80) {
+            if (!put_byte(out, size, &used, code))
+                return false;
+        } else if (code < 0x800) {
+            if (!put_byte(out, size, &used, 0xC0 | (code >> 6)) ||
+                !put_byte(out, size, &used, 0x80 | (code & 0x3F)))
+                return false;
+        } else if (code < 0x10000) {
+            if (!put_byte(out, size, &used, 0xE0 | (code >> 12)) ||
+                !put_byte(out, size, &used, 0x80 | ((code >> 6) & 0x3F)) ||
+                !put_byte(out, size, &used, 0x80 | (code & 0x3F)))
+                return false;
+        } else if (!put_byte(out, size, &used, 0xF0 | (code >> 18)) ||
+                   !put_byte(out, size, &used, 0x80 | ((code >> 12) & 0x3F)) ||
+                   !put_byte(out, size, &used, 0x80 | ((code >> 6) & 0x3F)) ||
+                   !put_byte(out, size, &used, 0x80 | (code & 0x3F))) {
+            return false;
+        }
+    }
+    out[used] = '\0';
+    return true;
+}
+
+/* The password typed into the island, or false to leave sudo its own prompt.
+ * retry makes the island say the last password was wrong. */
+static bool password_from_hud(uid_t uid, const char *service, const char *username,
+                              bool retry, char *password, size_t size)
+{
+    char reply[FACEGATE_MAX_MESSAGE + 1];
+    const long long locked_until = faillock_locked_until(username, uid);
+    long long seconds = FACEGATE_PASSWORD_SECONDS;
+    bool typed = false;
+
+    /* The island counts down, then offers the field: wait out the lock too. */
+    if (locked_until > 0)
+        seconds += locked_until - (long long)time(NULL);
+    if (seconds > FACEGATE_PASSWORD_MAX_SECONDS)
+        seconds = FACEGATE_PASSWORD_MAX_SECONDS;
+    if (ask_hud(uid, "password", service, username, (int)seconds, retry, locked_until,
+                reply, sizeof(reply)))
+        typed = json_string(reply, "password", password, size) && password[0] != '\0';
+    explicit_bzero(reply, sizeof(reply));
+    if (!typed)
+        explicit_bzero(password, size);
+    return typed;
+}
+
+static void notify_result(uid_t uid, const char *result)
+{
+    char message[64];
+    const int length = snprintf(message, sizeof(message),
+                                "{\"phase\":\"result\",\"result\":\"%s\"}\n", result);
+    int fd;
+
+    if (length <= 0 || length >= (int)sizeof(message))
+        return;
+    fd = connect_hud(uid, 1);
+    if (fd < 0)
+        return;
+    (void)send_all(fd, message, (size_t)length);
+    close(fd);
+}
+
+/* Whether the greeter was submitted with a password.  The greeter answers this
+ * prompt with what was typed, exactly as it answers pam_unix; a typed password
+ * is kept as PAM_AUTHTOK for pam_unix (try_first_pass) and pam_kwallet5. */
+static bool greeter_password_typed(pam_handle_t *pamh)
+{
+    const void *item = NULL;
+    char *response = NULL;
+    bool typed;
+
+    if (pam_get_item(pamh, PAM_AUTHTOK, &item) == PAM_SUCCESS && item != NULL)
+        return ((const char *)item)[0] != '\0';
+    if (pam_prompt(pamh, PAM_PROMPT_ECHO_OFF, &response, "Password: ") != PAM_SUCCESS ||
+        response == NULL)
+        return false;
+    typed = response[0] != '\0';
+    if (typed)
+        typed = pam_set_item(pamh, PAM_AUTHTOK, response) == PAM_SUCCESS;
+    explicit_bzero(response, strlen(response));
+    free(response);
+    return typed;
 }
 
 PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc,
@@ -238,39 +588,70 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc,
     const char *username;
     const char *service;
     const char *mode = module_mode(argc, argv);
-    const void *password_only_data = NULL;
-    bool password_only = false;
     uid_t uid;
     int context;
 
     (void)flags;
     context = user_context(pamh, &username, &uid, &service);
     if (context != PAM_SUCCESS)
-        return strcmp(mode, "consent") == 0 ? context : PAM_IGNORE;
+        return strcmp(mode, "consent") == 0 || strcmp(mode, "greeter") == 0 ? context
+                                                                            : PAM_IGNORE;
+    const uid_t hud = hud_uid(argc, argv, uid);
 
     if (strcmp(mode, "notify-failure") == 0) {
-        if (pam_get_data(pamh, FACEGATE_PASSWORD_ONLY_DATA,
-                         &password_only_data) != PAM_SUCCESS ||
-            password_only_data != &password_only_marker)
-            notify_hud(uid, "result", "failure");
+        char password[PAM_MAX_RESP_SIZE];
+
+        if (has_marker(pamh, FACEGATE_SCANNED_DATA, &scanned_marker))
+            notify_result(hud, "failure");
+        /* Polkit collects the password through its agent session and the
+         * greeter through its own field. sudo has nowhere else to type, so
+         * the island takes it and pam_unix (try_first_pass) checks it. sudo
+         * retries on the same handle, so a second ask means the first failed. */
+        if (strcmp(service, "sudo") == 0 && hud == uid &&
+            password_from_hud(uid, service, username,
+                              has_marker(pamh, FACEGATE_PASSWORD_ASKED_DATA, &password_asked_marker),
+                              password, sizeof(password))) {
+            (void)pam_set_item(pamh, PAM_AUTHTOK, password);
+            (void)pam_set_data(pamh, FACEGATE_PASSWORD_ASKED_DATA, &password_asked_marker, NULL);
+        }
+        explicit_bzero(password, sizeof(password));
         return PAM_IGNORE;
     }
     if (strcmp(mode, "notify-success") == 0) {
-        notify_hud(uid, "result", "success");
+        notify_result(hud, "success");
         return PAM_IGNORE;
     }
+    if (strcmp(mode, "greeter") == 0) {
+        set_scanned(pamh, false);
+        if (!local_request(pamh) || greeter_password_typed(pamh))
+            return PAM_AUTHINFO_UNAVAIL;
+        log_message("login submitted without a password; delegating to Gaze");
+        set_scanned(pamh, true);
+        notify_scanning(hud, service);
+        return PAM_SUCCESS;
+    }
+    if (strcmp(mode, "scanning") == 0) {
+        const bool local = local_request(pamh);
+
+        set_scanned(pamh, local);
+        if (local)
+            notify_scanning(hud, service);
+        return PAM_IGNORE;
+    }
+    set_scanned(pamh, false);
     if (strcmp(mode, "consent") != 0 || !local_request(pamh))
         return PAM_AUTHINFO_UNAVAIL;
+    /* After a wrong password, ask for the password again, not the face. */
+    if (has_marker(pamh, FACEGATE_PASSWORD_ASKED_DATA, &password_asked_marker))
+        return PAM_AUTHINFO_UNAVAIL;
 
-    if (!consent_from_hud(uid, service, username, &password_only)) {
-        if (password_only)
-            (void)pam_set_data(pamh, FACEGATE_PASSWORD_ONLY_DATA,
-                               &password_only_marker, NULL);
+    if (!consent_from_hud(uid, service, username)) {
         log_message("face scan was not approved; using password authentication");
         return PAM_AUTHINFO_UNAVAIL;
     }
     log_message("face scan approved; delegating authentication to Gaze");
-    notify_hud(uid, "scanning", NULL);
+    set_scanned(pamh, true);
+    notify_scanning(uid, service);
     return PAM_SUCCESS;
 }
 

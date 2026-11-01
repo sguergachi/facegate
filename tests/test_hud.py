@@ -5,7 +5,6 @@ from unittest import mock
 import cairo
 
 from facegate.edge_hud import APPROVAL, ISLAND_WIDTH, approval_view, face_scan_available, MARK_PROFILES, MarkModel, Spring, Tween, island_path, mark_values, paint_mark, ring_head
-from facegate.hud import approval_timeout_ms
 
 
 class HudRequestTests(unittest.TestCase):
@@ -18,6 +17,64 @@ class HudRequestTests(unittest.TestCase):
             for pulse in (0.25, 0.5, 1.0):
                 model.pulse = pulse
                 self.assertEqual(preview_look(model), steady)
+
+    @staticmethod
+    def preview():
+        """PreviewArea's step bookkeeping, without a widget."""
+        import types
+
+        import numpy
+
+        from facegate import edge_hud
+
+        preview = types.SimpleNamespace(
+            model=edge_hud.PreviewModel(), sparks=numpy.zeros((0, 6), numpy.float32),
+            random=numpy.random.default_rng(1), rim_length=900.0,
+        )
+        for name in ("set_progress", "set_state", "_complete", "_segment", "_shed"):
+            setattr(preview, name, types.MethodType(getattr(edge_hud.PreviewArea, name), preview))
+        return preview
+
+    def test_each_captured_pose_ignites_its_own_segment(self):
+        from facegate.edge_hud import ENROLL_STEPS, IGNITE_SECONDS, SPARKS_PER_STEP
+
+        preview = self.preview()
+        preview.set_progress(1 / ENROLL_STEPS)
+        self.assertEqual(preview.model.steps, 1)
+        self.assertEqual(len(preview.model.ignited), 1)
+        self.assertEqual(len(preview.sparks), SPARKS_PER_STEP)
+        # Repeats and regressions change nothing.
+        preview.set_progress(1 / ENROLL_STEPS)
+        preview.set_progress(0.0)
+        self.assertEqual(preview.model.steps, 1)
+        # Two poses landing together ignite one after the other.
+        preview.set_progress(3 / ENROLL_STEPS)
+        first, second, third = preview.model.ignited
+        self.assertAlmostEqual(third - second, IGNITE_SECONDS * 0.6)
+        preview.set_state("success")
+        self.assertEqual(preview.model.steps, ENROLL_STEPS)
+        self.assertEqual(len(preview.model.ignited), ENROLL_STEPS)
+
+    def test_segments_split_the_rim_with_gaps(self):
+        from facegate.edge_hud import ENROLL_STEPS, SEGMENT_GAP
+
+        preview = self.preview()
+        starts = [preview._segment(index) for index in range(ENROLL_STEPS)]
+        self.assertAlmostEqual(starts[0][0], SEGMENT_GAP / 2)
+        self.assertAlmostEqual(starts[-1][0] + starts[-1][1], 900.0 - SEGMENT_GAP / 2)
+        self.assertAlmostEqual(starts[1][0] - (starts[0][0] + starts[0][1]), SEGMENT_GAP)
+
+    def test_rim_points_run_clockwise_from_top_centre_with_inward_normals(self):
+        import math
+
+        from facegate.edge_hud import rim_point
+
+        width, height, radius = 300.0, 200.0, 20.0
+        length = 2 * (width - 2 * radius) + 2 * (height - 2 * radius) + math.tau * radius
+        expected = {0.0: (150, 0, 0, 1), length / 4: (300, 100, -1, 0), length / 2: (150, 200, 0, -1), 3 * length / 4: (0, 100, 1, 0)}
+        for distance, point in expected.items():
+            for got, want in zip(rim_point(0, 0, width, height, radius, distance), point):
+                self.assertAlmostEqual(got, want, places=4)
 
     def test_no_gaze_enrollment_skips_straight_to_password(self):
         import os
@@ -38,11 +95,6 @@ class HudRequestTests(unittest.TestCase):
         self.assertFalse(face_scan_available(username, Faces()))
         self.assertTrue(face_scan_available(username, Faces([("Face", 5, True, True)])))
         self.assertFalse(face_scan_available("a-different-user", Faces([("Face", 5, True, True)])))
-
-    def test_approval_timeout_is_clamped_without_an_int_base_error(self):
-        self.assertEqual(approval_timeout_ms(12_000), 12_000)
-        self.assertEqual(approval_timeout_ms(80_000), 30_000)
-        self.assertEqual(approval_timeout_ms(1), 1_000)
 
     def test_presence_mark_draws_all_interaction_states_and_blends(self):
         """The animated mark must never disappear because one state raises."""
@@ -198,19 +250,52 @@ class RequesterModuleTests(unittest.TestCase):
         import os
         import socket
 
-        from facegate.edge_hud import password_view, peer_pid, sudo_requester
+        from facegate.edge_hud import password_view, peer_credentials, sudo_requester
         from facegate.requester import command_line, read_process
 
         ours, theirs = socket.socketpair()
         with ours, theirs:
-            self.assertEqual(peer_pid(ours), os.getpid())
-            found = sudo_requester(ours, "sudo")
+            self.assertEqual(peer_credentials(ours), (os.getpid(), os.getuid()))
+        found = sudo_requester(os.getpid(), "sudo")
         self.assertEqual(found["command"], command_line(read_process(os.getpid())[2]))
         self.assertEqual(found["service"], "sudo")
         # A manual sudo password names the caller too, not "Password required".
         view = password_view(found)
         self.assertNotEqual(view.title, "Password required")
         self.assertEqual(view.command, found["command"])
+
+    def test_only_root_pam_may_ask_for_consent_or_a_password(self):
+        # Anything else running as you must not borrow the island to phish.
+        import socket
+
+        from facegate.edge_hud import EdgeHud, HudServer
+        from facegate.protocol import decode, encode
+
+        server = HudServer.__new__(HudServer)
+        server.hud = mock.Mock()
+        server.hud.reply = EdgeHud.reply
+        for phase, refused in (("password", {"password": None}), ("approval", {"approved": False})):
+            client, hud_side = socket.socketpair()
+            with client:
+                client.sendall(encode({"id": "x", "phase": phase, "service": "sudo"}))
+                with mock.patch("facegate.edge_hud.GLib.idle_add") as idle:
+                    server._read_one(hud_side)
+                idle.assert_not_called()
+                self.assertEqual(decode(client.recv(4096).strip()), {"id": "x", **refused, "reason": "untrusted"})
+
+    def test_agent_only_answers_polkitd(self):
+        from facegate.polkit_agent import FaceGatePolkitAgent
+
+        agent = FaceGatePolkitAgent.__new__(FaceGatePolkitAgent)
+        agent.queue, agent.active = [], None
+        agent.bus = mock.Mock()
+        agent.bus.call_sync.return_value.unpack.return_value = (":1.7",)
+        invocation = mock.Mock()
+        agent._on_call(None, ":1.99", "", "", "BeginAuthentication", mock.Mock(), invocation)
+        invocation.return_dbus_error.assert_called_once()
+        self.assertEqual(invocation.return_dbus_error.call_args[0][0], "org.freedesktop.DBus.Error.AccessDenied")
+        self.assertEqual(agent.queue, [])
+        self.assertTrue(agent._from_polkitd(":1.7"))
 
     def test_agent_prefers_the_person_at_the_desk(self):
         import os
@@ -231,6 +316,7 @@ class SudoPasswordTests(unittest.TestCase):
         hud = edge_hud.EdgeHud.__new__(edge_hud.EdgeHud)
         hud.pending = hud.enrollment = hud.expected_enrollment = hud.polkit = hud.view = None
         hud.sudo_password = hud.sudo_password_watch = hud.sudo_lock_timer = hud.dismiss_timeout = hud.enrollment_start = None
+        hud.sudo_password_id = ""
         hud.silenced = False
         hud.config_active = False
         hud.enabled = True
@@ -249,14 +335,14 @@ class SudoPasswordTests(unittest.TestCase):
         self.hud.handle_request({"phase": "password", "requester": {"app": "Konsole"}}, self.hud_side)
         on_password = self.hud.present_password.call_args[0][1]
         on_password("hunter2")
-        self.assertEqual(self.pam_side.recv(4096), b'{"password":"hunter2"}\n')
+        self.assertEqual(self.pam_side.recv(4096), b'{"id":"","password":"hunter2"}\n')
         self.assertIsNone(self.hud.sudo_password)
         self.edge_hud.GLib.source_remove(self.hud.dismiss_timeout)
 
     def test_escape_hands_sudo_back_to_its_own_prompt(self):
         self.hud.handle_request({"phase": "password"}, self.hud_side)
         self.edge_hud.EdgeHud.cancel(self.hud)
-        self.assertEqual(self.pam_side.recv(4096), b'{"password":null}\n')
+        self.assertEqual(self.pam_side.recv(4096), b'{"id":"","password":null}\n')
         self.hud.dismiss.assert_called_once()
 
     def test_a_locked_sudo_says_when_instead_of_taking_a_password(self):
@@ -281,7 +367,7 @@ class SudoPasswordTests(unittest.TestCase):
         hud._present = mock.Mock()
         hud.password_busy = mock.Mock()
         with mock.patch.object(self.edge_hud.GLib, "timeout_add"):
-            self.edge_hud.EdgeHud.present_password(hud, {"app": "paru"}, lambda _p: None, lambda: None, error=True)
+            self.edge_hud.EdgeHud.present_password(hud, {"app": "paru"}, lambda _p: None, error=True)
         hud.entry.set_text.assert_called_once_with("")
         hud.mark.set_state.assert_called_once_with("denied")
 
@@ -308,6 +394,54 @@ class SudoPasswordTests(unittest.TestCase):
         pam_side.close()
         self.hud.present_password.assert_not_called()
         self.hud.present_approval.assert_not_called()
+
+
+    def test_the_login_screen_island_only_reports_scans(self):
+        self.hud.greeter = True
+        self.hud.present_approval = mock.Mock()
+        self.hud.handle_request({"phase": "approval"}, self.hud_side)
+        self.assertEqual(self.pam_side.recv(4096), b'{"approved":false,"reason":"greeter"}\n')
+        pam_side, hud_side = socket.socketpair()
+        self.hud.handle_request({"phase": "password"}, hud_side)
+        self.assertEqual(pam_side.recv(4096), b'{"password":null,"reason":"greeter"}\n')
+        pam_side.close()
+        self.hud.present_approval.assert_not_called()
+        self.hud.present_password.assert_not_called()
+
+    def test_the_login_screen_welcomes_you_back(self):
+        self.hud.greeter = True
+        self.hud._present = mock.Mock()
+        with mock.patch.object(self.edge_hud.GLib, "timeout_add", return_value=0):
+            self.hud.present_result(True)
+            self.assertEqual(self.hud._present.call_args[0][0].title, "Welcome back")
+            # Escape silenced the last login attempt, not the next one.
+            self.hud.silenced = True
+            self.hud.present_scanning()
+        self.assertEqual(self.hud._present.call_args[0][0].title, "Looking for you")
+
+
+    def test_the_lock_screen_scan_says_it_is_unlocking(self):
+        self.hud.greeter = False
+        self.hud._present = mock.Mock()
+        self.hud.present_scanning = mock.Mock()
+        self.hud.handle_request({"phase": "scanning", "service": "kde-fingerprint"}, self.hud_side)
+        self.assertTrue(self.hud.unlocking)
+        with mock.patch.object(self.edge_hud.GLib, "timeout_add", return_value=0):
+            self.hud.present_result(False)
+        self.assertEqual(self.hud._present.call_args[0][0].detail, "Type your password to unlock.")
+        pam_side, hud_side = socket.socketpair()
+        self.hud.handle_request({"phase": "scanning", "service": "sudo"}, hud_side)
+        pam_side.close()
+        self.assertFalse(self.hud.unlocking)
+
+
+class LockScreenTests(unittest.TestCase):
+    def test_without_the_native_launcher_the_island_stays_under_the_lock(self):
+        from facegate import lockscreen
+
+        # Tests run under plain python3, which has no overlay grant to use.
+        self.assertIsNone(lockscreen._allow)
+        self.assertFalse(lockscreen.allow(mock.Mock()))
 
 
 class PreferencesTests(unittest.TestCase):

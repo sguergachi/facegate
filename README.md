@@ -76,8 +76,9 @@ model.
 The detailed component boundary, failure invariants, and known limitations are
 documented in [SECURITY.md](SECURITY.md).
 
-SDDM and the lock screen are deliberately untouched. FaceGate gates only `sudo`
-and polkit elevation; Gaze integrations for other surfaces remain separate.
+FaceGate gates `sudo` and polkit elevation and, if you opt in, shows the
+island for face sign-in on the lock screen and the login screen (see
+[Lock screen and login](#lock-screen-and-login)).
 
 ## Experience
 
@@ -87,9 +88,10 @@ and polkit elevation; Gaze integrations for other surfaces remain separate.
 - **Verified** closes the arc into a green ring before authentication continues.
 - **Not recognized** shakes red, then falls back to the normal password prompt.
 
-Press **Deny** to decline, or Escape to dismiss the island. `sudo` uses its
-terminal password prompt. For `pkexec`, Discover, and System Settings, the island
-becomes the password field after denial, timeout, or a failed match.
+Press **Deny** to decline, or Escape to dismiss the island. After denial,
+timeout, or a failed match, the island becomes the password field for `sudo`,
+`pkexec`, Discover, and System Settings. Escape on the password field hands
+`sudo` back to its terminal prompt.
 
 The visual behavior and spacing remain governed by [DESIGN.md](DESIGN.md).
 
@@ -106,6 +108,47 @@ before requesting deletion.
 Face names and sample counts come from Gaze. Gaze owns all template storage and
 authorization, so the same faces appear in `gaze list-faces` and its official
 tools.
+
+## Lock screen and login
+
+Setup offers face sign-in on both screens. Neither one has an **Approve**
+step, because sitting down at them is the request.
+
+- **Login (Plasma Login Manager):** press Enter with the password field empty.
+  The island drops from the top edge ("Looking for you"), Gaze checks your face,
+  and "Welcome back" signs you in. If you typed a password instead, FaceGate
+  passes it straight to the normal password stack without scanning, and
+  KWallet unlocks as usual. The greeter only calls PAM when the form is
+  submitted, so this needs the Enter press.
+
+  The island runs inside the greeter's own session, as its `plasmalogin` user
+  (`facegate-greeter.service`, started by `plasma-login-wayland.target`).
+  `/etc/pam.d/plasmalogin` gets a FaceGate block like the sudo one. The
+  `greeter` mode of the consent module only picks the path (typed password or
+  face), and `pam_gaze.so` alone decides. A face mismatch ends that attempt
+  without counting as a failed password in `pam_faillock`. A locked-out or
+  `nologin` account can't sign in by face.
+- **Lock screen:** KScreenLocker starts its biometric slot
+  (`/etc/pam.d/kde-fingerprint`) as soon as the screen locks. FaceGate's block
+  there tells your island to drop over the lock screen ("Looking for you"), and
+  Gaze decides. The island then says "Welcome back" and the screen unlocks.
+  You get one scan per lock; if it gives up while you're away, press Enter on
+  the empty password field to scan again.
+
+  KWin hides every other surface while the session is locked, unless the
+  executable is trusted with `kde_lockscreen_overlay_v1` (plasmashell holds the
+  same grant). That's why the island is a small root-owned native launcher,
+  `/usr/local/bin/facegate-hud`, that embeds Python and only ever runs
+  FaceGate's installed island. The grant lives in
+  `org.facegate.Island.desktop`. Trusting `/usr/bin/python3` instead would let
+  every Python program draw over the lock screen.
+
+After a face login, KWallet asks for your password once, because no password
+was typed for it to reuse.
+
+To turn face sign-in off, run `sudo rm /etc/facegate/greeter`, then restore
+`/etc/pam.d/plasmalogin`
+and `/etc/pam.d/kde-fingerprint` from their backups in `/etc/facegate/`.
 
 ## Install
 
@@ -130,7 +173,9 @@ Run setup as your normal user. It installs:
    colour-only; the installer finds the luma-only V4L2 node and sets it through
    Gaze's own `Config` API, keeping any IR camera you already chose. Gaze then
    matches colour and IR together, and the enrollment preview shows both.
-5. The onboarding experience in a top-edge island, where you can add a face.
+5. Optionally, face sign-in with the island at the lock screen and login
+   screen (see [Lock screen and login](#lock-screen-and-login)).
+6. The onboarding experience in a top-edge island, where you can add a face.
 
 `setup.sh` no longer installs, calls, or configures Howdy. If Howdy is already
 installed, the migration removes its active rules from the two PAM services but

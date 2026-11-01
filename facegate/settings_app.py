@@ -313,22 +313,27 @@ class Fade:
 
 
 class HelperRun:
-    """One facegate-faces run: its JSON events, then its exit status."""
+    """One long-lived facegate-faces process.
 
-    def __init__(self, args: list[str], on_event: Callable[[dict[str, Any]], None], on_exit: Callable[[int], None]) -> None:
-        self.args = args
+    Gaze's manage-faces action is ``auth_admin_keep`` on the D-Bus sender. A
+    new helper pid is a new sender, so this process stays up after approval.
+    """
+
+    def __init__(self, on_event: Callable[[dict[str, Any]], None], on_crash: Callable[[int], None]) -> None:
         self.on_event = on_event
-        self.on_exit = on_exit
+        self.on_crash = on_crash
         self.process: Gio.Subprocess | None = None
         self.stdin: Gio.OutputStream | None = None
 
     def start(self) -> None:
+        if self.process:
+            return
         flags = Gio.SubprocessFlags.STDIN_PIPE | Gio.SubprocessFlags.STDOUT_PIPE
         try:
-            self.process = Gio.Subprocess.new(helper_command(self.args), flags)
+            self.process = Gio.Subprocess.new(helper_command([]), flags)
         except GLib.Error as error:
             print("[facegate-settings] cannot start helper: %s" % error.message, file=sys.stderr)
-            GLib.idle_add(lambda: (self.on_exit(127), False)[1])
+            GLib.idle_add(lambda: (self.on_crash(127), False)[1])
             return
         self.stdin = self.process.get_stdin_pipe()
         self._read(Gio.DataInputStream.new(self.process.get_stdout_pipe()))
@@ -359,8 +364,7 @@ class HelperRun:
         except GLib.Error:
             status = 1
         self.process = self.stdin = None
-        # Let any last buffered events land before reporting the exit.
-        GLib.timeout_add(50, lambda: (self.on_exit(status), False)[1])
+        GLib.timeout_add(50, lambda: (self.on_crash(status), False)[1])
 
     def send(self, command: dict[str, Any]) -> None:
         if not self.stdin:
@@ -370,15 +374,20 @@ class HelperRun:
         except GLib.Error:
             pass
 
-    def stop(self) -> None:
-        process = self.process
+    def cancel(self) -> None:
+        """Ask an in-flight enroll to stop without throwing away the helper."""
+        self.send({"cmd": "cancel"})
+
+    def abort(self) -> None:
+        """Kill the helper while it is blocked on Gaze's polkit request."""
+        if self.process:
+            self.process.force_exit()
+
+    def close(self) -> None:
         if self.stdin:
-            # Ask Gaze to stop, then close the command channel so EOF is also a
-            # cancellation signal. A short fallback kills a wedged D-Bus
-            # client; gazed observes its sender vanish and releases the camera.
-            self.send({"cmd": "cancel"})
             self.stdin.close(None)
             self.stdin = None
+        process = self.process
         if process:
             GLib.timeout_add(1_500, self._force_exit_if_current, process)
 
@@ -386,11 +395,6 @@ class HelperRun:
         if self.process is process:
             process.force_exit()
         return False
-
-    def abort(self) -> None:
-        """Stop the helper while Gaze's polkit request is still pending."""
-        if self.process:
-            self.process.force_exit()
 
 
 class IslandBridge:
@@ -2171,9 +2175,6 @@ class PageStack(Gtk.Widget):
         widget.set_visible(False)
         self.pages[name] = Piece(widget, PANEL_WIDTH)
 
-    def get_visible_child_name(self) -> str | None:
-        return self.current
-
     def show(self, name: str, direction: int = 1, animate: bool = True) -> None:
         if name == self.current:
             return
@@ -2270,8 +2271,12 @@ class SettingsPanel(Gtk.Overlay):
         self.fresh_id: str | None = None
         self.result_timer: int | None = None
         self.island = IslandBridge(hud, self._cancel_enroll)
+        # One helper for the panel's life: Gaze keeps admin approval on its pid.
+        self.helper = HelperRun(self._on_helper_event, self._on_helper_crash)
+        self.helper.start()
         # One change at a time: an enrollment or a removal.
-        self.run: HelperRun | None = None
+        self.busy = False
+        self._op_event: Callable[[dict[str, Any]], None] | None = None
         # None, "approving" (polkit is asking), "scanning", or "failed".
         self.enroll_phase: str | None = None
         # Where the enrollment was started: "setup" (onboarding) or "manage".
@@ -2290,7 +2295,7 @@ class SettingsPanel(Gtk.Overlay):
         self.back.set_focus_on_click(False)
         self.back.set_can_target(False)
         self.back.update_property([Gtk.AccessibleProperty.LABEL], ["Back"])
-        self.back.connect("clicked", lambda *_: self._show_page("home", direction=-1))
+        self.back.connect("clicked", lambda *_: self._back())
         self.back_revealer = Gtk.Revealer()
         self.back_revealer.set_transition_type(Gtk.RevealerTransitionType.CROSSFADE)
         self.back_revealer.set_transition_duration(180)
@@ -2298,6 +2303,7 @@ class SettingsPanel(Gtk.Overlay):
         self.back_revealer.set_valign(Gtk.Align.START)
         self.back_revealer.set_margin_top(CLOSE_INSET)
         self.back_revealer.set_margin_start(CLOSE_INSET)
+        self.back_revealer.set_can_target(False)
         self.back_revealer.set_child(self.back)
 
         close = Gtk.Button(child=self._close_glyph())
@@ -2513,7 +2519,7 @@ class SettingsPanel(Gtk.Overlay):
         overlay.add_overlay(self.status)
 
     def _build_view_options(self) -> None:
-        _page, self.view_header, self.view_body = self._scroll_page("view", "View Options", "Choose where the island appears.", DisplayGlyph(HERO_SIZE))
+        _page, _header, self.view_body = self._scroll_page("view", "View Options", "Choose where the island appears.", DisplayGlyph(HERO_SIZE))
         self.view_body.set_margin_bottom(PAGE_MARGIN)
         self.choices: dict[tuple[str, str], ChoiceRow] = {}
         self._refresh_monitor_rows()
@@ -2530,8 +2536,24 @@ class SettingsPanel(Gtk.Overlay):
         elif page == "home":
             self._update_home()
         self.stack.show(page, direction, animate)
-        shown = page in ("manage", "view")
+        self._sync_back()
+
+    def _back(self) -> None:
+        """The persistent top-left chrome: onboarding steps, or home from a destination."""
+        if self.stack.current == "flow":
+            self._back_onboarding()
+        else:
+            self._show_page("home", direction=-1)
+
+    def _sync_back(self) -> None:
+        """Show Back with Close. A hidden overlay still eats clicks unless it cannot be targeted."""
+        page = self.stack.current
+        if page == "flow":
+            shown = self.flow.current not in (None, "welcome")
+        else:
+            shown = page in ("manage", "view")
         self.back.set_can_target(shown)
+        self.back_revealer.set_can_target(shown)
         self.back_revealer.set_reveal_child(shown)
 
     def _go(self, page: str, direction: int = 1) -> None:
@@ -2547,10 +2569,11 @@ class SettingsPanel(Gtk.Overlay):
             self.enroll_phase = None
             self.enroll_error = ""
             self.island.close()
-            if self.run:
+            if self.busy:
                 # Once scanning, let the helper ask gazed to release the camera
                 # cleanly. Before that it is waiting on Gaze's polkit request.
-                (self.run.stop if phase == "scanning" else self.run.abort)()
+                (self.helper.cancel if phase == "scanning" else self._abort_helper)()
+                self.busy = False
             self._go("privacy", direction=-1)
             return
         target = BACK_TARGETS.get(str(step))
@@ -2563,7 +2586,7 @@ class SettingsPanel(Gtk.Overlay):
 
     def _replay_onboarding(self) -> None:
         """Walk through the welcome again, in the same island."""
-        if self.run:
+        if self.busy:
             return
         self.enroll_phase = None
         self.flow.go("welcome", animate=False)
@@ -2595,7 +2618,7 @@ class SettingsPanel(Gtk.Overlay):
         if keyval == Gdk.KEY_Escape:
             # Back out one level at a time, unless a face is being added:
             # then Escape still stops it by closing, as it always has.
-            if self.stack.current in ("manage", "view") and not self.run:
+            if self.stack.current in ("manage", "view") and not self.busy:
                 self._show_page("home", direction=-1)
             else:
                 self.request_close()
@@ -2677,7 +2700,7 @@ class SettingsPanel(Gtk.Overlay):
         if not self.result_timer:
             self.header.mark.set_state(mark)
         self.header.detail_fade.to(detail)
-        busy = self.run is not None
+        busy = self.busy
         self.primary.set_text(button or "Waiting for approval…")
         self.primary.set_sensitive(bool(button) and (not busy or phase == "scanning"))
         (self.primary.add_css_class if phase == "scanning" and from_manage else self.primary.remove_css_class)("secondary")
@@ -2685,7 +2708,10 @@ class SettingsPanel(Gtk.Overlay):
 
         # Onboarding: the persistent mark and buttons follow the current step.
         flow, step = self.flow, self.flow.current
-        flow.set_back(self._back_onboarding if step != "welcome" else None)
+        # Chrome Back lives on the panel overlay (with Close). The flow's own
+        # Back stays hidden so a nested overlay cannot sit under it.
+        flow.set_back(None)
+        self._sync_back()
         title, body = self.setup_pieces
         if step == "welcome":
             flow.actions("Continue", lambda: self._go("how"))
@@ -2734,38 +2760,75 @@ class SettingsPanel(Gtk.Overlay):
 
     # Faces -----------------------------------------------------------------
 
+    def _on_helper_event(self, event: dict[str, Any]) -> None:
+        if self._op_event:
+            self._op_event(event)
+
+    def _on_helper_crash(self, status: int) -> None:
+        """The helper died. Restart it; a killed pid cannot keep polkit's grant."""
+        in_flight = self.busy
+        phase = self.enroll_phase
+        self.busy = False
+        self._op_event = None
+        if not self.closed:
+            self.helper.start()
+        if in_flight and phase in ("approving", "scanning"):
+            self.island.close()
+            message = "Not approved, so no face was added." if phase == "approving" else "The scan stopped unexpectedly."
+            self.enroll_phase, self.enroll_error = "failed", message
+            if self.enroll_from == "manage":
+                self.enroll_phase = None
+                self._say(message)
+            self._render()
+        elif in_flight:
+            self._say("Couldn't reach FaceGate's helper.")
+            self._render()
+        elif status != 0 and not self.faces_loaded:
+            self._say("Couldn't read your faces. Is FaceGate installed?")
+
+    def _abort_helper(self) -> None:
+        self.busy = False
+        self._op_event = None
+        self.helper.abort()
+
     def _load_faces(self) -> None:
         def on_event(event: dict[str, Any]) -> None:
             if event.get("event") == "faces":
                 self._show_faces(event.get("faces") or [])
-
-        def on_exit(status: int) -> None:
-            if status != 0:
+            elif event.get("event") == "error" and not self.faces_loaded:
                 self._say("Couldn't read your faces. Is FaceGate installed?")
 
-        HelperRun(["list"], on_event, on_exit).start()
+        self._op_event = on_event
+        self.helper.send({"cmd": "list"})
 
     def _show_faces(self, faces: list[dict[str, Any]]) -> None:
         self.faces_loaded = True
-        self.faces = [face for face in faces if isinstance(face, dict) and "id" in face]
+        self.faces = sorted(
+            [face for face in faces if isinstance(face, dict) and "id" in face],
+            key=lambda face: (-int(face.get("time") or 0), str(face.get("label") or "").casefold()),
+        )
         current = {str(face["id"]) for face in self.faces}
         for face_id, row in list(self.rows.items()):
             if face_id not in current:
                 del self.rows[face_id]
                 self._drop_row(row)
+        previous = None
         for face in self.faces:
             face_id = str(face["id"])
             if face_id in self.rows:
-                if not self.rows[face_id].editing:
-                    self.rows[face_id].set_name(face.get("label") or "Face")
-                continue
-            row = FaceRow(face, self._remove, self._rename)
-            self.rows[face_id] = row
-            self.rows_box.append(row)
-            # Reveal on the next frame so the row slides in rather than appearing.
-            GLib.idle_add(lambda row=row: (row.set_reveal_child(True), False)[1])
-            if face_id == self.fresh_id:
-                row.celebrate()
+                row = self.rows[face_id]
+                if not row.editing:
+                    row.set_name(face.get("label") or "Face")
+            else:
+                row = FaceRow(face, self._remove, self._rename)
+                self.rows[face_id] = row
+                self.rows_box.append(row)
+                # Reveal on the next frame so the row slides in rather than appearing.
+                GLib.idle_add(lambda row=row: (row.set_reveal_child(True), False)[1])
+                if face_id == self.fresh_id:
+                    row.celebrate()
+            self.rows_box.reorder_child_after(row, previous)
+            previous = row
         self._render()
 
     def _drop_row(self, row: FaceRow) -> None:
@@ -2779,57 +2842,51 @@ class SettingsPanel(Gtk.Overlay):
         GLib.timeout_add(ROW_REVEAL_MS + 40, detach)
 
     def _remove(self, row: FaceRow) -> None:
-        if self.run:
+        if self.busy:
             return
         self._say("")
         row.set_busy(True)
-        removed = False
+        self.busy = True
 
         def on_event(event: dict[str, Any]) -> None:
-            nonlocal removed
             if event.get("event") == "faces":
-                removed = True
+                self.busy = False
                 self._show_faces(event.get("faces") or [])
-
-        def on_exit(_status: int) -> None:
-            self.run = None
-            if not removed:
+                self._render()
+            elif event.get("event") == "error":
+                self.busy = False
                 row.set_busy(False)
                 self._say("Not approved, so the face was kept.")
-            self._render()
+                self._render()
 
-        self.run = HelperRun(["remove", str(row.face_id)], on_event, on_exit)
-        self.run.start()
+        self._op_event = on_event
+        self.helper.send({"cmd": "remove", "id": str(row.face_id)})
         self._render()
 
     def _rename(self, row: FaceRow, name: str, previous: str) -> None:
-        if self.run:
+        if self.busy:
             row.set_name(previous)
             self._say("Wait for the current change to finish.")
             return
         self._say("")
         row.set_busy(True)
-        renamed = False
-        failure = ""
+        self.busy = True
 
         def on_event(event: dict[str, Any]) -> None:
-            nonlocal renamed, failure
             if event.get("event") == "faces":
-                renamed = True
+                self.busy = False
+                row.set_busy(False)
                 self._show_faces(event.get("faces") or [])
+                self._render()
             elif event.get("event") == "error":
-                failure = str(event.get("message") or "")
-
-        def on_exit(_status: int) -> None:
-            self.run = None
-            row.set_busy(False)
-            if not renamed:
+                self.busy = False
+                row.set_busy(False)
                 row.set_name(previous)
-                self._say(failure or "Not approved, so the name was kept.")
-            self._render()
+                self._say(str(event.get("message") or "") or "Not approved, so the name was kept.")
+                self._render()
 
-        self.run = HelperRun(["rename", str(row.face_id), name], on_event, on_exit)
-        self.run.start()
+        self._op_event = on_event
+        self.helper.send({"cmd": "rename", "id": str(row.face_id), "label": name})
         self._render()
 
     # Enrollment --------------------------------------------------------------
@@ -2837,28 +2894,30 @@ class SettingsPanel(Gtk.Overlay):
     def _manage_primary(self) -> None:
         if self.enroll_phase == "scanning":
             self._cancel_enroll()
-        elif not self.run:
+        elif not self.busy:
             self._enroll("manage")
 
     def _enroll(self, origin: str) -> None:
-        if self.run:
+        if self.busy:
             return
         self.enroll_from = origin
         self.enroll_phase = "approving"
         self.enroll_error = ""
+        self.busy = True
         self._say("")
         if origin == "setup":
             self.flow.go("setup")
         self.island.expect()
-        self.run = HelperRun(["enroll"], self._on_enroll_event, self._on_enroll_exit)
-        self.run.start()
+        self._op_event = self._on_enroll_event
+        self.helper.send({"cmd": "enroll"})
         self._render()
 
     def _cancel_enroll(self) -> None:
-        if self.run and self.enroll_phase in ("approving", "scanning"):
-            # Closing stdin as well as sending cancel guarantees that a helper
-            # cannot keep a Gaze camera claim alive after the island closes.
-            self.run.stop()
+        if self.busy and self.enroll_phase in ("approving", "scanning"):
+            if self.enroll_phase == "scanning":
+                self.helper.cancel()
+            else:
+                self._abort_helper()
 
     def _on_enroll_event(self, event: dict[str, Any]) -> None:
         kind = event.get("event")
@@ -2873,13 +2932,14 @@ class SettingsPanel(Gtk.Overlay):
             elif kind == "arrow":
                 self.island.send({"arrow": event.get("arrow") or ""})
             elif kind == "mesh":
-                self.island.send({"mesh": event.get("points"), "w": event.get("w"), "h": event.get("h"), "space": event.get("space")})
+                self.island.send({"mesh": event.get("points"), "w": event.get("w"), "h": event.get("h"), "space": event.get("space"), "mark": event.get("mark"), "axis": event.get("axis")})
             elif kind == "hint":
                 self.island.send({"hint": event.get("text")})
             else:
                 self.island.send({"progress": event.get("value")})
             return
         if kind == "added":
+            self.busy = False
             self.island.send({"result": "success"})
             self.island.close()
             self.enroll_phase = None
@@ -2891,10 +2951,12 @@ class SettingsPanel(Gtk.Overlay):
                 self._flash_mark("success")
                 self._say("%s added." % (event.get("label") or "Face"), good=True)
         elif kind == "cancelled":
+            self.busy = False
             self.island.close()
             self.enroll_phase = "failed" if self.enroll_from == "setup" else None
             self.enroll_error = "You cancelled the scan."
         elif kind == "error":
+            self.busy = False
             message = str(event.get("message") or "Something went wrong.")
             self.island.send({"result": "failure", "detail": message})
             self.island.close()
@@ -2902,18 +2964,6 @@ class SettingsPanel(Gtk.Overlay):
             if self.enroll_from == "manage":
                 self.enroll_phase = None
                 self._flash_mark("failure")
-                self._say(message)
-        self._render()
-
-    def _on_enroll_exit(self, _status: int) -> None:
-        self.run = None
-        self.island.close()
-        if self.enroll_phase in ("approving", "scanning"):
-            # The helper ended before a result: approval was declined or failed.
-            message = "Not approved, so no face was added." if self.enroll_phase == "approving" else "The scan stopped unexpectedly."
-            self.enroll_phase, self.enroll_error = "failed", message
-            if self.enroll_from == "manage":
-                self.enroll_phase = None
                 self._say(message)
         self._render()
 
@@ -2928,8 +2978,11 @@ class SettingsPanel(Gtk.Overlay):
         self.closed = True
         self.monitors.disconnect(self.monitors_changed)
         self.island.close()
-        if self.run:
-            (self.run.stop if self.enroll_phase == "scanning" else self.run.abort)()
+        if self.enroll_phase == "scanning":
+            self.helper.cancel()
+            self.helper.close()
+        else:
+            self.helper.abort()
 
 
 def main() -> int:

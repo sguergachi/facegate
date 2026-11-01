@@ -16,6 +16,7 @@ class HelperCommandTests(unittest.TestCase):
             self.assertEqual(settings_app.helper_command(["remove", "Face 2"]), [settings_app.FACES_HELPER, "remove", "Face 2"])
             self.assertEqual(settings_app.helper_command(["rename", "Face", "Glasses"]), [settings_app.FACES_HELPER, "rename", "Face", "Glasses"])
             self.assertEqual(settings_app.helper_command(["enroll"]), [settings_app.FACES_HELPER, "enroll"])
+            self.assertEqual(settings_app.helper_command([]), [settings_app.FACES_HELPER])
 
     def test_development_override_receives_the_same_arguments(self):
         with mock.patch.dict("os.environ", {"FACEGATE_FACES_HELPER": "python3 /tmp/fake.py"}):
@@ -164,6 +165,7 @@ class GeometryTests(unittest.TestCase):
 
     def test_each_later_onboarding_story_step_has_a_back_target(self):
         self.assertEqual(settings_app.BACK_TARGETS, {"how": "welcome", "privacy": "how", "added": "privacy"})
+        self.assertIsNone(settings_app.BACK_TARGETS.get("welcome"))
 
     def test_first_face_explains_the_password_bootstrap(self):
         title, body, detail = settings_app.setup_auth_copy(True, False)
