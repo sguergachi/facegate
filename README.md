@@ -1,7 +1,7 @@
 # FaceGate
 
 <p align="center">
-  <img src="media/facegate-demo.gif" alt="FaceGate island on a KDE desktop: sudo approved by face, then a second attempt where the face isn't recognized and the password is used instead" width="960">
+  <img src="media/facegate-walkthrough.gif" alt="FaceGate island on a KDE desktop: sudo approved by face, then a second attempt where the face isn't recognized and the password is used instead" width="960">
 </p>
 
 FaceGate is a Face ID-style consent interface for
